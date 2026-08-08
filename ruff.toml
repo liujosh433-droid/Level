@@ -1,0 +1,44 @@
+line-length = 100
+target-version = "py312"
+extend-exclude = [".venv", "build", "dist", "node_modules"]
+
+[lint]
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "I",     # isort
+    "B",     # flake8-bugbear
+    "N",     # pep8-naming
+    "UP",    # pyupgrade
+    "SIM",   # flake8-simplify
+    "RET",   # flake8-return
+    "TID",   # flake8-tidy-imports
+    "ANN",   # flake8-annotations
+    "ASYNC", # flake8-async
+    "RUF",   # ruff-specific
+    "S",     # flake8-bandit (security)
+    "PL",    # pylint
+]
+ignore = [
+    "ANN401",  # allow Any where explicitly desired
+    "PLR0913", # allow more than 5 function args (agent constructors need it)
+    "PLR2004", # allow magic values in narrow cases
+    "S101",    # assert is fine
+    "S603",    # subprocess without shell=True is fine
+    "E501",    # line length handled by formatter
+]
+
+[lint.per-file-ignores]
+"tests/**/*.py" = ["S", "PLR2004", "ANN"]
+"scripts/**/*.py" = ["S", "ANN"]
+
+[lint.isort]
+combine-as-imports = true
+known-first-party = ["level_core", "level_api", "level_jobs"]
+
+[format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "lf"

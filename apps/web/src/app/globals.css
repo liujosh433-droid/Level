@@ -1,0 +1,84 @@
+:root {
+  --ink: #0b1419;
+  --depth: #12242e;
+  --horizon: #1e3d4a;
+  --mist: #c5d5db;
+  --foam: #eef4f6;
+  --signal: #3db8a0;
+  --signal-deep: #2a8f7c;
+  --warn: #e8a54b;
+  --danger: #d45d5d;
+  --radius: 2px;
+  --font-display: "Fraunces", Georgia, serif;
+  --font-body: "Source Sans 3", "Helvetica Neue", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  min-height: 100%;
+  background: var(--ink);
+  color: var(--foam);
+  font-family: var(--font-body);
+  font-size: 17px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+}
+
+/* Atmospheric wash — cool depth, not flat black */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background:
+    radial-gradient(ellipse 80% 55% at 70% -10%, rgba(61, 184, 160, 0.18), transparent 55%),
+    radial-gradient(ellipse 60% 50% at 0% 100%, rgba(30, 61, 74, 0.9), transparent 50%),
+    linear-gradient(165deg, #0b1419 0%, #12242e 45%, #0e1a22 100%);
+  animation: wash 18s ease-in-out infinite alternate;
+}
+
+@keyframes wash {
+  from {
+    filter: hue-rotate(0deg) brightness(1);
+  }
+  to {
+    filter: hue-rotate(8deg) brightness(1.05);
+  }
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes pulse-line {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 0.9;
+  }
+}

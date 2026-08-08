@@ -1,0 +1,187 @@
+# Bias taxonomy — the definitions the Judge agent uses to score turns and
+# the Challenger uses to formulate targeted follow-up questions.
+#
+# Kept intentionally small (15 categories) — a good taxonomy is easier to
+# reason over than a sprawling one. Descriptions are curated toward personal
+# decisions (caregiving, work-life, relationships) rather than organizational
+# or investment contexts.
+
+- category: confirmation
+  name: Confirmation bias
+  short_description: >
+    Seeking or noticing evidence that supports what you already believe while
+    dismissing or discounting evidence that doesn't.
+  detection_hint: >
+    User cites only supporting anecdotes; dismisses counter-examples with
+    phrases like "but that was different" without engaging the specifics.
+  challenger_prompt: >
+    Ask what specific evidence would change their mind. If they can't name
+    any, note that observation gently and ask why.
+
+- category: anchoring
+  name: Anchoring
+  short_description: >
+    Overweighting the first option, number, or framing considered — even
+    when subsequent information should shift the answer.
+  detection_hint: >
+    User keeps returning to the first option they mentioned; other options
+    are considered only in reference to how they compare to the first.
+  challenger_prompt: >
+    Ask them to describe the decision as if the first option weren't
+    available at all — what would they choose then?
+
+- category: sunk_cost
+  name: Sunk cost fallacy
+  short_description: >
+    Continuing to invest in a course of action because of what has already
+    been spent, rather than what the future best choice is.
+  detection_hint: >
+    Reasoning includes phrases like "we've already put so much into this" or
+    "it would be a waste to stop now".
+  challenger_prompt: >
+    Ask what they would decide if they were making this call fresh today,
+    with no history and no prior investment.
+
+- category: status_quo
+  name: Status quo bias
+  short_description: >
+    Preferring the current state of affairs, treating change as riskier than
+    the risks of not changing.
+  detection_hint: >
+    Downsides of change are enumerated in detail; downsides of staying the
+    same are dismissed or under-specified.
+  challenger_prompt: >
+    Ask them to describe the concrete costs of doing nothing over the next
+    twelve months.
+
+- category: optimism
+  name: Optimism bias
+  short_description: >
+    Underestimating how bad the downside is, or how likely it is to happen.
+  detection_hint: >
+    User's downside scenarios are vague or brief while upside scenarios are
+    concrete and detailed.
+  challenger_prompt: >
+    Ask them to describe, concretely and in first person, what a bad outcome
+    six months from now would actually look like.
+
+- category: planning_fallacy
+  name: Planning fallacy
+  short_description: >
+    Underestimating how much time, effort, or money a plan will require.
+  detection_hint: >
+    User's timelines are the best-case; there's no explicit slack or backup
+    plan; past similar efforts are not compared to.
+  challenger_prompt: >
+    Ask them to name the last three plans of similar scope and how their
+    actual time and effort compared to their initial estimate.
+
+- category: recency
+  name: Recency bias
+  short_description: >
+    Overweighting things that happened recently at the expense of the longer
+    pattern.
+  detection_hint: >
+    User's reasoning leans heavily on events from the last week or two while
+    ignoring or minimizing longer-standing patterns.
+  challenger_prompt: >
+    Ask them what pattern they'd see if they zoomed out to the last twelve
+    months rather than the last two weeks.
+
+- category: availability
+  name: Availability heuristic
+  short_description: >
+    Overweighting outcomes that come to mind easily (vivid, recent,
+    emotionally charged) rather than those that are actually more common.
+  detection_hint: >
+    User's fears are shaped by a single vivid story (news, an acquaintance's
+    experience) rather than by base rates.
+  challenger_prompt: >
+    Ask what the actual base rate is for the feared outcome, if they can
+    estimate it — and how that compares to the vivid case that's driving
+    the fear.
+
+- category: negativity
+  name: Negativity bias
+  short_description: >
+    Overweighting worst-case outcomes and treating them as more likely than
+    they actually are.
+  detection_hint: >
+    User treats a worst-case scenario as the default outcome and requires
+    positive evidence to displace it.
+  challenger_prompt: >
+    Ask them to describe a realistic median outcome — not the best, not the
+    worst — and how they'd feel about it.
+
+- category: identity_protection
+  name: Identity protection
+  short_description: >
+    Rejecting evidence that would require updating one's self-image (e.g.
+    "I'm the parent who always shows up") even when the evidence is strong.
+  detection_hint: >
+    User bristles at or dismisses observations that conflict with a stated
+    identity, without engaging the specifics.
+  challenger_prompt: >
+    Name the identity claim gently and ask whether the current decision is
+    being driven by what serves them best or by what protects that identity.
+
+- category: projection
+  name: Projection
+  short_description: >
+    Assuming others share your priorities, information, or emotional
+    responses when they may not.
+  detection_hint: >
+    User makes confident claims about what someone else will think, feel, or
+    do without evidence of having asked or checked recently.
+  challenger_prompt: >
+    Ask what makes them confident the other person sees this the same way,
+    and when they last checked directly.
+
+- category: framing
+  name: Framing effect
+  short_description: >
+    The way a decision is phrased biases the choice — the same trade-off
+    reads differently in gain vs. loss framing.
+  detection_hint: >
+    User consistently frames one option as a "loss" and another as a "gain"
+    when both involve trade-offs on both dimensions.
+  challenger_prompt: >
+    Restate the decision in the opposite framing (loss becomes gain, gain
+    becomes loss) and ask if that changes anything.
+
+- category: social_desirability
+  name: Social desirability
+  short_description: >
+    Choosing based on what looks good to others (or what will be socially
+    approved) rather than what serves you.
+  detection_hint: >
+    User's reasoning includes multiple references to what "people would
+    think" or how the choice would be perceived.
+  challenger_prompt: >
+    Ask what they would choose if nobody would ever know which option they
+    picked.
+
+- category: loneliness_urgency
+  name: Loneliness urgency
+  short_description: >
+    Making decisions under acute emotional state (exhaustion, loneliness,
+    fear) that would look different from a rested state.
+  detection_hint: >
+    User's stated urgency is disproportionate to the actual timeline; the
+    decision is framed as needing to happen "right now" without a concrete
+    external deadline.
+  challenger_prompt: >
+    Ask what the actual deadline is (external, not internal) and whether
+    this decision could wait a week.
+
+- category: catastrophizing
+  name: Catastrophizing
+  short_description: >
+    Inflating manageable risks into disasters; treating a bad outcome as an
+    ending rather than a setback.
+  detection_hint: >
+    User uses absolute language ("everything will fall apart", "I'll never
+    recover") to describe a specific but bounded downside.
+  challenger_prompt: >
+    Ask them to describe the specific concrete consequences of the bad
+    outcome and how long each would actually last.

@@ -1,0 +1,5 @@
+project_id            = "project-c31bdcdc-f293-47c2-a4c"
+region                = "us-central1"
+env                   = "dev"
+enable_vector_search  = true   # early real testing — ~$30–90/mo while up
+enable_model_armor    = true

@@ -21,6 +21,44 @@ import styles from "./profile.module.css";
 
 type ChatLine = { role: "you" | "level"; text: string };
 
+function ManifestoSummary({
+  text,
+  fallbackItems,
+}: {
+  text: string;
+  fallbackItems: string[];
+}) {
+  const lines = text
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  let bullets = lines
+    .filter((l) => l.startsWith("•") || l.startsWith("-"))
+    .map((l) => l.replace(/^[•\-]\s*/, ""));
+  // Older paragraph-style manifesto → use priority bullets instead of one long line.
+  if (bullets.length === 0 && fallbackItems.length > 0) {
+    bullets = fallbackItems.slice(0, 3);
+  }
+  const intro =
+    lines.find((l) => !l.startsWith("•") && !l.startsWith("-") && !l.includes(" — ")) ||
+    "Right now it looks like you prioritize";
+
+  if (bullets.length === 0) {
+    return <p className={styles.manifesto}>{text}</p>;
+  }
+
+  return (
+    <div className={styles.manifesto}>
+      <p className={styles.manifestoIntro}>{intro.replace(/:$/, "")}</p>
+      <ul className={styles.manifestoList}>
+        {bullets.map((b) => (
+          <li key={b}>{b}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function ProfileInner() {
   const router = useRouter();
   const [userId, setUserId] = useState("");
@@ -34,23 +72,30 @@ function ProfileInner() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    let cancelled = false;
     void (async () => {
       try {
-        const me = await fetchMe();
+        // Navigate paints first; identity + profile load together in the background.
+        const [me, nextProfile] = await Promise.all([fetchMe(), fetchProfile()]);
+        if (cancelled) return;
         setUserId(me.user_id);
         setDisplayName(me.display_name);
         setGoogleConnected(Boolean(me.google_connected));
-        setProfile(await fetchProfile());
+        setProfile(nextProfile);
       } catch (err) {
+        if (cancelled) return;
         if (err instanceof AuthError) {
           router.replace("/welcome");
           return;
         }
         setStatus(err instanceof Error ? err.message : String(err));
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     })();
+    return () => {
+      cancelled = true;
+    };
   }, [router]);
 
   async function setBullet(bulletId: string, next: "accepted" | "rejected") {
@@ -150,11 +195,15 @@ function ProfileInner() {
       >
         <h1 className={styles.title}>Your Priorities</h1>
         <p className={styles.sub}>
-          Level reads your real week and takes a step further — not just listing events, but what
-          they say you protect. Keep what’s true; toss what isn’t.
+          Let Level learn your priorities from your schedule and past chats.
         </p>
 
-        {profile?.manifesto && <p className={styles.manifesto}>{profile.manifesto}</p>}
+        {profile?.manifesto || bullets.length > 0 ? (
+          <ManifestoSummary
+            text={profile?.manifesto || ""}
+            fallbackItems={bullets.map((b) => b.text)}
+          />
+        ) : null}
 
         {loading ? (
           <p className={styles.meta}>Loading your priorities…</p>
@@ -183,7 +232,7 @@ function ProfileInner() {
                 <div className={styles.row}>
                   <button
                     type="button"
-                    className={styles.ghost}
+                    className={styles.keep}
                     disabled={busy || b.status === "accepted" || b.status === "edited"}
                     onClick={() => void setBullet(b.bullet_id, "accepted")}
                   >
@@ -191,7 +240,7 @@ function ProfileInner() {
                   </button>
                   <button
                     type="button"
-                    className={styles.ghost}
+                    className={styles.notMe}
                     disabled={busy}
                     onClick={() => void setBullet(b.bullet_id, "rejected")}
                   >

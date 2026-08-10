@@ -89,7 +89,7 @@ class Settings(BaseSettings):
     # Observability
     otel_exporter: OtelExporter = Field(default=OtelExporter.CONSOLE, alias="LEVEL_OTEL_EXPORTER")
 
-    # Google OAuth (end-user Calendar / Drive)
+    # Google OAuth (end-user Calendar)
     google_oauth_client_id: str = Field(default="", alias="GOOGLE_OAUTH_CLIENT_ID")
     google_oauth_client_secret: str = Field(default="", alias="GOOGLE_OAUTH_CLIENT_SECRET")
     google_oauth_redirect_uri: str = Field(

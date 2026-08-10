@@ -192,7 +192,6 @@ export function storeUserId(_userId: string): void {
 export function clearLocalSession(): void {
   if (typeof window === "undefined") return;
   localStorage.removeItem("level_user_id");
-  localStorage.removeItem("level_include_drive");
 }
 
 export type GoogleSyncStatus = {

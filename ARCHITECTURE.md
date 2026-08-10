@@ -21,7 +21,7 @@ Level's behavior emerges from three loops that run at very different cadences.
 ### 1. Ingestion loop (every 15 min)
 
 ```
-Cloud Scheduler ─► Cloud Run Job ─► Google Calendar / Drive / Gmail delta pull
+Cloud Scheduler ─► Cloud Run Job ─► Google Calendar / Gmail delta pull
                                           │
                                           ▼
                                   Model Armor inbound
@@ -146,7 +146,7 @@ All model IDs are env-configurable ([`.env.example`](./.env.example)). The Gemin
 
 Model Armor sits at **two points**:
 
-1. **Inbound**, on every ingested signal before it hits the vector store. Templates: `level-inbound`. Actions: PII scrubbing, prompt-injection detection, tool-poisoning block. This protects against a malicious calendar invite or Drive doc trying to hijack Level's agents downstream.
+1. **Inbound**, on every ingested signal before it hits the vector store. Templates: `level-inbound`. Actions: PII scrubbing, prompt-injection detection, tool-poisoning block. This protects against a malicious calendar invite trying to hijack Level's agents downstream.
 2. **Outbound**, on every Challenger response before it's streamed to the user. Templates: `level-outbound`. Actions: enforce the warm-adversarial tone contract, block hallucinated citations (Challenger must ground every claim in a `fact_id` — output is rejected if it references facts not in retrieval results), block leaking of another user's data.
 
 Model Armor policy YAML lives in [`infra/model_armor/policies.yaml`](./infra/model_armor/policies.yaml).

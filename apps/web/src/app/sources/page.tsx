@@ -1,12 +1,11 @@
 "use client";
 
-import { FormEvent, Suspense, useEffect, useState } from "react";
+import Image from "next/image";
+import { FormEvent, Suspense, useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
 import { AuthError, ensureSession, fetchGoogleSyncStatus, fetchMe, getApiBase } from "@/lib/api";
 import styles from "./sources.module.css";
-
-const DRIVE_KEY = "level_include_drive";
 
 const CHATGPT_STEPS = [
   "Open ChatGPT and tap your profile picture.",
@@ -39,7 +38,6 @@ function SourcesInner() {
   const [email, setEmail] = useState<string | null>(null);
   const [googleConnected, setGoogleConnected] = useState(false);
   const [canWriteCalendar, setCanWriteCalendar] = useState(true);
-  const [includeDrive, setIncludeDrive] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [phase, setPhase] = useState<Phase>("connect");
@@ -48,11 +46,8 @@ function SourcesInner() {
   const [syncElapsed, setSyncElapsed] = useState(0);
   const [syncProgress, setSyncProgress] = useState(10);
   const [syncLabel, setSyncLabel] = useState(SYNC_BEATS[0].label);
-
-  useEffect(() => {
-    const stored = localStorage.getItem(DRIVE_KEY);
-    if (stored != null) setIncludeDrive(stored === "1");
-  }, []);
+  const [exportName, setExportName] = useState<string | null>(null);
+  const exportInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     const fromOAuth = params.get("connected") === "1";
@@ -153,39 +148,14 @@ function SourcesInner() {
     };
   }, [params, router]);
 
-  function toggleDrive(next: boolean) {
-    setIncludeDrive(next);
-    localStorage.setItem(DRIVE_KEY, next ? "1" : "0");
-  }
-
   async function connectGoogle() {
     setBusy(true);
     setStatus(null);
     try {
       await ensureSession();
-      const drive = includeDrive ? "1" : "0";
-      window.location.href = `${getApiBase()}/v1/auth/google/start?include_drive=${drive}`;
+      window.location.href = `${getApiBase()}/v1/auth/google/start`;
     } catch (err) {
       setStatus(err instanceof Error ? err.message : String(err));
-      setBusy(false);
-    }
-  }
-
-  async function syncDrive() {
-    setBusy(true);
-    setStatus(null);
-    try {
-      await ensureSession();
-      const res = await fetch(`${getApiBase()}/v1/sources/google/drive`, {
-        method: "POST",
-        credentials: "include",
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
-      setStatus(data.detail || "Drive notes added.");
-    } catch (err) {
-      setStatus(err instanceof Error ? err.message : String(err));
-    } finally {
       setBusy(false);
     }
   }
@@ -245,17 +215,25 @@ function SourcesInner() {
               Connect Google Calendar so Level can see your usual week.
             </p>
 
-            <label className={styles.check}>
-              <input
-                type="checkbox"
-                checked={includeDrive}
-                onChange={(e) => toggleDrive(e.target.checked)}
-              />
-              <span>
-                Also include related Google Drive notes
-                <small>Optional — only files tied to your schedule</small>
-              </span>
-            </label>
+            <aside className={styles.consentTip}>
+              <div className={styles.consentCopy}>
+                <p className={styles.consentTitle}>On Google’s next screen</p>
+                <p>
+                  Check the box that gives <strong>Level</strong> access to your{" "}
+                  <strong>Calendar</strong> — then tap <strong>Continue</strong>. If it’s unchecked,
+                  sync can’t see your week.
+                </p>
+              </div>
+              <figure className={styles.consentArt}>
+                <Image
+                  src="/google-consent-tip.jpg"
+                  alt="Example: check Calendar access for Level, then Continue"
+                  width={1280}
+                  height={720}
+                  className={styles.consentImg}
+                />
+              </figure>
+            </aside>
 
             <button
               type="button"
@@ -319,28 +297,17 @@ function SourcesInner() {
             <div className={styles.addonList}>
               <div className={styles.addon}>
                 <div>
-                  <h2>Google Drive</h2>
-                  <p>Notes and docs tied to your schedule.</p>
-                </div>
-                <button
-                  type="button"
-                  className={styles.ghost}
-                  disabled={busy || !googleConnected}
-                  onClick={() => void syncDrive()}
-                >
-                  {busy ? "Working…" : "Add Drive"}
-                </button>
-              </div>
-
-              <div className={styles.addon}>
-                <div>
                   <h2>ChatGPT</h2>
                   <p>Past hard-choice chats, if you’ve used them.</p>
                 </div>
                 <button
                   type="button"
                   className={styles.ghost}
-                  onClick={() => setShowHowto((v) => !v)}
+                  onClick={() => {
+                    setShowHowto((v) => !v);
+                    setExportName(null);
+                    if (exportInputRef.current) exportInputRef.current.value = "";
+                  }}
                 >
                   {showHowto ? "Hide" : "Add export"}
                 </button>
@@ -358,18 +325,38 @@ function SourcesInner() {
                   ))}
                 </ol>
                 <form onSubmit={onChatGPT} className={styles.upload}>
-                  <label className={styles.fileLabel}>
-                    Choose the file from your email
-                    <input
-                      name="export"
-                      type="file"
-                      accept=".zip,.json,application/zip,application/json"
-                      required
-                    />
-                  </label>
-                  <button type="submit" className={styles.primary} disabled={busy}>
-                    {busy ? "Uploading…" : "Upload"}
-                  </button>
+                  <input
+                    ref={exportInputRef}
+                    id="chatgpt-export"
+                    name="export"
+                    type="file"
+                    className={styles.fileInput}
+                    accept=".zip,.json,application/zip,application/json"
+                    required
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      setExportName(file ? file.name : null);
+                    }}
+                  />
+                  <div className={styles.uploadRow}>
+                    <button
+                      type="button"
+                      className={styles.filePick}
+                      onClick={() => exportInputRef.current?.click()}
+                    >
+                      {exportName ? "Change file" : "Choose file"}
+                    </button>
+                    <button
+                      type="submit"
+                      className={styles.uploadBtn}
+                      disabled={busy || !exportName}
+                    >
+                      {busy ? "Uploading…" : "Upload"}
+                    </button>
+                  </div>
+                  <p className={styles.fileName}>
+                    {exportName ? exportName : "Pick the .zip or .json from your export email"}
+                  </p>
                 </form>
               </div>
             )}

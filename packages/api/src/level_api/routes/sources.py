@@ -25,7 +25,7 @@ from level_core.calendar.sync_state import CalendarSyncStore
 from level_core.config import get_settings
 from level_core.guardrails.inbound import InboundGuardrail
 from level_core.ingest.chatgpt_export import parse_chatgpt_export
-from level_core.ingest.google_live import fetch_drive_signals, pull_calendar
+from level_core.ingest.google_live import pull_calendar
 from level_core.ingest.pipeline import IngestPipeline
 from level_core.memory.base import MemoryBank
 from level_core.models.factory import build_embedding_client, build_gemini_client
@@ -108,7 +108,8 @@ async def ensure_profile_from_agenda(
     if not facts:
         return existing
 
-    await _persist_pattern_facts(memory, facts)
+    # Skip embeddings on heal — keeps Priorities navigable after API reload.
+    await _persist_pattern_facts(memory, facts, embed=False)
     snap = await _refresh_profile(memory, user_id)
     if snap.bullets:
         state = await sync_store.get(user_id) or state
@@ -129,22 +130,31 @@ async def ensure_profile_from_agenda(
     return snap
 
 
-async def _persist_pattern_facts(memory: MemoryBank, facts: list[Fact]) -> int:
+async def _persist_pattern_facts(
+    memory: MemoryBank,
+    facts: list[Fact],
+    *,
+    embed: bool = True,
+) -> int:
     if not facts:
         return 0
     settings = get_settings()
-    embedder = build_embedding_client(settings)
+    embedder = build_embedding_client(settings) if embed else None
     n = 0
+    # List once — not once per fact (heal used to re-scan on every insert).
+    existing = await memory.facts.list_for_user(user_id=facts[0].user_id, limit=200)
+    existing_stmts = {e.statement for e in existing}
     for fact in facts:
-        # Idempotent-ish: skip if identical statement already present.
-        existing = await memory.facts.list_for_user(user_id=fact.user_id, limit=200)
-        if any(e.statement == fact.statement for e in existing):
+        if fact.statement in existing_stmts:
             continue
         await memory.facts.upsert(fact)
-        try:
-            embeddings = await embedder.embed(texts=[fact.statement])
-        except Exception:  # noqa: BLE001
-            embeddings = []
+        existing_stmts.add(fact.statement)
+        embeddings: list = []
+        if embedder is not None:
+            try:
+                embeddings = await embedder.embed(texts=[fact.statement])
+            except Exception:  # noqa: BLE001
+                embeddings = []
         if embeddings:
             await memory.vectors.upsert(
                 user_id=fact.user_id,
@@ -293,7 +303,6 @@ async def google_calendar_webhook(
 
 @router.post("/google/sync", response_model=IngestSummary)
 async def sync_google(
-    include_drive: bool = Form(True),
     user_id: str = Depends(require_user),
     memory: MemoryBank = Depends(get_memory),
     tokens: TokenStore = Depends(get_token_store),
@@ -325,7 +334,6 @@ async def sync_google(
         await refresh_agenda_cache(user_id=user_id, token=token, sync_store=sync_store)
         await ensure_calendar_watch(user_id=user_id, token=token, sync_store=sync_store)
 
-        # Calendar first → inferred priorities; Drive only if topic-matched.
         cal = await pull_calendar(token, user_id=user_id, max_events=25)
         signals.extend(cal.signals)
         state = await sync_store.get(user_id)
@@ -338,26 +346,11 @@ async def sync_google(
             memory, infer_priority_facts(priority_events, user_id=user_id)
         )
 
-        drive_count = 0
-        if include_drive:
-            async for s in fetch_drive_signals(
-                token,
-                user_id=user_id,
-                topics=cal.topics,
-                modified_after=cal.window_start,
-                modified_before=cal.window_end,
-                max_files=4,
-            ):
-                signals.append(s)
-                drive_count += 1
         _logger.info(
             "google_sync_pulled",
             user_id=user_id,
             calendar=len(cal.signals),
-            drive=drive_count,
-            include_drive=include_drive,
             patterns=pattern_n,
-            topics=sorted(cal.topics)[:20],
         )
     except Exception as exc:  # noqa: BLE001
         _logger.exception("google_sync_failed", user_id=user_id)
@@ -368,9 +361,8 @@ async def sync_google(
     summary.profile_bullets = len(snap.bullets)
     summary.contradictions = len(snap.contradictions)
     cal_n = sum(1 for s in signals if s.source.value == "gcal")
-    drive_n = sum(1 for s in signals if s.source.value == "gdrive")
     prefix = (
-        f"Pulled {cal_n} calendar + {drive_n} Drive docs; "
+        f"Pulled {cal_n} calendar events; "
         f"profile {summary.profile_bullets} bullets / {summary.contradictions} tensions. "
         f"Please review the profile below."
     )
@@ -389,61 +381,6 @@ async def sync_google(
             }
         )
     )
-    return summary
-
-
-@router.post("/google/drive", response_model=IngestSummary)
-async def sync_google_drive(
-    user_id: str = Depends(require_user),
-    memory: MemoryBank = Depends(get_memory),
-    tokens: TokenStore = Depends(get_token_store),
-) -> IngestSummary:
-    """Optional add-on: pull Drive notes matched to the calendar (intentional LLM pass)."""
-    token = await tokens.get_google_token(user_id)
-    if token is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Connect Google Calendar first.",
-        )
-    try:
-        from level_core.auth.google_oauth import credentials_from_token, token_from_credentials
-        from level_core.config import get_settings as _gs
-
-        creds = credentials_from_token(token)
-        refreshed = token_from_credentials(creds, user_id=user_id, settings=_gs())
-        if refreshed.refresh_token is None and token.refresh_token:
-            refreshed = refreshed.model_copy(update={"refresh_token": token.refresh_token})
-        await tokens.upsert_token(refreshed)
-        token = refreshed
-
-        cal = await pull_calendar(token, user_id=user_id, max_events=25)
-        signals: list[Signal] = []
-        async for s in fetch_drive_signals(
-            token,
-            user_id=user_id,
-            topics=cal.topics,
-            modified_after=cal.window_start,
-            modified_before=cal.window_end,
-            max_files=6,
-        ):
-            signals.append(s)
-    except Exception as exc:  # noqa: BLE001
-        _logger.exception("google_drive_sync_failed", user_id=user_id)
-        raise HTTPException(status_code=502, detail=f"Drive sync failed: {exc}") from exc
-
-    if not signals:
-        return IngestSummary(
-            detail="No Drive docs matched your calendar topics yet — try again after more schedule activity."
-        )
-
-    summary = await _run_signals(memory, signals)
-    snap = await _refresh_profile(memory, user_id)
-    summary.profile_bullets = len(snap.bullets)
-    summary.contradictions = len(snap.contradictions)
-    summary.detail = (
-        f"Added {summary.accepted} Drive notes to your profile "
-        f"({summary.profile_bullets} bullets). {summary.detail}"
-    ).strip()
     return summary
 
 

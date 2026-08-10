@@ -1,4 +1,4 @@
-"""Google OAuth helpers for Calendar + Drive access."""
+"""Google OAuth helpers for Calendar access."""
 
 from __future__ import annotations
 
@@ -25,20 +25,17 @@ from level_core.schemas.user import OAuthToken
 class OAuthStatePayload:
     code_verifier: str
     link_user_id: str | None = None
-    include_drive: bool = False
 
 # Signed OAuth ``state`` survives API reloads (uvicorn --reload clears memory).
 # Also carries the PKCE code_verifier so token exchange works on a new Flow.
 _STATE_MAX_AGE_SECONDS = 15 * 60
 
 # Calendar events = read + write (commitment gate can create after confirm).
-# Drive stays read-only for Memory Bank ingestion.
 GOOGLE_SCOPES = (
     "openid",
     "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/userinfo.profile",
     "https://www.googleapis.com/auth/calendar.events",
-    "https://www.googleapis.com/auth/drive.readonly",
 )
 
 
@@ -96,7 +93,6 @@ def mint_oauth_state(
     *,
     code_verifier: str,
     link_user_id: str | None = None,
-    include_drive: bool = False,
 ) -> str:
     """HMAC-signed state carrying PKCE verifier (+ optional guest user to link)."""
     settings = settings or get_settings()
@@ -107,8 +103,6 @@ def mint_oauth_state(
     }
     if link_user_id:
         body["u"] = link_user_id
-    if include_drive:
-        body["d"] = 1
     raw = _b64url(json.dumps(body, separators=(",", ":")).encode("utf-8"))
     sig = hmac.new(_state_secret(settings), raw.encode("ascii"), hashlib.sha256).hexdigest()
     return f"{raw}.{sig}"
@@ -117,7 +111,7 @@ def mint_oauth_state(
 def parse_oauth_state(
     state: str, settings: Settings | None = None
 ) -> OAuthStatePayload | None:
-    """Validate state → PKCE verifier + optional link / Drive flags."""
+    """Validate state → PKCE verifier + optional link user."""
     settings = settings or get_settings()
     if "." not in state:
         return None
@@ -134,7 +128,6 @@ def parse_oauth_state(
         ts = int(body["t"])
         verifier = str(body["v"])
         link_user_id = str(body["u"]) if body.get("u") else None
-        include_drive = bool(body.get("d"))
     except (KeyError, TypeError, ValueError, json.JSONDecodeError):
         return None
     age = int(time.time()) - ts
@@ -143,7 +136,6 @@ def parse_oauth_state(
     return OAuthStatePayload(
         code_verifier=verifier,
         link_user_id=link_user_id,
-        include_drive=include_drive,
     )
 
 
@@ -155,7 +147,6 @@ def authorization_url(
     settings: Settings | None = None,
     *,
     link_user_id: str | None = None,
-    include_drive: bool = False,
 ) -> tuple[str, str]:
     """Return (auth_url, state)."""
     settings = settings or get_settings()
@@ -164,7 +155,6 @@ def authorization_url(
         settings,
         code_verifier=verifier,
         link_user_id=link_user_id,
-        include_drive=include_drive,
     )
     flow = build_flow(settings, state=state)
     # Keep verifier on the Flow in case the library reads it later.

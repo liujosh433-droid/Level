@@ -30,7 +30,7 @@ const HOW = [
   {
     icon: "cal",
     title: "Your busy schedule",
-    body: "Auto-sync your Google Calendar and drive — pickups, classes, work, and those nights that always run late.",
+    body: "Auto-sync your Google Calendar — pickups, classes, work, and those nights that always run late.",
   },
   {
     icon: "chat",

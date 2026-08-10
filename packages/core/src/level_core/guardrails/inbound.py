@@ -2,8 +2,8 @@
 
 Goals:
 - Block signals that look like prompt injection or tool poisoning. A
-  malicious calendar invite or Drive doc could otherwise hijack the agent
-  chain downstream.
+  malicious calendar invite could otherwise hijack the agent chain
+  downstream.
 - Redact PII before persistence. We don't want raw emails / phone numbers
   sitting in Firestore or embedded into the vector index.
 

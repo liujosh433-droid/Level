@@ -89,7 +89,7 @@ class User(TimestampedModel):
 
 
 class OAuthToken(TimestampedModel):
-    """Stored Google OAuth tokens for a user (Calendar / Drive scopes)."""
+    """Stored Google OAuth tokens for a user (Calendar scopes)."""
 
     token_id: str = Field(default_factory=_new_id)
     user_id: str

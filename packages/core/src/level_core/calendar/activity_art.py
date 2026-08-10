@@ -167,17 +167,16 @@ def infer_activity_kind(summary: str) -> str:
     return "generic"
 
 
-# High-chroma hues spaced around the wheel (dark UI). Avoid clustering
-# warm oranges or dual greens — each category should read at a glance.
+# High-chroma hues spaced around the wheel — each category should read at a glance.
 ACTIVITY_COLORS: dict[str, str] = {
     "sports": "#16a34a",  # green
     "school": "#2563eb",  # blue
-    "work": "#9333ea",  # purple
+    "work": "#ea580c",  # orange
     "medical": "#dc2626",  # red
     "family": "#eab308",  # yellow/gold
     "food": "#db2777",  # magenta
     "home": "#0d9488",  # teal
-    "meeting": "#ea580c",  # orange
+    "meeting": "#9333ea",  # purple
     "travel": "#0891b2",  # cyan
     "generic": "#64748b",  # slate
 }

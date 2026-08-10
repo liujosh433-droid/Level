@@ -83,7 +83,7 @@ _STOP = frozenset(
 
 # Ingested calendar facts look like this — never show them as reminders.
 _CAL_DUMP = re.compile(
-    r"^(on my calendar|calendar:|drive doc:)",
+    r"^(on my calendar|calendar:)",
     re.IGNORECASE,
 )
 

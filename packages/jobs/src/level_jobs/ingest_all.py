@@ -40,13 +40,11 @@ def _connectors_for_user(user_id: str, *, use_fixtures: bool) -> list[SignalConn
     from level_core.ingest.connectors import (
         ChatExportConnector,
         GoogleCalendarConnector,
-        GoogleDriveConnector,
         VoiceMemoConnector,
     )
 
     return [
         GoogleCalendarConnector(),
-        GoogleDriveConnector(),
         ChatExportConnector(),
         VoiceMemoConnector(),
     ]

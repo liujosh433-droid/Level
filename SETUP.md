@@ -102,7 +102,7 @@ terraform apply
 
 Or tear everything down: `terraform destroy`.
 
-## 5. Real parent test (ChatGPT + Calendar/Drive)
+## 5. Real parent test (ChatGPT + Calendar)
 
 ### A. ChatGPT-only path (works today, no OAuth)
 
@@ -113,9 +113,9 @@ Or tear everything down: `terraform destroy`.
 
 Note: with `LEVEL_ENV=local`, memory is in-process — restarting the API clears guest data. For persistence, set `LEVEL_ENV=cloud` + `LEVEL_VECTOR_BACKEND=firestore` (ADC via `gcloud auth application-default login`).
 
-### B. Google Calendar + Drive
+### B. Google Calendar
 
-1. In GCP Console → **APIs & Services** → enable **Google Calendar API** and **Google Drive API**.
+1. In GCP Console → **APIs & Services** → enable **Google Calendar API**.
 2. **Credentials** → Create **OAuth client ID** → Application type **Web application**.
 3. Authorized redirect URI (exact):
 
@@ -130,7 +130,7 @@ GOOGLE_OAUTH_REDIRECT_URI=http://localhost:8080/v1/auth/google/callback
 LEVEL_WEB_APP_URL=http://localhost:3000
 ```
 
-5. Restart API → Sources → **Connect Google** → **Sync Calendar + Drive**.
+5. Restart API → Sources → **Connect Google** → sync Calendar.
 6. OAuth consent screen: add your Google account as a test user if the app is in Testing.
 
 ### C. What “helpful in reality” looks like

@@ -1,4 +1,4 @@
-"""Calendar window + recurring/noise filter + Drive topic match tests."""
+"""Calendar window + recurring/noise filter tests."""
 
 from __future__ import annotations
 
@@ -7,9 +7,7 @@ from datetime import datetime, timezone
 from level_core.ingest.google_live import (
     _parse_when,
     calendar_window,
-    drive_topic_score,
     filter_calendar_events,
-    topics_from_calendar_titles,
 )
 
 
@@ -92,14 +90,3 @@ def test_filter_accepts_all_day_events() -> None:
     assert "Co-parent weekend" in titles
     assert "Night class" in titles
 
-
-def test_drive_only_matches_calendar_topics() -> None:
-    topics = topics_from_calendar_titles(
-        ["ULTRASOUND", "Muay thai", "UT Austin PDR", "Japan trip"]
-    )
-    assert "ultrasound" in topics
-    assert "japan" in topics
-    # Random solar-car doc should not match these personal calendar topics.
-    assert drive_topic_score("Solstice 2025-2026 budget", "battery HV array", topics) == 0
-    assert drive_topic_score("Ultrasound prep notes", "", topics) > 0
-    assert drive_topic_score("Random notes", "flight itinerary for japan in november", topics) > 0

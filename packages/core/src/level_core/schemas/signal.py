@@ -23,7 +23,6 @@ class SignalSource(str, Enum):
     """Where a signal came from."""
 
     GCAL = "gcal"
-    GDRIVE = "gdrive"
     GMAIL = "gmail"
     VOICE_MEMO = "voice_memo"
     CHAT_EXPORT = "chat_export"

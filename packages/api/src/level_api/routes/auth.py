@@ -133,17 +133,11 @@ async def create_guest(
 
 
 @router.get("/google/start")
-async def google_start(
-    request: Request,
-    include_drive: bool = Query(False),
-) -> RedirectResponse:
+async def google_start(request: Request) -> RedirectResponse:
     # Link Google onto the current session user when present.
     link_user_id = read_session_user_id(request)
     try:
-        url, _state = authorization_url(
-            link_user_id=link_user_id,
-            include_drive=include_drive,
-        )
+        url, _state = authorization_url(link_user_id=link_user_id)
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return RedirectResponse(url)
@@ -164,7 +158,6 @@ async def google_callback(
 
     parsed = parse_oauth_state(state, settings)
     link_user_id = parsed.link_user_id if parsed else None
-    include_drive = bool(parsed.include_drive) if parsed else False
 
     try:
         creds = exchange_code(code, state, settings)
@@ -241,9 +234,7 @@ async def google_callback(
     )
 
     # Agenda warm + one-time profile ingest in background (LLM only on first connect).
-    background_tasks.add_task(
-        onboard_google_user, user.user_id, include_drive=include_drive
-    )
+    background_tasks.add_task(onboard_google_user, user.user_id)
 
     web = settings.web_app_url.rstrip("/")
     # Existing Google users land on Today; first-time goes through Sources onboard.

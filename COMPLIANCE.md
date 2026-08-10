@@ -18,7 +18,7 @@ We additionally implement several **Fortified Enterprise Fleet** architectural c
 | At least one Google Agent Framework | **Google ADK** — every agent is an `LlmAgent`. `Conductor` is a `SequentialAgent`. Function tools are plain Python functions with type hints, registered via the `tools=` parameter. | `packages/core/src/level_core/agents/` |
 | At least one Google Cloud infrastructure service | We use **six**: Cloud Run (api + jobs + web), Firestore (state), Cloud Storage (raw signals), Cloud Scheduler (ingest cron), Vertex AI (Gemini + Vector Search + Model Armor), Secret Manager (API keys). | `infra/terraform/` |
 | Project newly created during Submission Period | Repo initialized 2026-08-08; commit history public in git | Git history |
-| Third-party integrations authorized | Only Google APIs (Calendar, Drive, Gmail) — used per Google Terms; users grant OAuth consent | `packages/core/src/level_core/ingest/` |
+| Third-party integrations authorized | Only Google APIs (Calendar, Gmail) — used per Google Terms; users grant OAuth consent | `packages/core/src/level_core/ingest/` |
 | Testing access provided | Hosted Cloud Run URL published in Devpost submission; API key-free public demo mode | `SUBMISSION.md`, `packages/api` |
 | English language | All UI text, prompts, docs in English | Everywhere |
 
@@ -32,7 +32,7 @@ We additionally implement several **Fortified Enterprise Fleet** architectural c
 |---|---|
 | Eliminates real-world friction | Caregivers making complex decisions under time pressure with fragmented context — Level unifies context and forces the hard question. |
 | "Twist" is present | Anti-sycophancy tone contract + evidence-cited challenges + evolving bias profile. Every mainstream AI is a yes-man; Level structurally can't be. |
-| Continuous Action Engine — background multi-step workflow | Yes — ingestion loop runs asynchronously every 15 min across Calendar/Drive/Gmail, normalizes into facts, embeds, updates bias profile — no user in the loop. |
+| Continuous Action Engine — background multi-step workflow | Yes — ingestion loop runs asynchronously every 15 min across Calendar/Gmail, normalizes into facts, embeds, updates bias profile — no user in the loop. |
 | Bring Your Own Friction — personal problem | Yes — targeted at single parents and caregivers, an "Unlikely Hero" cohort not served by enterprise-first AI tools. |
 | Evolving Knowledge Engine — synthesizes/mutates data | Yes — Level rewrites the user's own Manifesto over time as a synthesis of their stated values; Challenger cites this synthesized artifact back at them. |
 | Ingests messy unstructured data | Yes — voice memos (audio), screenshotted chats (multimodal), free-text notes, prior AI chat exports (JSON/HTML), calendar events. |

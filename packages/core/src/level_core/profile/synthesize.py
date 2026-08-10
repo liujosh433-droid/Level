@@ -155,7 +155,7 @@ def _is_analytics_statement(text: str) -> bool:
 
 
 def build_manifesto_statement(facts: list[Fact]) -> tuple[str, list[str]]:
-    """Short line of top priorities (not a dump of calendar analytics)."""
+    """Top priorities as a short intro + digestible bullet lines."""
     priorities = [
         f
         for f in facts
@@ -177,19 +177,8 @@ def build_manifesto_statement(facts: list[Fact]) -> tuple[str, list[str]]:
         )
     top = priorities[:3]
     labels = [f.statement.rstrip(".") for f in top]
-    if len(labels) == 1:
-        statement = f"Right now it looks like you prioritize {labels[0].lower()}."
-    elif len(labels) == 2:
-        statement = (
-            f"Right now it looks like you prioritize {labels[0].lower()}, "
-            f"and {labels[1].lower()}."
-        )
-    else:
-        statement = (
-            f"Right now it looks like you prioritize {labels[0].lower()}, "
-            f"{labels[1].lower()}, and {labels[2].lower()}."
-        )
-    return statement[:4000], [f.fact_id for f in top]
+    lines = ["Right now it looks like you prioritize:", *[f"• {label}" for label in labels]]
+    return "\n".join(lines)[:4000], [f.fact_id for f in top]
 
 
 def synthesize_snapshot(facts: list[Fact], *, user_id: str) -> ProfileSnapshot:

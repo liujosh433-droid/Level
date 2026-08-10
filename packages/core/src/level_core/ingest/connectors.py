@@ -2,7 +2,7 @@
 
 Each connector yields zero or more :class:`Signal` objects. In local / demo
 mode we use :class:`FixtureConnector` (deterministic sample data). In cloud
-mode, live Google Calendar / Drive connectors use the user's OAuth token.
+mode, live Google Calendar connectors use the user's OAuth token.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ class FixtureConnector:
     """Deterministic demo connector — no network, no OAuth.
 
     Used for local smoke tests and the hackathon demo narrative so judges
-    can reproduce the Memory Bank without granting Calendar/Drive scopes.
+    can reproduce the Memory Bank without granting Calendar scopes.
     """
 
     source: SignalSource
@@ -73,8 +73,8 @@ def demo_caregiver_signals(user_id: str = "demo-parent") -> list[Signal]:
         ),
         Signal(
             user_id=user_id,
-            source=SignalSource.GDRIVE,
-            external_id="gdrive-values-note",
+            source=SignalSource.MANUAL,
+            external_id="manual-values-note",
             occurred_at=now - timedelta(days=14),
             text=(
                 "Note titled 'what matters': I value being present for Maya during "
@@ -144,21 +144,6 @@ class GoogleCalendarConnector:
 
 
 @dataclass(slots=True)
-class GoogleDriveConnector:
-    """Live Google Drive connector (cloud mode). Stub until OAuth lands."""
-
-    source: SignalSource = SignalSource.GDRIVE
-
-    async def fetch(self, *, user_id: str) -> AsyncIterator[Signal]:
-        _ = user_id
-        return
-        if False:  # pragma: no cover
-            yield Signal(
-                user_id=user_id, source=self.source, external_id="unused", text=""
-            )
-
-
-@dataclass(slots=True)
 class ChatExportConnector:
     """Reads dropped ChatGPT/Claude/Gemini export files from a GCS prefix."""
 
@@ -194,7 +179,6 @@ __all__ = [
     "ChatExportConnector",
     "FixtureConnector",
     "GoogleCalendarConnector",
-    "GoogleDriveConnector",
     "SignalConnector",
     "VoiceMemoConnector",
     "demo_caregiver_signals",

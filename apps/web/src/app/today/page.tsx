@@ -75,6 +75,7 @@ function TodayInner() {
   const [speaking, setSpeaking] = useState(false);
   const [decisionId, setDecisionId] = useState<string | null>(null);
   const [items, setItems] = useState<ChatItem[]>([]);
+  const [booting, setBooting] = useState(true);
   const speakGenRef = useRef(0);
   const speakTimerRef = useRef<number | null>(null);
 
@@ -97,6 +98,8 @@ function TodayInner() {
           return;
         }
         setError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setBooting(false);
       }
     })();
   }, [router]);
@@ -288,8 +291,8 @@ function TodayInner() {
     }
   }
 
-  const name = today?.greeting_name || "there";
-  const weekday = today?.weekday_label || "today";
+  const name = today?.greeting_name?.trim() || null;
+  const weekday = today?.weekday_label?.trim() || null;
 
   const hearDayButton = today ? (
     <button
@@ -419,7 +422,9 @@ function TodayInner() {
         rail={
           <>
             <RailSection title="Reminders">
-              {today && today.recommendations.length > 0 ? (
+              {booting || !today ? (
+                <p className={styles.meta}>Loading reminders…</p>
+              ) : today.recommendations.length > 0 ? (
                 <ul className={styles.reminders}>
                   {today.recommendations.map((r) => (
                     <li key={r}>{r}</li>
@@ -440,8 +445,8 @@ function TodayInner() {
               value={draft}
               onChange={setDraft}
               onSubmit={onAsk}
-              busy={busy}
-              disabled={!userId}
+              busy={busy || booting}
+              disabled={!userId || booting}
               voiceEnabled
               onVoiceError={setError}
               error={error}
@@ -453,9 +458,21 @@ function TodayInner() {
         }
       >
         <div className={styles.titleRow}>
-          <h1 className={styles.title}>
-            Hi {name}, Happy {weekday}
-          </h1>
+          <div className={styles.titleBlock}>
+            {booting || !today ? (
+              <p className={styles.bootMsg}>Loading your day…</p>
+            ) : (
+              <>
+                {today.date_label ? (
+                  <p className={styles.dateLabel}>{today.date_label}</p>
+                ) : null}
+                <h1 className={styles.title}>
+                  Hi {name || "there"}
+                  {weekday ? `, Happy ${weekday}` : ""}
+                </h1>
+              </>
+            )}
+          </div>
         </div>
 
         {today?.needs_review && (
@@ -467,8 +484,8 @@ function TodayInner() {
 
         <section className={styles.block}>
           <h2>On your calendar</h2>
-          {!today ? (
-            <p className={styles.meta}>Loading…</p>
+          {booting || !today ? (
+            <p className={styles.meta}>Loading calendar…</p>
           ) : today.events.length === 0 ? (
             <p className={styles.meta}>Nothing on the calendar for today.</p>
           ) : (

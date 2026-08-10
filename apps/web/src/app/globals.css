@@ -18,12 +18,18 @@
   --chrome: rgba(244, 249, 250, 0.88);
   --radius: 6px;
   --radius-lg: 14px;
-  --font-display: "Fraunces", Georgia, serif;
+  /* Literata: calm optical serif — steady / level-headed without feeling stiff */
+  --font-brand: "Literata", "Iowan Old Style", "Palatino Linotype", Palatino, serif;
+  --font-display: "Literata", "Iowan Old Style", "Palatino Linotype", Palatino, serif;
   --font-body: "Source Sans 3", "Helvetica Neue", sans-serif;
   --shell-max: 42rem;
   --pad-x: clamp(1.1rem, 4.5vw, 2rem);
   --pad-y: clamp(1rem, 3vw, 1.75rem);
   --nav-h: 3.5rem;
+  /* Sticky header height incl. safe-area — keep side rails below it */
+  --app-header-offset: calc(
+    var(--nav-h) + env(safe-area-inset-top, 0px) + 1.4rem
+  );
   --bottom-nav-h: 4.25rem;
   --safe-bottom: env(safe-area-inset-bottom, 0px);
   --touch: 44px;
@@ -57,6 +63,7 @@
 
 html {
   scroll-behavior: smooth;
+  scroll-padding-top: var(--app-header-offset);
 }
 
 html,

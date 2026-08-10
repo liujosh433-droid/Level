@@ -223,8 +223,8 @@
     flex-direction: column;
     gap: 1rem;
     position: sticky;
-    top: 1rem;
-    max-height: calc(100dvh - 2rem);
+    top: var(--app-header-offset);
+    max-height: calc(100dvh - var(--app-header-offset) - 1rem);
     overflow: auto;
     padding-bottom: 0.5rem;
   }

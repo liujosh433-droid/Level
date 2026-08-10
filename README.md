@@ -2,7 +2,7 @@
 
 **A warm-but-honest AI decision partner for busy caregivers.**
 
-Level is a multi-agent system (Google ADK + Gemini 3.5) that continuously ingests messy personal signals — Google Calendar, Drive, voice memos, prior AI chat exports — into a persistent Memory Bank, then acts as the friend who isn't afraid to ask you the hard clarifying question. Instead of the reflexive agreement most AI defaults to, Level asks *what if you're wrong*, cites your own past evidence back at you, and tracks your cognitive biases session over session so you make decisions you can still defend a week later.
+Level is a multi-agent system (Google ADK + Gemini 3.5) that continuously ingests messy personal signals — Google Calendar, voice memos, prior AI chat exports — into a persistent Memory Bank, then acts as the friend who isn't afraid to ask you the hard clarifying question. Instead of the reflexive agreement most AI defaults to, Level asks *what if you're wrong*, cites your own past evidence back at you, and tracks your cognitive biases session over session so you make decisions you can still defend a week later.
 
 > Built for the [All Things Agentic Hackathon](https://allthingsagentichackathon.devpost.com/) — **Collaborative Partner** track.
 
@@ -24,12 +24,11 @@ Level is a multi-agent system (Google ADK + Gemini 3.5) that continuously ingest
 
 Most AI assistants are sycophants — they agree, encourage, and paper over uncertainty. Caregivers who are already stretched thin need the opposite: a partner who can hold the full context of their life, notice when they're rushing a decision, and ask the question a good friend would ask.
 
-Level ingests four kinds of messy signals and turns them into structured memory:
+Level ingests three kinds of messy signals and turns them into structured memory:
 
 | Signal type | Source | What we extract |
 |---|---|---|
 | Calendar events | Google Calendar API | Time pressure, meeting cadence, life rhythm |
-| Documents & notes | Google Drive API | Explicit statements of values, plans, worries |
 | Voice memos | User upload → Gemini transcription | Emotional tone, unspoken preferences |
 | Prior AI chats | ChatGPT / Claude / Gemini export drops | What the user has already reasoned through |
 

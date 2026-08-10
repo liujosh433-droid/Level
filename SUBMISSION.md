@@ -24,7 +24,7 @@ Nobody needs that friend more than a single parent or caregiver making high-stak
 
 ## What it does
 
-Level continuously ingests messy personal signals — Google Calendar, Drive, voice memos, screenshotted chats, prior AI chat exports — into a persistent Memory Bank. When the user brings a decision, a chain of specialized ADK agents runs:
+Level continuously ingests messy personal signals — Google Calendar, voice memos, screenshotted chats, prior AI chat exports — into a persistent Memory Bank. When the user brings a decision, a chain of specialized ADK agents runs:
 
 - **Framer** restates the decision precisely (Gemini 3.5 Pro)
 - **Retriever** pulls cited evidence from the user's own history (Gemini 3.5 Flash + Vertex Vector Search)
@@ -90,4 +90,4 @@ Every turn updates a persistent **Bias Profile** — a numeric picture of the us
 - No pre-existing code was incorporated into this Project. Every line was written during the Submission Period (2026-08-03 to 2026-08-31).
 - Standard open-source frameworks and libraries were used (Google ADK, Vertex AI Python SDK, FastAPI, Next.js, Pydantic, structlog, OpenTelemetry, Terraform).
 - AI coding assistants (Cursor / Gemini) were used during development.
-- All third-party API integrations (Google Calendar, Drive, Gmail) are used in accordance with Google API Terms and use standard OAuth consent flows.
+- All third-party API integrations (Google Calendar, Gmail) are used in accordance with Google API Terms and use standard OAuth consent flows.

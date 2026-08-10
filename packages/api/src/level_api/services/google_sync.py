@@ -37,14 +37,14 @@ async def _refresh_oauth_token(user_id: str):
     return refreshed
 
 
-async def onboard_google_user(user_id: str, *, include_drive: bool = False) -> None:
+async def onboard_google_user(user_id: str) -> None:
     """After OAuth: warm agenda cache, register watch, LLM ingest once if needed."""
     from level_api.routes.sources import (
         _persist_pattern_facts,
         _refresh_profile,
         _run_signals,
     )
-    from level_core.ingest.google_live import fetch_drive_signals, pull_calendar
+    from level_core.ingest.google_live import pull_calendar
 
     sync_store = cached_calendar_sync_store()
     memory = cached_memory()
@@ -109,17 +109,6 @@ async def onboard_google_user(user_id: str, *, include_drive: bool = False) -> N
             )
             await _persist_pattern_facts(memory, priority_facts)
             await _refresh_profile(memory, user_id)
-
-        if include_drive:
-            async for s in fetch_drive_signals(
-                token,
-                user_id=user_id,
-                topics=cal.topics,
-                modified_after=cal.window_start,
-                modified_before=cal.window_end,
-                max_files=4,
-            ):
-                signals.append(s)
 
         summary = await _run_signals(memory, signals)
         snap = await _refresh_profile(memory, user_id)

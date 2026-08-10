@@ -1,28 +1,51 @@
 .header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 1rem;
-  min-height: var(--nav-h);
-  margin-bottom: 0.5rem;
+  --nav-fg: #f2f7f8;
+  --nav-muted: #b7c9d0;
+  --nav-bg: #0c161c;
+  --nav-bg-deep: #12242e;
+  --nav-line: rgba(197, 213, 219, 0.16);
+  --nav-soft: rgba(61, 184, 160, 0.18);
+  --nav-signal: #3db8a0;
+
   position: sticky;
   top: 0;
   z-index: 20;
-  padding: 0.35rem 0 0.65rem;
-  background: linear-gradient(180deg, var(--chrome) 55%, transparent);
-  backdrop-filter: blur(10px);
+  width: 100%;
+  padding:
+    max(0.45rem, env(safe-area-inset-top))
+    0
+    0.7rem;
+  color: var(--nav-fg);
+  background:
+    radial-gradient(ellipse 55% 120% at 85% 0%, rgba(61, 184, 160, 0.14), transparent 55%),
+    linear-gradient(180deg, var(--nav-bg-deep) 0%, var(--nav-bg) 100%);
+  border-bottom: 1px solid var(--nav-line);
+  box-shadow: 0 8px 24px rgba(12, 22, 28, 0.18);
+}
+
+.headerInner {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  min-height: var(--nav-h);
+  width: 100%;
+  margin: 0;
+  padding-left: max(1.15rem, env(safe-area-inset-left));
+  padding-right: max(1.15rem, env(safe-area-inset-right));
 }
 
 .brand {
-  font-family: var(--font-display);
-  font-size: clamp(1.65rem, 4vw, 1.95rem);
-  font-weight: 700;
-  letter-spacing: -0.03em;
+  font-family: var(--font-brand);
+  font-size: clamp(1.55rem, 3.6vw, 1.85rem);
+  font-weight: 650;
+  letter-spacing: -0.035em;
   line-height: 1;
+  color: var(--nav-fg);
 }
 
 .brand:hover {
-  color: var(--signal);
+  color: var(--nav-signal);
 }
 
 .right {
@@ -45,9 +68,9 @@
   width: 2.45rem;
   height: 2.45rem;
   border-radius: 50%;
-  border: 2px solid var(--signal);
-  background: linear-gradient(145deg, rgba(45, 159, 138, 0.35), rgba(232, 241, 243, 0.95));
-  color: var(--foam);
+  border: 2px solid var(--nav-signal);
+  background: linear-gradient(145deg, rgba(61, 184, 160, 0.45), rgba(35, 69, 83, 0.95));
+  color: var(--nav-fg);
   font-weight: 750;
   font-size: 0.82rem;
   letter-spacing: 0.02em;
@@ -58,7 +81,7 @@
 
 .avatar:hover {
   transform: translateY(-1px);
-  box-shadow: 0 6px 18px rgba(22, 48, 56, 0.12);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
 }
 
 .menu {
@@ -177,7 +200,7 @@
 }
 
 .desktopNav a {
-  color: var(--mist);
+  color: var(--nav-muted);
   font-size: 0.95rem;
   font-weight: 500;
   padding: 0.45rem 0.8rem;
@@ -186,13 +209,13 @@
 }
 
 .desktopNav a:hover {
-  color: var(--foam);
-  background: var(--signal-soft);
+  color: var(--nav-fg);
+  background: var(--nav-soft);
 }
 
 .active {
-  color: var(--foam) !important;
-  background: var(--signal-soft);
+  color: var(--nav-fg) !important;
+  background: var(--nav-soft);
 }
 
 .bottomNav {
@@ -253,11 +276,8 @@
   }
 
   .header {
-    border-bottom: 1px solid var(--line);
-    margin-bottom: 1.25rem;
-    background: transparent;
-    backdrop-filter: none;
-    position: relative;
+    padding-top: 0.65rem;
+    padding-bottom: 0.75rem;
   }
 }
 

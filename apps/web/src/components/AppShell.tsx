@@ -42,13 +42,15 @@ export function AppShell({
     .join(" ");
 
   return (
-    <div className={shellClass}>
+    <div className={styles.root}>
       <AppNav
         signedIn={Boolean(userId)}
         displayName={displayName}
         onDisplayNameChange={setDisplayName}
       />
-      <div className={styles.body}>{children}</div>
+      <div className={shellClass}>
+        <div className={styles.body}>{children}</div>
+      </div>
     </div>
   );
 }

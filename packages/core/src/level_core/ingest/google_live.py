@@ -1,10 +1,10 @@
-"""Live Google Calendar + Drive pull using a user's OAuth credentials."""
+"""Live Google Calendar pull using a user's OAuth credentials."""
 
 from __future__ import annotations
 
 import re
 from collections import Counter
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -19,58 +19,6 @@ from level_core.schemas.user import OAuthToken
 # habit / reminder — skip them entirely (we want exceptions, not the grind).
 _REPEAT_TITLE_THRESHOLD = 3
 
-_STOPWORDS = frozenset(
-    {
-        "a",
-        "an",
-        "the",
-        "and",
-        "or",
-        "for",
-        "with",
-        "from",
-        "to",
-        "of",
-        "in",
-        "on",
-        "at",
-        "by",
-        "is",
-        "are",
-        "be",
-        "as",
-        "my",
-        "me",
-        "our",
-        "your",
-        "meeting",
-        "meet",
-        "call",
-        "zoom",
-        "sync",
-        "weekly",
-        "daily",
-        "standup",
-        "stand",
-        "up",
-        "catch",
-        "chat",
-        "hangout",
-        "event",
-        "reminder",
-        "block",
-        "busy",
-        "focus",
-        "time",
-        "ooo",
-        "out",
-        "office",
-        "http",
-        "https",
-        "www",
-        "com",
-    }
-)
 
 
 def _parse_when(start_raw: str | None) -> datetime | None:
@@ -127,36 +75,6 @@ def calendar_window(
 def _norm_title(summary: str) -> str:
     return re.sub(r"\s+", " ", summary.strip().lower())
 
-
-def topics_from_calendar_titles(titles: Iterable[str]) -> set[str]:
-    """Extract coarse keywords / short phrases from calendar titles for Drive matching."""
-    topics: set[str] = set()
-    for title in titles:
-        norm = _norm_title(title)
-        if not norm:
-            continue
-        # Keep short full titles as phrases (e.g. "muay thai", "parent teacher").
-        if 3 <= len(norm) <= 40 and not all(t in _STOPWORDS for t in norm.split()):
-            topics.add(norm)
-        for tok in re.findall(r"[a-z0-9]{3,}", norm):
-            if tok not in _STOPWORDS:
-                topics.add(tok)
-    return topics
-
-
-def drive_topic_score(name: str, body: str, topics: set[str]) -> int:
-    """Higher = more relevant to calendar topics. 0 = no match."""
-    if not topics:
-        return 0
-    hay_name = name.lower()
-    hay_body = body.lower()[:4000]
-    score = 0
-    for topic in topics:
-        if topic in hay_name:
-            score += 10 + min(len(topic), 24)
-        elif topic in hay_body:
-            score += 3 + min(len(topic), 12)
-    return score
 
 
 def _calendar_statement(summary: str, start_raw: str | None, description: str) -> str:
@@ -279,7 +197,6 @@ def _event_to_signal(event: dict[str, Any], *, user_id: str) -> Signal | None:
 @dataclass(slots=True)
 class CalendarPull:
     signals: list[Signal] = field(default_factory=list)
-    topics: set[str] = field(default_factory=set)
     window_start: datetime | None = None
     window_end: datetime | None = None
 
@@ -290,7 +207,7 @@ async def pull_calendar(
     user_id: str,
     max_events: int = 25,
 ) -> CalendarPull:
-    """Fetch filtered calendar events + topic keywords for Drive matching."""
+    """Fetch filtered calendar events for ingest / priority inference."""
     creds = credentials_from_token(token)
     service = build("calendar", "v3", credentials=creds, cache_discovery=False)
     now = datetime.now(tz=timezone.utc)
@@ -302,7 +219,6 @@ async def pull_calendar(
     )
     selected = filter_calendar_events(raw, now=now, max_events=max_events)
     signals: list[Signal] = []
-    titles: list[str] = []
     seen: set[str] = set()
     for event in selected:
         sig = _event_to_signal(event, user_id=user_id)
@@ -310,10 +226,8 @@ async def pull_calendar(
             continue
         seen.add(sig.external_id)
         signals.append(sig)
-        titles.append((event.get("summary") or "").strip())
     return CalendarPull(
         signals=signals,
-        topics=topics_from_calendar_titles(titles),
         window_start=window_start,
         window_end=window_end,
     )
@@ -569,154 +483,19 @@ async def stop_calendar_channel(
         return
 
 
-async def fetch_drive_signals(
-    token: OAuthToken,
-    *,
-    user_id: str,
-    topics: set[str] | None = None,
-    modified_after: datetime | None = None,
-    modified_before: datetime | None = None,
-    max_files: int = 4,
-    candidate_pool: int = 25,
-) -> AsyncIterator[Signal]:
-    """Pull Google Docs that match calendar topics and fall in the time window.
-
-    If ``topics`` is empty, yields nothing — random Drive noise is not useful.
-    """
-    topics = topics or set()
-    if not topics:
-        return
-
-    window_start, window_end = calendar_window()
-    modified_after = modified_after or window_start
-    modified_before = modified_before or window_end
-
-    creds = credentials_from_token(token)
-    drive = build("drive", "v3", credentials=creds, cache_discovery=False)
-
-    # Drive query uses RFC3339 timestamps.
-    after_s = modified_after.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    before_s = modified_before.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    query = (
-        "mimeType='application/vnd.google-apps.document' and trashed=false "
-        f"and modifiedTime >= '{after_s}' and modifiedTime <= '{before_s}'"
-    )
-    results = (
-        drive.files()
-        .list(
-            q=query,
-            pageSize=min(candidate_pool, 100),
-            fields="files(id, name, modifiedTime)",
-            orderBy="modifiedTime desc",
-        )
-        .execute()
-    )
-    candidates = results.get("files") or []
-
-    # Fast path: score by filename first; only export promising docs.
-    scored_meta: list[tuple[int, dict[str, Any]]] = []
-    for f in candidates:
-        name = (f.get("name") or "").strip()
-        name_score = drive_topic_score(name, "", topics)
-        if name_score > 0:
-            scored_meta.append((name_score, f))
-    scored_meta.sort(key=lambda x: x[0], reverse=True)
-
-    # If nothing matched on name, try a few topic-targeted Drive searches.
-    if not scored_meta:
-        # Prefer longer / phrase topics for search.
-        search_topics = sorted(topics, key=len, reverse=True)[:8]
-        seen_ids: set[str] = set()
-        for topic in search_topics:
-            # Escape single quotes for Drive query language.
-            safe = topic.replace("'", "\\'")
-            q = (
-                "mimeType='application/vnd.google-apps.document' and trashed=false "
-                f"and modifiedTime >= '{after_s}' and modifiedTime <= '{before_s}' "
-                f"and (name contains '{safe}' or fullText contains '{safe}')"
-            )
-            try:
-                hit = (
-                    drive.files()
-                    .list(
-                        q=q,
-                        pageSize=5,
-                        fields="files(id, name, modifiedTime)",
-                        orderBy="modifiedTime desc",
-                    )
-                    .execute()
-                )
-            except Exception:  # noqa: BLE001
-                continue
-            for f in hit.get("files") or []:
-                fid = f.get("id") or ""
-                if not fid or fid in seen_ids:
-                    continue
-                seen_ids.add(fid)
-                scored_meta.append((drive_topic_score(f.get("name") or "", "", topics) or 1, f))
-            if len(scored_meta) >= max_files * 2:
-                break
-        scored_meta.sort(key=lambda x: x[0], reverse=True)
-
-    exported = 0
-    for _score, f in scored_meta:
-        if exported >= max_files:
-            break
-        file_id = f.get("id") or ""
-        name = (f.get("name") or "untitled").strip()
-        try:
-            raw = (
-                drive.files()
-                .export(fileId=file_id, mimeType="text/plain")
-                .execute()
-            )
-            body = (
-                raw.decode("utf-8", errors="replace")
-                if isinstance(raw, bytes)
-                else str(raw)
-            )
-        except Exception:  # noqa: BLE001
-            continue
-        body = body.strip()
-        if len(body) < 40:
-            continue
-        # Confirm topic match against body too (catches weak name hits).
-        if drive_topic_score(name, body, topics) <= 0:
-            continue
-        occurred_at = None
-        if f.get("modifiedTime"):
-            try:
-                occurred_at = datetime.fromisoformat(
-                    f["modifiedTime"].replace("Z", "+00:00")
-                )
-            except ValueError:
-                occurred_at = None
-        exported += 1
-        yield Signal(
-            user_id=user_id,
-            source=SignalSource.GDRIVE,
-            external_id=f"gdrive:{file_id}",
-            occurred_at=occurred_at,
-            text=f"Drive doc: {name}\n{body[:6000]}",
-        )
-
-
 __all__ = [
     "CalendarPull",
     "IncrementalCalendarPull",
     "SyncTokenExpiredError",
     "calendar_window",
     "create_calendar_event",
-    "drive_topic_score",
     "fetch_calendar_signals",
     "fetch_day_events",
-    "fetch_drive_signals",
     "fetch_today_events",
     "filter_calendar_events",
     "list_primary_events_window",
     "pull_calendar",
     "pull_calendar_incremental",
     "stop_calendar_channel",
-    "topics_from_calendar_titles",
     "watch_primary_calendar",
 ]

@@ -1,0 +1,26 @@
+.shell {
+  width: min(100%, var(--shell-max));
+  margin: 0 auto;
+  min-height: 100dvh;
+  padding:
+    max(0.65rem, env(safe-area-inset-top))
+    var(--pad-x)
+    calc(var(--bottom-nav-h) + var(--safe-bottom) + 1.25rem)
+    var(--pad-x);
+  animation: rise 0.5s ease-out both;
+}
+
+.wide {
+  --shell-max: 48rem;
+}
+
+.body {
+  padding-top: 0.35rem;
+}
+
+@media (min-width: 768px) {
+  .shell {
+    padding-bottom: 3rem;
+    padding-top: 1.25rem;
+  }
+}

@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from pydantic import BaseModel, Field
 
+from level_api.auth_deps import require_user
 from level_api.dependencies import get_memory, get_token_store
 from level_core.agents.ingest_normalizer import IngestNormalizer
 from level_core.auth.tokens import TokenStore
@@ -114,9 +115,9 @@ async def _run_signals(memory: MemoryBank, signals: list[Signal]) -> IngestSumma
 
 @router.post("/chatgpt", response_model=IngestSummary)
 async def upload_chatgpt_export(
-    user_id: str = Form(...),
     file: UploadFile = File(...),
-    max_messages: int = Form(150),
+    max_messages: int = Form(40),
+    user_id: str = Depends(require_user),
     memory: MemoryBank = Depends(get_memory),
 ) -> IngestSummary:
     raw = await file.read()
@@ -127,7 +128,7 @@ async def upload_chatgpt_export(
             raw,
             user_id=user_id,
             filename=file.filename or "",
-            max_messages=max(1, min(max_messages, 400)),
+            max_messages=max(1, min(max_messages, 80)),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -146,7 +147,8 @@ async def upload_chatgpt_export(
 
 @router.post("/google/sync", response_model=IngestSummary)
 async def sync_google(
-    user_id: str = Form(...),
+    include_drive: bool = Form(True),
+    user_id: str = Depends(require_user),
     memory: MemoryBank = Depends(get_memory),
     tokens: TokenStore = Depends(get_token_store),
 ) -> IngestSummary:
@@ -171,7 +173,7 @@ async def sync_google(
         token = refreshed
 
         # Calendar first → topics + patterns; Drive only if topic-matched.
-        cal = await pull_calendar(token, user_id=user_id, max_events=40)
+        cal = await pull_calendar(token, user_id=user_id, max_events=25)
         signals.extend(cal.signals)
         pattern_facts = calendar_pattern_facts(
             [s.text or "" for s in cal.signals],
@@ -180,21 +182,23 @@ async def sync_google(
         pattern_n = await _persist_pattern_facts(memory, pattern_facts)
 
         drive_count = 0
-        async for s in fetch_drive_signals(
-            token,
-            user_id=user_id,
-            topics=cal.topics,
-            modified_after=cal.window_start,
-            modified_before=cal.window_end,
-            max_files=6,
-        ):
-            signals.append(s)
-            drive_count += 1
+        if include_drive:
+            async for s in fetch_drive_signals(
+                token,
+                user_id=user_id,
+                topics=cal.topics,
+                modified_after=cal.window_start,
+                modified_before=cal.window_end,
+                max_files=4,
+            ):
+                signals.append(s)
+                drive_count += 1
         _logger.info(
             "google_sync_pulled",
             user_id=user_id,
             calendar=len(cal.signals),
             drive=drive_count,
+            include_drive=include_drive,
             patterns=pattern_n,
             topics=sorted(cal.topics)[:20],
         )
@@ -219,8 +223,8 @@ async def sync_google(
 
 @router.get("/facts", response_model=list[Fact])
 async def list_facts(
-    user_id: str,
     limit: int = 50,
+    user_id: str = Depends(require_user),
     memory: MemoryBank = Depends(get_memory),
 ) -> list[Fact]:
     return await memory.facts.list_for_user(user_id=user_id, limit=min(limit, 200))
@@ -228,7 +232,7 @@ async def list_facts(
 
 @router.post("/reset")
 async def reset_user_memory(
-    user_id: str = Form(...),
+    user_id: str = Depends(require_user),
     memory: MemoryBank = Depends(get_memory),
 ) -> dict[str, int | str]:
     """Clear facts/signals/vectors/profile for a user (local in-memory only)."""
@@ -282,7 +286,7 @@ class ProfileResponse(BaseModel):
 
 @router.get("/profile", response_model=ProfileResponse)
 async def get_profile(
-    user_id: str,
+    user_id: str = Depends(require_user),
     memory: MemoryBank = Depends(get_memory),
 ) -> ProfileResponse:
     facts = await memory.facts.list_for_user(user_id=user_id, limit=200)
@@ -343,7 +347,6 @@ class BulletUpdate(BaseModel):
 
 
 class ProfileReviewRequest(BaseModel):
-    user_id: str = Field(min_length=1)
     bullets: list[BulletUpdate] = Field(default_factory=list)
     mark_reviewed: bool = True
 
@@ -351,11 +354,12 @@ class ProfileReviewRequest(BaseModel):
 @router.post("/profile/review", response_model=ProfileResponse)
 async def review_profile(
     payload: ProfileReviewRequest,
+    user_id: str = Depends(require_user),
     memory: MemoryBank = Depends(get_memory),
 ) -> ProfileResponse:
-    snapshot = await memory.manifestos.get_profile_snapshot(user_id=payload.user_id)
+    snapshot = await memory.manifestos.get_profile_snapshot(user_id=user_id)
     if snapshot is None:
-        snapshot = await _refresh_profile(memory, payload.user_id)
+        snapshot = await _refresh_profile(memory, user_id)
     by_id = {b.bullet_id: b for b in snapshot.bullets}
     for upd in payload.bullets:
         bullet = by_id.get(upd.bullet_id)
@@ -373,12 +377,12 @@ async def review_profile(
         }
     )
     await memory.manifestos.save_profile_snapshot(snapshot)
-    return await get_profile(payload.user_id, memory)
+    return await get_profile(user_id, memory)
 
 
 @router.post("/profile/refresh", response_model=ProfileResponse)
 async def refresh_profile_route(
-    user_id: str = Form(...),
+    user_id: str = Depends(require_user),
     memory: MemoryBank = Depends(get_memory),
 ) -> ProfileResponse:
     await _refresh_profile(memory, user_id)
@@ -386,7 +390,6 @@ async def refresh_profile_route(
 
 
 class ManualNoteRequest(BaseModel):
-    user_id: str = Field(min_length=1)
     text: str = Field(min_length=20, max_length=8000)
     external_id: str | None = None
 
@@ -394,23 +397,94 @@ class ManualNoteRequest(BaseModel):
 @router.post("/note", response_model=IngestSummary)
 async def ingest_manual_note(
     payload: ManualNoteRequest,
+    user_id: str = Depends(require_user),
     memory: MemoryBank = Depends(get_memory),
 ) -> IngestSummary:
     from level_core.schemas.signal import SignalSource
     import uuid
 
     signal = Signal(
-        user_id=payload.user_id,
+        user_id=user_id,
         source=SignalSource.MANUAL,
         external_id=payload.external_id or f"manual:{uuid.uuid4().hex[:12]}",
         text=payload.text,
     )
     summary = await _run_signals(memory, [signal])
-    snap = await _refresh_profile(memory, payload.user_id)
+    snap = await _refresh_profile(memory, user_id)
     summary.profile_bullets = len(snap.bullets)
     summary.contradictions = len(snap.contradictions)
     summary.detail = "Manual note ingested. Profile refreshed — please review."
     return summary
+
+
+class ProfileChatRequest(BaseModel):
+    message: str = Field(min_length=8, max_length=2000)
+
+
+class ProfileChatResponse(BaseModel):
+    reply: str
+    facts_added: int = 0
+    profile: ProfileResponse
+
+
+@router.post("/profile/chat", response_model=ProfileChatResponse)
+async def profile_chat(
+    payload: ProfileChatRequest,
+    user_id: str = Depends(require_user),
+    memory: MemoryBank = Depends(get_memory),
+) -> ProfileChatResponse:
+    """Learn from a short note and refresh the profile (caregiver-friendly)."""
+    import uuid
+
+    from level_core.errors import ModelUnavailable
+    from level_core.models.base import GenerationRequest
+    from level_core.schemas.signal import SignalSource
+
+    signal = Signal(
+        user_id=user_id,
+        source=SignalSource.MANUAL,
+        external_id=f"profile-chat:{uuid.uuid4().hex[:12]}",
+        text=(
+            "The user is correcting or enhancing their Level profile. "
+            f"Take this as true about their life:\n{payload.message.strip()}"
+        ),
+    )
+    summary = await _run_signals(memory, [signal])
+    snap = await _refresh_profile(memory, user_id)
+    profile = await get_profile(user_id, memory)
+
+    reply = (
+        f"Got it — I saved that and updated your profile"
+        f" ({summary.facts} new fact{'s' if summary.facts != 1 else ''})."
+    )
+    try:
+        settings = get_settings()
+        gemini = build_gemini_client(settings)
+        bullets = "; ".join(b.text for b in snap.bullets[:6]) or "(still thin)"
+        resp = await gemini.generate(
+            GenerationRequest(
+                model_id=settings.fast_model,
+                prompt=(
+                    "You are Level, a warm brief assistant for a busy caregiver. "
+                    "They just told you something to remember about their life. "
+                    "Reply in 1-2 short sentences confirming what you saved and how "
+                    "you'll use it. No fluff, no lists.\n\n"
+                    f"User said: {payload.message.strip()}\n"
+                    f"Facts extracted: {summary.facts}\n"
+                    f"Current profile bullets: {bullets}"
+                ),
+                temperature=0.3,
+                max_output_tokens=120,
+            )
+        )
+        if resp.text and resp.text.strip():
+            reply = resp.text.strip()[:400]
+    except ModelUnavailable:
+        pass
+    except Exception:  # noqa: BLE001
+        _logger.exception("profile_chat_reply_failed")
+
+    return ProfileChatResponse(reply=reply, facts_added=summary.facts, profile=profile)
 
 
 __all__ = ["router"]

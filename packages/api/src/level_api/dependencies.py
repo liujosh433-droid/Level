@@ -13,6 +13,7 @@ from functools import lru_cache
 from level_core.agents.conductor import Conductor, build_conductor
 from level_core.agents.registry import AgentRegistry, build_registry
 from level_core.auth.tokens import TokenStore, build_token_store
+from level_core.calendar.proposals import ProposalStore, build_proposal_store
 from level_core.config import Settings, get_settings
 from level_core.gateway.router import AgentGateway
 from level_core.guardrails.outbound import OutboundGuardrail
@@ -47,6 +48,11 @@ def cached_token_store() -> TokenStore:
 
 
 @lru_cache(maxsize=1)
+def cached_proposal_store() -> ProposalStore:
+    return build_proposal_store(cached_settings())
+
+
+@lru_cache(maxsize=1)
 def cached_conductor() -> Conductor:
     settings = cached_settings()
     return build_conductor(
@@ -78,16 +84,22 @@ def get_token_store() -> TokenStore:
     return cached_token_store()
 
 
+def get_proposal_store() -> ProposalStore:
+    return cached_proposal_store()
+
+
 __all__ = [
     "cached_conductor",
     "cached_gateway",
     "cached_memory",
+    "cached_proposal_store",
     "cached_registry",
     "cached_settings",
     "cached_token_store",
     "get_conductor",
     "get_gateway",
     "get_memory",
+    "get_proposal_store",
     "get_registry",
     "get_token_store",
 ]

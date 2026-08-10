@@ -16,6 +16,7 @@ class TokenStore(Protocol):
     async def get_user_by_google_sub(self, google_sub: str) -> User | None: ...
     async def upsert_token(self, token: OAuthToken) -> None: ...
     async def get_google_token(self, user_id: str) -> OAuthToken | None: ...
+    async def delete_google_token(self, user_id: str) -> bool: ...
 
 
 class InMemoryTokenStore:
@@ -41,6 +42,9 @@ class InMemoryTokenStore:
 
     async def get_google_token(self, user_id: str) -> OAuthToken | None:
         return self._tokens.get(user_id)
+
+    async def delete_google_token(self, user_id: str) -> bool:
+        return self._tokens.pop(user_id, None) is not None
 
 
 class LocalFileTokenStore(InMemoryTokenStore):
@@ -90,6 +94,12 @@ class LocalFileTokenStore(InMemoryTokenStore):
     async def upsert_token(self, token: OAuthToken) -> None:
         await super().upsert_token(token)
         self._save()
+
+    async def delete_google_token(self, user_id: str) -> bool:
+        removed = await super().delete_google_token(user_id)
+        if removed:
+            self._save()
+        return removed
 
 
 class FirestoreTokenStore:
@@ -155,6 +165,20 @@ class FirestoreTokenStore:
         if not snap.exists:
             return None
         return OAuthToken(**snap.to_dict())
+
+    async def delete_google_token(self, user_id: str) -> bool:
+        ref = (
+            self._db()
+            .collection("users")
+            .document(user_id)
+            .collection("secrets")
+            .document("google_oauth")
+        )
+        snap = await ref.get()
+        if not snap.exists:
+            return False
+        await ref.delete()
+        return True
 
 
 _LOCAL_STORE: LocalFileTokenStore | InMemoryTokenStore | None = None

@@ -74,10 +74,22 @@ _STOPWORDS = frozenset(
 
 
 def _parse_when(start_raw: str | None) -> datetime | None:
+    """Parse Google Calendar date/dateTime into an aware UTC datetime.
+
+    All-day events arrive as ``YYYY-MM-DD`` (naive). Timed events may be
+    offset-aware. Callers subtract these from ``datetime.now(tz=utc)``, so
+    every return value must be timezone-aware.
+    """
     if not start_raw:
         return None
     try:
-        return datetime.fromisoformat(start_raw.replace("Z", "+00:00"))
+        # date-only all-day events
+        if len(start_raw) == 10 and start_raw[4] == "-" and start_raw[7] == "-":
+            return datetime.fromisoformat(start_raw).replace(tzinfo=timezone.utc)
+        dt = datetime.fromisoformat(start_raw.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
     except ValueError:
         return None
 
@@ -95,13 +107,20 @@ def _month_shift(year: int, month: int, delta: int) -> tuple[int, int]:
 
 def calendar_window(
     now: datetime | None = None,
+    *,
+    days_back: int = 14,
+    days_forward: int = 28,
 ) -> tuple[datetime, datetime]:
-    """Last 2 months + current month + future 2 months (UTC month bounds)."""
+    """Tight window: ~2 weeks back (patterns) + ~4 weeks ahead (planning).
+
+    Caregivers don't need years of history — just enough to see load patterns
+    and the near-term schedule that drives decisions.
+    """
     now = now or datetime.now(tz=timezone.utc)
-    y0, m0 = _month_shift(now.year, now.month, -2)
-    start = datetime(y0, m0, 1, tzinfo=timezone.utc)
-    y1, m1 = _month_shift(now.year, now.month, 3)  # first day after +2 months
-    end = datetime(y1, m1, 1, tzinfo=timezone.utc) - timedelta(seconds=1)
+    start = (now - timedelta(days=days_back)).replace(hour=0, minute=0, second=0, microsecond=0)
+    end = (now + timedelta(days=days_forward)).replace(
+        hour=23, minute=59, second=59, microsecond=0
+    )
     return start, end
 
 
@@ -269,7 +288,7 @@ async def pull_calendar(
     token: OAuthToken,
     *,
     user_id: str,
-    max_events: int = 40,
+    max_events: int = 25,
 ) -> CalendarPull:
     """Fetch filtered calendar events + topic keywords for Drive matching."""
     creds = credentials_from_token(token)
@@ -304,11 +323,105 @@ async def fetch_calendar_signals(
     token: OAuthToken,
     *,
     user_id: str,
-    max_events: int = 40,
+    max_events: int = 25,
 ) -> AsyncIterator[Signal]:
     pull = await pull_calendar(token, user_id=user_id, max_events=max_events)
     for signal in pull.signals:
         yield signal
+
+
+async def list_primary_events_window(
+    token: OAuthToken,
+    *,
+    time_min: datetime,
+    time_max: datetime,
+) -> list[dict[str, Any]]:
+    """List primary-calendar events in ``[time_min, time_max]`` (expanded instances)."""
+    creds = credentials_from_token(token)
+    service = build("calendar", "v3", credentials=creds, cache_discovery=False)
+    return _list_primary_events(
+        service,
+        time_min=time_min.astimezone(timezone.utc).isoformat(),
+        time_max=time_max.astimezone(timezone.utc).isoformat(),
+    )
+
+
+async def create_calendar_event(
+    token: OAuthToken,
+    *,
+    summary: str,
+    start: datetime,
+    end: datetime,
+    timezone_name: str = "America/Los_Angeles",
+    description: str = "",
+    by_days: list[str] | None = None,
+) -> dict[str, Any]:
+    """Insert a primary-calendar event; optional weekly RRULE via ``by_days`` (MO,TU,…)."""
+    from zoneinfo import ZoneInfo
+
+    creds = credentials_from_token(token)
+    service = build("calendar", "v3", credentials=creds, cache_discovery=False)
+    tz = ZoneInfo(timezone_name)
+    start_wall = start.astimezone(tz)
+    end_wall = end.astimezone(tz)
+    body: dict[str, Any] = {
+        "summary": summary,
+        "description": description or "Added via Level (confirmed).",
+        "start": {
+            "dateTime": start_wall.isoformat(timespec="seconds"),
+            "timeZone": timezone_name,
+        },
+        "end": {
+            "dateTime": end_wall.isoformat(timespec="seconds"),
+            "timeZone": timezone_name,
+        },
+    }
+    if by_days:
+        days = ",".join(by_days)
+        body["recurrence"] = [f"RRULE:FREQ=WEEKLY;BYDAY={days}"]
+    return (
+        service.events()
+        .insert(calendarId="primary", body=body)
+        .execute()
+    )
+
+
+async def fetch_today_events(
+    token: OAuthToken,
+    *,
+    now: datetime | None = None,
+    timezone_name: str = "America/Los_Angeles",
+) -> list[dict[str, Any]]:
+    """Return today's primary-calendar events (for the Today home screen)."""
+    from zoneinfo import ZoneInfo
+
+    now = now or datetime.now(tz=timezone.utc)
+    local = now.astimezone(ZoneInfo(timezone_name))
+    day_start = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end = local.replace(hour=23, minute=59, second=59, microsecond=0)
+    raw = await list_primary_events_window(
+        token,
+        time_min=day_start.astimezone(timezone.utc),
+        time_max=day_end.astimezone(timezone.utc),
+    )
+    # Keep recurring instances for *today* — they are the real schedule.
+    out: list[dict[str, Any]] = []
+    for event in raw:
+        summary = (event.get("summary") or "(no title)").strip()
+        start = event.get("start") or {}
+        start_raw = start.get("dateTime") or start.get("date")
+        end = event.get("end") or {}
+        end_raw = end.get("dateTime") or end.get("date")
+        out.append(
+            {
+                "id": event.get("id") or "",
+                "summary": summary,
+                "start": start_raw,
+                "end": end_raw,
+                "all_day": bool(start.get("date") and not start.get("dateTime")),
+            }
+        )
+    return out
 
 
 async def fetch_drive_signals(
@@ -318,8 +431,8 @@ async def fetch_drive_signals(
     topics: set[str] | None = None,
     modified_after: datetime | None = None,
     modified_before: datetime | None = None,
-    max_files: int = 6,
-    candidate_pool: int = 40,
+    max_files: int = 4,
+    candidate_pool: int = 25,
 ) -> AsyncIterator[Signal]:
     """Pull Google Docs that match calendar topics and fall in the time window.
 
@@ -446,10 +559,13 @@ async def fetch_drive_signals(
 __all__ = [
     "CalendarPull",
     "calendar_window",
+    "create_calendar_event",
     "drive_topic_score",
     "fetch_calendar_signals",
     "fetch_drive_signals",
+    "fetch_today_events",
     "filter_calendar_events",
+    "list_primary_events_window",
     "pull_calendar",
     "topics_from_calendar_titles",
 ]

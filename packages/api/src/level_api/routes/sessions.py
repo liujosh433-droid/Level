@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
+from level_api.auth_deps import require_user
 from level_api.dependencies import get_conductor, get_memory
 from level_core.agents.conductor import Conductor, SessionInput
 from level_core.errors import NotFound
@@ -17,7 +18,6 @@ router = APIRouter(prefix="/v1", tags=["sessions"])
 
 
 class CreateDecisionRequest(BaseModel):
-    user_id: str = Field(min_length=1)
     initial_prompt: str | None = Field(default=None, max_length=4000)
 
 
@@ -26,7 +26,6 @@ class CreateDecisionResponse(BaseModel):
 
 
 class TurnRequest(BaseModel):
-    user_id: str = Field(min_length=1)
     user_text: str = Field(min_length=1, max_length=8000)
     manifesto_snippet: str = ""
 
@@ -41,12 +40,13 @@ class TurnResponse(BaseModel):
     status_code=status.HTTP_201_CREATED,
 )
 async def create_decision(
-    payload: CreateDecisionRequest,
+    payload: CreateDecisionRequest | None = None,
+    user_id: str = Depends(require_user),
     memory: MemoryBank = Depends(get_memory),
 ) -> CreateDecisionResponse:
-    decision = Decision(user_id=payload.user_id, status=DecisionStatus.OPEN)
+    decision = Decision(user_id=user_id, status=DecisionStatus.OPEN)
     await memory.decisions.create(decision)
-    bind_context(user_id=payload.user_id, decision_id=decision.decision_id)
+    bind_context(user_id=user_id, decision_id=decision.decision_id)
     return CreateDecisionResponse(decision=decision)
 
 
@@ -57,12 +57,20 @@ async def create_decision(
 async def take_turn(
     decision_id: str,
     payload: TurnRequest,
+    user_id: str = Depends(require_user),
     conductor: Conductor = Depends(get_conductor),
+    memory: MemoryBank = Depends(get_memory),
 ) -> TurnResponse:
-    bind_context(user_id=payload.user_id, decision_id=decision_id)
+    try:
+        decision = await memory.decisions.get(user_id=user_id, decision_id=decision_id)
+    except NotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if decision.user_id != user_id:
+        raise HTTPException(status_code=403, detail="Not your decision.")
+    bind_context(user_id=user_id, decision_id=decision_id)
     turn = await conductor.run_turn(
         SessionInput(
-            user_id=payload.user_id,
+            user_id=user_id,
             decision_id=decision_id,
             user_text=payload.user_text,
             manifesto_snippet=payload.manifesto_snippet,
@@ -74,21 +82,30 @@ async def take_turn(
 @router.get("/decisions/{decision_id}", response_model=Decision)
 async def get_decision(
     decision_id: str,
-    user_id: str,
+    user_id: str = Depends(require_user),
     memory: MemoryBank = Depends(get_memory),
 ) -> Decision:
     try:
-        return await memory.decisions.get(user_id=user_id, decision_id=decision_id)
+        decision = await memory.decisions.get(user_id=user_id, decision_id=decision_id)
     except NotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if decision.user_id != user_id:
+        raise HTTPException(status_code=403, detail="Not your decision.")
+    return decision
 
 
 @router.get("/decisions/{decision_id}/turns", response_model=list[Turn])
 async def list_turns(
     decision_id: str,
-    user_id: str,
+    user_id: str = Depends(require_user),
     memory: MemoryBank = Depends(get_memory),
 ) -> list[Turn]:
+    try:
+        decision = await memory.decisions.get(user_id=user_id, decision_id=decision_id)
+    except NotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if decision.user_id != user_id:
+        raise HTTPException(status_code=403, detail="Not your decision.")
     return await memory.decisions.list_turns(user_id=user_id, decision_id=decision_id)
 
 

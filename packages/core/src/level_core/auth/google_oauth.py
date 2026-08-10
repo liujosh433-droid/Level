@@ -6,6 +6,7 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 import secrets
 import time
 from datetime import datetime, timezone
@@ -22,12 +23,13 @@ from level_core.schemas.user import OAuthToken
 # Also carries the PKCE code_verifier so token exchange works on a new Flow.
 _STATE_MAX_AGE_SECONDS = 15 * 60
 
-# Read-only scopes — enough for Memory Bank ingestion, least privilege.
+# Calendar events = read + write (commitment gate can create after confirm).
+# Drive stays read-only for Memory Bank ingestion.
 GOOGLE_SCOPES = (
     "openid",
     "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/userinfo.profile",
-    "https://www.googleapis.com/auth/calendar.readonly",
+    "https://www.googleapis.com/auth/calendar.events",
     "https://www.googleapis.com/auth/drive.readonly",
 )
 
@@ -81,21 +83,30 @@ def _make_pkce() -> tuple[str, str]:
     return verifier, challenge
 
 
-def mint_oauth_state(settings: Settings | None = None, *, code_verifier: str) -> str:
-    """HMAC-signed state carrying PKCE verifier (no server-side session needed)."""
+def mint_oauth_state(
+    settings: Settings | None = None,
+    *,
+    code_verifier: str,
+    link_user_id: str | None = None,
+) -> str:
+    """HMAC-signed state carrying PKCE verifier (+ optional guest user to link)."""
     settings = settings or get_settings()
-    body = {
+    body: dict[str, Any] = {
         "t": int(time.time()),
         "n": secrets.token_urlsafe(12),
         "v": code_verifier,
     }
+    if link_user_id:
+        body["u"] = link_user_id
     raw = _b64url(json.dumps(body, separators=(",", ":")).encode("utf-8"))
     sig = hmac.new(_state_secret(settings), raw.encode("ascii"), hashlib.sha256).hexdigest()
     return f"{raw}.{sig}"
 
 
-def parse_oauth_state(state: str, settings: Settings | None = None) -> str | None:
-    """Validate state and return the PKCE code_verifier, or None if invalid."""
+def parse_oauth_state(
+    state: str, settings: Settings | None = None
+) -> tuple[str, str | None] | None:
+    """Validate state → ``(code_verifier, link_user_id | None)``."""
     settings = settings or get_settings()
     if "." not in state:
         return None
@@ -111,23 +122,30 @@ def parse_oauth_state(state: str, settings: Settings | None = None) -> str | Non
         body = json.loads(_b64url_decode(raw).decode("utf-8"))
         ts = int(body["t"])
         verifier = str(body["v"])
+        link_user_id = str(body["u"]) if body.get("u") else None
     except (KeyError, TypeError, ValueError, json.JSONDecodeError):
         return None
     age = int(time.time()) - ts
     if age < 0 or age > _STATE_MAX_AGE_SECONDS or not verifier:
         return None
-    return verifier
+    return verifier, link_user_id
 
 
 def verify_oauth_state(state: str, settings: Settings | None = None) -> bool:
     return parse_oauth_state(state, settings) is not None
 
 
-def authorization_url(settings: Settings | None = None) -> tuple[str, str]:
+def authorization_url(
+    settings: Settings | None = None,
+    *,
+    link_user_id: str | None = None,
+) -> tuple[str, str]:
     """Return (auth_url, state)."""
     settings = settings or get_settings()
     verifier, challenge = _make_pkce()
-    state = mint_oauth_state(settings, code_verifier=verifier)
+    state = mint_oauth_state(
+        settings, code_verifier=verifier, link_user_id=link_user_id
+    )
     flow = build_flow(settings, state=state)
     # Keep verifier on the Flow in case the library reads it later.
     flow.code_verifier = verifier  # type: ignore[attr-defined]
@@ -144,11 +162,16 @@ def authorization_url(settings: Settings | None = None) -> tuple[str, str]:
 
 def exchange_code(code: str, state: str, settings: Settings | None = None) -> Credentials:
     settings = settings or get_settings()
-    verifier = parse_oauth_state(state, settings)
-    if not verifier:
+    parsed = parse_oauth_state(state, settings)
+    if not parsed:
         raise ValueError("invalid OAuth state / missing PKCE verifier")
+    verifier, _link = parsed
     flow = build_flow(settings)
     flow.code_verifier = verifier  # type: ignore[attr-defined]
+    # With include_granted_scopes, Google may also return older grants
+    # (e.g. calendar.readonly from a prior connect). oauthlib rejects that
+    # mismatch unless we relax scope checking.
+    os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = "1"
     flow.fetch_token(code=code, code_verifier=verifier)
     return flow.credentials
 

@@ -1,20 +1,36 @@
 :root {
-  --ink: #0b1419;
-  --depth: #12242e;
-  --horizon: #1e3d4a;
-  --mist: #c5d5db;
-  --foam: #eef4f6;
+  --ink: #0c161c;
+  --depth: #142830;
+  --horizon: #234553;
+  --mist: #b7c9d0;
+  --foam: #f2f7f8;
   --signal: #3db8a0;
+  --signal-soft: rgba(61, 184, 160, 0.16);
   --signal-deep: #2a8f7c;
-  --warn: #e8a54b;
+  --warn: #e0a35a;
   --danger: #d45d5d;
-  --radius: 2px;
+  --line: rgba(197, 213, 219, 0.14);
+  --line-strong: rgba(197, 213, 219, 0.28);
+  --field: rgba(18, 40, 50, 0.72);
+  --radius: 6px;
+  --radius-lg: 14px;
   --font-display: "Fraunces", Georgia, serif;
   --font-body: "Source Sans 3", "Helvetica Neue", sans-serif;
+  --shell-max: 42rem;
+  --pad-x: clamp(1.1rem, 4.5vw, 2rem);
+  --pad-y: clamp(1rem, 3vw, 1.75rem);
+  --nav-h: 3.5rem;
+  --bottom-nav-h: 4.25rem;
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --touch: 44px;
 }
 
 * {
   box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
 }
 
 html,
@@ -25,9 +41,32 @@ body {
   background: var(--ink);
   color: var(--foam);
   font-family: var(--font-body);
-  font-size: 17px;
+  font-size: clamp(16px, 1.8vw, 18px);
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -2;
+  background:
+    radial-gradient(ellipse 90% 60% at 78% -8%, rgba(61, 184, 160, 0.2), transparent 58%),
+    radial-gradient(ellipse 55% 45% at -5% 95%, rgba(35, 69, 83, 0.95), transparent 52%),
+    linear-gradient(168deg, #0c161c 0%, #142830 48%, #0e1c24 100%);
+  animation: wash 22s ease-in-out infinite alternate;
+}
+
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  opacity: 0.035;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
 }
 
 a {
@@ -35,22 +74,29 @@ a {
   text-decoration: none;
 }
 
+button,
+input,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
 button {
-  font-family: inherit;
   cursor: pointer;
 }
 
-/* Atmospheric wash — cool depth, not flat black */
-body::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  z-index: -1;
-  background:
-    radial-gradient(ellipse 80% 55% at 70% -10%, rgba(61, 184, 160, 0.18), transparent 55%),
-    radial-gradient(ellipse 60% 50% at 0% 100%, rgba(30, 61, 74, 0.9), transparent 50%),
-    linear-gradient(165deg, #0b1419 0%, #12242e 45%, #0e1a22 100%);
-  animation: wash 18s ease-in-out infinite alternate;
+button:disabled {
+  cursor: not-allowed;
+}
+
+:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 3px;
+}
+
+::selection {
+  background: rgba(61, 184, 160, 0.35);
+  color: var(--foam);
 }
 
 @keyframes wash {
@@ -58,14 +104,14 @@ body::before {
     filter: hue-rotate(0deg) brightness(1);
   }
   to {
-    filter: hue-rotate(8deg) brightness(1.05);
+    filter: hue-rotate(6deg) brightness(1.04);
   }
 }
 
 @keyframes rise {
   from {
     opacity: 0;
-    transform: translateY(12px);
+    transform: translateY(14px);
   }
   to {
     opacity: 1;
@@ -73,12 +119,23 @@ body::before {
   }
 }
 
-@keyframes pulse-line {
-  0%,
-  100% {
-    opacity: 0.35;
+@keyframes fade {
+  from {
+    opacity: 0;
   }
-  50% {
-    opacity: 0.9;
+  to {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  body::before,
+  * {
+    animation: none !important;
+    transition: none !important;
   }
 }

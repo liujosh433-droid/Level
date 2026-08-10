@@ -97,6 +97,11 @@ class Settings(BaseSettings):
         alias="GOOGLE_OAUTH_REDIRECT_URI",
     )
     web_app_url: str = Field(default="http://localhost:3000", alias="LEVEL_WEB_APP_URL")
+    session_secret: str = Field(
+        default="",
+        alias="LEVEL_SESSION_SECRET",
+        description="HMAC secret for level_session cookies. Falls back to OAuth secret in local.",
+    )
 
     # Prefer AI Studio API key even when LEVEL_ENV=cloud (handy during setup).
     use_ai_studio: bool = Field(default=True, alias="LEVEL_USE_AI_STUDIO")

@@ -7,8 +7,9 @@ updates during a session.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
+from level_api.auth_deps import require_user
 from level_api.dependencies import get_memory, get_registry
 from level_core.agents.registry import AgentRegistry
 from level_core.memory.base import MemoryBank
@@ -32,17 +33,24 @@ async def list_agent_versions(
 
 @router.get("/users/{user_id}/bias_profile", response_model=BiasProfile | None)
 async def get_bias_profile(
-    user_id: str, memory: MemoryBank = Depends(get_memory)
+    user_id: str,
+    session_user: str = Depends(require_user),
+    memory: MemoryBank = Depends(get_memory),
 ) -> BiasProfile | None:
+    if user_id != session_user:
+        raise HTTPException(status_code=403, detail="Not your profile.")
     return await memory.manifestos.get_bias_profile(user_id=user_id)
 
 
 @router.get("/users/{user_id}/bias_events", response_model=list[BiasEvent])
 async def list_bias_events(
     user_id: str,
+    session_user: str = Depends(require_user),
     memory: MemoryBank = Depends(get_memory),
     limit: int = 100,
 ) -> list[BiasEvent]:
+    if user_id != session_user:
+        raise HTTPException(status_code=403, detail="Not your profile.")
     return await memory.turns.list_bias_events_for_user(user_id=user_id, limit=limit)
 
 

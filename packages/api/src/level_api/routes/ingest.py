@@ -11,6 +11,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
+from level_api.auth_deps import require_user
 from level_api.dependencies import get_memory
 from level_core.errors import GuardrailBlocked
 from level_core.guardrails.inbound import InboundGuardrail
@@ -21,7 +22,6 @@ router = APIRouter(prefix="/v1/ingest", tags=["ingest"])
 
 
 class SubmitSignalRequest(BaseModel):
-    user_id: str = Field(min_length=1)
     source: SignalSource
     external_id: str = Field(min_length=1, max_length=200)
     text: str | None = Field(default=None, max_length=32000)
@@ -35,10 +35,11 @@ class SubmitSignalRequest(BaseModel):
 )
 async def submit_signal(
     payload: SubmitSignalRequest,
+    user_id: str = Depends(require_user),
     memory: MemoryBank = Depends(get_memory),
 ) -> Signal:
     signal = Signal(
-        user_id=payload.user_id,
+        user_id=user_id,
         source=payload.source,
         external_id=payload.external_id,
         text=payload.text,
@@ -55,8 +56,8 @@ async def submit_signal(
 
 @router.get("/signals", response_model=list[Signal])
 async def list_signals(
-    user_id: str,
     source: SignalSource,
+    user_id: str = Depends(require_user),
     memory: MemoryBank = Depends(get_memory),
 ) -> list[Signal]:
     return await memory.signals.list_by_source(user_id=user_id, source=source.value)

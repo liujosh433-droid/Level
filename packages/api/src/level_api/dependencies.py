@@ -13,7 +13,9 @@ from functools import lru_cache
 from level_core.agents.conductor import Conductor, build_conductor
 from level_core.agents.registry import AgentRegistry, build_registry
 from level_core.auth.tokens import TokenStore, build_token_store
+from level_core.calendar.event_cues import EventCueStore, build_event_cue_store
 from level_core.calendar.proposals import ProposalStore, build_proposal_store
+from level_core.calendar.sync_state import CalendarSyncStore, build_calendar_sync_store
 from level_core.config import Settings, get_settings
 from level_core.gateway.router import AgentGateway
 from level_core.guardrails.outbound import OutboundGuardrail
@@ -53,6 +55,16 @@ def cached_proposal_store() -> ProposalStore:
 
 
 @lru_cache(maxsize=1)
+def cached_event_cue_store() -> EventCueStore:
+    return build_event_cue_store(cached_settings())
+
+
+@lru_cache(maxsize=1)
+def cached_calendar_sync_store() -> CalendarSyncStore:
+    return build_calendar_sync_store(cached_settings())
+
+
+@lru_cache(maxsize=1)
 def cached_conductor() -> Conductor:
     settings = cached_settings()
     return build_conductor(
@@ -88,15 +100,27 @@ def get_proposal_store() -> ProposalStore:
     return cached_proposal_store()
 
 
+def get_event_cue_store() -> EventCueStore:
+    return cached_event_cue_store()
+
+
+def get_calendar_sync_store() -> CalendarSyncStore:
+    return cached_calendar_sync_store()
+
+
 __all__ = [
+    "cached_calendar_sync_store",
     "cached_conductor",
+    "cached_event_cue_store",
     "cached_gateway",
     "cached_memory",
     "cached_proposal_store",
     "cached_registry",
     "cached_settings",
     "cached_token_store",
+    "get_calendar_sync_store",
     "get_conductor",
+    "get_event_cue_store",
     "get_gateway",
     "get_memory",
     "get_proposal_store",

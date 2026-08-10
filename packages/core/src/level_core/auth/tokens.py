@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
+import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Iterator, Protocol
 
 from level_core.config import Settings, get_settings
 from level_core.schemas.user import OAuthToken, User
@@ -47,45 +50,106 @@ class InMemoryTokenStore:
         return self._tokens.pop(user_id, None) is not None
 
 
+@contextmanager
+def _file_lock(path: Path) -> Iterator[None]:
+    """Exclusive lock so uvicorn --reload workers can't clobber each other."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    with open(lock_path, "a+", encoding="utf-8") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
 class LocalFileTokenStore(InMemoryTokenStore):
     """In-memory store that also persists to disk so uvicorn reload keeps OAuth."""
 
     def __init__(self, path: Path) -> None:
         super().__init__()
         self._path = path
-        self._load()
+        with _file_lock(self._path):
+            self._load_unlocked()
 
-    def _load(self) -> None:
-        if not self._path.exists():
-            return
-        try:
-            raw = json.loads(self._path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return
+    def _ingest(self, raw: dict[str, Any], *, prefer_incoming: bool) -> None:
         for u in raw.get("users") or []:
             try:
-                user = User(**u)
+                # LevelModel is strict=True; JSON ISO datetimes need strict=False.
+                user = User.model_validate(u, strict=False)
             except Exception:  # noqa: BLE001
                 continue
-            self._users[user.user_id] = user
+            existing = self._users.get(user.user_id)
+            if existing is None:
+                self._users[user.user_id] = user
+            elif prefer_incoming and user.updated_at >= existing.updated_at:
+                self._users[user.user_id] = user
             if user.google_sub:
                 self._by_sub[user.google_sub] = user.user_id
         for t in raw.get("tokens") or []:
             try:
-                token = OAuthToken(**t)
+                token = OAuthToken.model_validate(t, strict=False)
             except Exception:  # noqa: BLE001
                 continue
-            self._tokens[token.user_id] = token
+            existing = self._tokens.get(token.user_id)
+            if existing is None:
+                self._tokens[token.user_id] = token
+            elif prefer_incoming and token.updated_at >= existing.updated_at:
+                self._tokens[token.user_id] = token
+            elif existing is not None and not existing.refresh_token and token.refresh_token:
+                # Never drop a refresh token we already persisted.
+                self._tokens[token.user_id] = token
+
+    def _read_raw(self) -> dict[str, Any] | None:
+        if not self._path.exists():
+            return None
+        last_err: Exception | None = None
+        for _ in range(5):
+            try:
+                text = self._path.read_text(encoding="utf-8")
+                if not text.strip():
+                    return {"users": [], "tokens": []}
+                data = json.loads(text)
+                if isinstance(data, dict):
+                    return data
+                return {"users": [], "tokens": []}
+            except (OSError, json.JSONDecodeError) as exc:
+                last_err = exc
+                time.sleep(0.04)
+        # Corrupt mid-write — keep memory as-is; don't treat as empty store.
+        if last_err is not None:
+            return None
+        return None
+
+    def _load_unlocked(self) -> None:
+        raw = self._read_raw()
+        if raw is None:
+            return
+        self._ingest(raw, prefer_incoming=True)
+
+    def _merge_disk_unlocked(self) -> None:
+        """Pull in any users/tokens written by another process before we save."""
+        raw = self._read_raw()
+        if raw is None:
+            return
+        self._ingest(raw, prefer_incoming=False)
 
     def _save(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "users": [u.model_dump(mode="json") for u in self._users.values()],
-            "tokens": [t.model_dump(mode="json") for t in self._tokens.values()],
-        }
-        tmp = self._path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        tmp.replace(self._path)
+        with _file_lock(self._path):
+            self._merge_disk_unlocked()
+            # Never overwrite a populated file with a totally empty snapshot.
+            if not self._users and not self._tokens:
+                disk = self._read_raw()
+                if disk and (disk.get("users") or disk.get("tokens")):
+                    self._ingest(disk, prefer_incoming=True)
+                    return
+            payload = {
+                "users": [u.model_dump(mode="json") for u in self._users.values()],
+                "tokens": [t.model_dump(mode="json") for t in self._tokens.values()],
+            }
+            tmp = self._path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            tmp.replace(self._path)
 
     async def upsert_user(self, user: User) -> None:
         await super().upsert_user(user)
@@ -186,9 +250,9 @@ _LOCAL_STORE: LocalFileTokenStore | InMemoryTokenStore | None = None
 
 def _local_store_path() -> Path:
     # packages/core/src/level_core/auth/tokens.py → repo root = parents[5]
-    # Prefer CWD (usually repo root when running make api).
-    cwd = Path.cwd() / ".level" / "oauth_store.json"
-    return cwd
+    # Prefer an absolute path so cwd changes / reload workers can't fork the store.
+    repo_root = Path(__file__).resolve().parents[5]
+    return repo_root / ".level" / "oauth_store.json"
 
 
 def build_token_store(settings: Settings | None = None) -> TokenStore:

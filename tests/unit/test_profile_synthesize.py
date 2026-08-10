@@ -47,8 +47,8 @@ def test_snapshot_builds_bullets() -> None:
     ]
     snap = synthesize_snapshot(facts, user_id="u1")
     assert snap.fact_count == 2
-    assert any(b.category.value == "value" for b in snap.bullets)
-    assert any(b.category.value == "constraint" for b in snap.bullets)
+    assert any(b.category.value == "priority" for b in snap.bullets)
+    assert any("daughter" in b.text.lower() or "6pm" in b.text.lower() for b in snap.bullets)
 
 
 def test_calendar_patterns_from_evening_load() -> None:

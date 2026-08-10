@@ -52,12 +52,29 @@ _STOP = frozenset(
 )
 
 _TYPE_TO_CATEGORY = {
-    FactType.VALUE_STATEMENT: BulletCategory.VALUE,
-    FactType.COMMITMENT: BulletCategory.COMMITMENT,
+    FactType.VALUE_STATEMENT: BulletCategory.PRIORITY,
+    FactType.COMMITMENT: BulletCategory.PRIORITY,
     FactType.CONSTRAINT: BulletCategory.CONSTRAINT,
-    FactType.RELATIONSHIP: BulletCategory.RELATIONSHIP,
+    FactType.RELATIONSHIP: BulletCategory.PRIORITY,
+    FactType.PREFERENCE: BulletCategory.PRIORITY,
     FactType.EVENT: BulletCategory.LOAD,
 }
+
+# Calendar analytics — never surface these as "who you are" priorities.
+_ANALYTICS_STATEMENT = re.compile(
+    r"("
+    r"on my calendar|"
+    r"in (this|the) (current )?window|"
+    r"appears? repeatedly|"
+    r"shows? up (often|repeatedly)|"
+    r"keeps? recurring|"
+    r"times recently|"
+    r"part of my (regular |normal )?load|"
+    r"frequent evening|"
+    r"\d+\s+in (this|the)"
+    r")",
+    re.I,
+)
 
 # Soft opposition cues for contradiction pairing.
 _POS = re.compile(
@@ -133,89 +150,101 @@ def detect_contradictions(facts: list[Fact], *, user_id: str, limit: int = 6) ->
     return out
 
 
+def _is_analytics_statement(text: str) -> bool:
+    return bool(_ANALYTICS_STATEMENT.search(text or ""))
+
+
 def build_manifesto_statement(facts: list[Fact]) -> tuple[str, list[str]]:
-    """Template manifesto from high-salience values/commitments/constraints."""
-    values = [
+    """Short line of top priorities (not a dump of calendar analytics)."""
+    priorities = [
         f
         for f in facts
-        if f.type is FactType.VALUE_STATEMENT and f.confidence >= 0.5
+        if f.confidence >= 0.5
+        and f.type
+        in {
+            FactType.VALUE_STATEMENT,
+            FactType.COMMITMENT,
+            FactType.RELATIONSHIP,
+            FactType.PREFERENCE,
+        }
+        and not _is_analytics_statement(f.statement)
     ]
-    commits = [f for f in facts if f.type is FactType.COMMITMENT and f.confidence >= 0.5]
-    constraints = [
-        f for f in facts if f.type is FactType.CONSTRAINT and f.confidence >= 0.5
-    ]
-    values.sort(key=lambda f: f.salience, reverse=True)
-    commits.sort(key=lambda f: f.salience, reverse=True)
-    constraints.sort(key=lambda f: f.salience, reverse=True)
-
-    parts: list[str] = []
-    source_ids: list[str] = []
-    if values:
-        parts.append("I care about: " + "; ".join(f.statement.rstrip(".") for f in values[:3]) + ".")
-        source_ids.extend(f.fact_id for f in values[:3])
-    if commits:
-        parts.append(
-            "I have committed to: " + "; ".join(f.statement.rstrip(".") for f in commits[:3]) + "."
+    priorities.sort(key=lambda f: f.salience, reverse=True)
+    if not priorities:
+        return (
+            "Still learning what you protect when the week gets hard.",
+            [],
         )
-        source_ids.extend(f.fact_id for f in commits[:3])
-    if constraints:
-        parts.append(
-            "Hard limits I need to respect: "
-            + "; ".join(f.statement.rstrip(".") for f in constraints[:3])
-            + "."
-        )
-        source_ids.extend(f.fact_id for f in constraints[:3])
-    if not parts:
+    top = priorities[:3]
+    labels = [f.statement.rstrip(".") for f in top]
+    if len(labels) == 1:
+        statement = f"Right now it looks like you prioritize {labels[0].lower()}."
+    elif len(labels) == 2:
         statement = (
-            "I am still learning what matters most in my decisions. "
-            "I want choices I can defend a week later."
+            f"Right now it looks like you prioritize {labels[0].lower()}, "
+            f"and {labels[1].lower()}."
         )
-        return statement, []
-    statement = " ".join(parts)
-    if len(statement) < 20:
-        statement = statement + " I want to stay honest about tradeoffs."
-    return statement[:4000], source_ids
+    else:
+        statement = (
+            f"Right now it looks like you prioritize {labels[0].lower()}, "
+            f"{labels[1].lower()}, and {labels[2].lower()}."
+        )
+    return statement[:4000], [f.fact_id for f in top]
 
 
 def synthesize_snapshot(facts: list[Fact], *, user_id: str) -> ProfileSnapshot:
-    """Deterministic profile bullets + contradictions from the Memory Bank."""
+    """Build a short list of inferred priorities the user can Keep / Not me."""
     bullets: list[ProfileBullet] = []
-    # Prefer durable types; skip low-confidence noise.
     ranked = sorted(
-        [f for f in facts if f.confidence >= 0.55],
-        key=lambda f: (f.salience, f.confidence),
+        [
+            f
+            for f in facts
+            if f.confidence >= 0.55 and not _is_analytics_statement(f.statement)
+        ],
+        key=lambda f: (
+            1 if (f.written_by or "").startswith("agenda_priorities") else 0,
+            f.salience,
+            f.confidence,
+        ),
         reverse=True,
     )
+    # Prefer priority-shaped types; keep a couple of real constraints if useful.
     per_cat: dict[BulletCategory, int] = defaultdict(int)
+    seen_text: set[str] = set()
     for fact in ranked:
         cat = _TYPE_TO_CATEGORY.get(fact.type)
-        if cat is None:
+        if cat is None or cat is BulletCategory.LOAD:
             continue
-        if per_cat[cat] >= 3:
+        # Profile page is priorities-first — soft-cap constraints.
+        if cat is BulletCategory.CONSTRAINT and per_cat[cat] >= 1:
             continue
+        if cat is BulletCategory.PRIORITY and per_cat[cat] >= 6:
+            continue
+        if per_cat[cat] >= 4:
+            continue
+        text = fact.statement.strip()
+        key = text.lower()
+        if key in seen_text:
+            continue
+        seen_text.add(key)
         per_cat[cat] += 1
+        # Agenda priorities already use PRIORITY; map value/relationship the same.
+        if cat in {BulletCategory.VALUE, BulletCategory.RELATIONSHIP, BulletCategory.COMMITMENT}:
+            cat = BulletCategory.PRIORITY
         bullets.append(
             ProfileBullet(
                 category=cat,
-                text=fact.statement[:400],
+                text=text[:220],
                 source_fact_ids=[fact.fact_id],
             )
         )
 
     contradictions = detect_contradictions(facts, user_id=user_id)
-    for c in contradictions[:4]:
-        bullets.append(
-            ProfileBullet(
-                category=BulletCategory.CONTRADICTION,
-                text=c.summary[:400],
-                source_fact_ids=[c.fact_id_a, c.fact_id_b],
-            )
-        )
-
+    # Keep tensions on the side — don't pollute the priority list.
     return ProfileSnapshot(
         user_id=user_id,
-        bullets=bullets[:16],
-        contradictions=contradictions,
+        bullets=bullets[:8],
+        contradictions=contradictions[:4],
         needs_review=True,
         fact_count=len(facts),
     )
@@ -308,6 +337,202 @@ def calendar_pattern_facts(
     return facts
 
 
+def agenda_life_facts(
+    event_summaries: list[str],
+    *,
+    user_id: str,
+) -> list[Fact]:
+    """Backward-compatible wrapper — prefer :func:`infer_priority_facts`."""
+    events = [{"summary": s, "start": None} for s in event_summaries]
+    return infer_priority_facts(events, user_id=user_id)
+
+
+def _event_hour(start: str | None) -> int | None:
+    if not start or "T" not in start:
+        return None
+    try:
+        return int(start.split("T", 1)[1][:2])
+    except (ValueError, IndexError):
+        return None
+
+
+def _fmt_hour(hour: int) -> str:
+    suffix = "am" if hour < 12 else "pm"
+    h12 = hour % 12
+    if h12 == 0:
+        h12 = 12
+    return f"{h12}{suffix}"
+
+
+def infer_priority_facts(
+    events: list[dict[str, str | None]],
+    *,
+    user_id: str,
+) -> list[Fact]:
+    """Infer concise life priorities from calendar events (a step beyond event dumps).
+
+    Examples:
+    - regular soccer / school with Jordan → family time with Jordan
+    - weekday work blocks → protect work hours ~9–5
+    - Mom visits → staying close with Mom
+    """
+    if not events:
+        return []
+
+    name_re = re.compile(r"\s+[—\-–]\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s*$")
+    kid_cue = re.compile(
+        r"school|pickup|drop.?off|soccer|practice|game|swim|ballet|daycare|pediatric|teacher",
+        re.I,
+    )
+    elder_re = re.compile(r"\b(mom|dad|mother|father|grandma|grandpa|nan|pop)\b", re.I)
+    work_re = re.compile(
+        r"\b(work|standup|stand-up|1:1|one-on-one|interview|sprint|office|shift|"
+        r"sync|staff meeting|all hands|payroll|client)\b",
+        re.I,
+    )
+    health_re = re.compile(
+        r"therapy|counsel|dentist|doctor|clinic|ultrasound|hospital|appt|appointment|"
+        r"mental|recovery|massage|pt\b|physio",
+        re.I,
+    )
+    learn_re = re.compile(r"\b(class|course|lecture|study|night class|muay|gym)\b", re.I)
+    sleep_re = re.compile(r"\b(sleep|rest|wind.?down|bedtime)\b", re.I)
+
+    child_events: dict[str, int] = Counter()
+    elder_hits: Counter[str] = Counter()
+    work_hours: list[int] = []
+    health_n = 0
+    learn_n = 0
+    sleep_n = 0
+    early_n = 0
+    late_n = 0
+
+    for ev in events:
+        summary = " ".join(((ev.get("summary") or "")).split()).strip()
+        if not summary or summary == "(no title)":
+            continue
+        hour = _event_hour(ev.get("start"))
+        if hour is not None:
+            if hour < 7:
+                early_n += 1
+            if hour >= 20:
+                late_n += 1
+
+        m = name_re.search(summary)
+        person = m.group(1) if m else None
+        title = summary[: m.start()].strip(" —-–") if m else summary
+
+        if person and (kid_cue.search(title) or kid_cue.search(summary)):
+            child_events[person] += 1
+        elif person and elder_re.search(person):
+            elder_hits[person] += 1
+        elif elder_re.search(summary):
+            label = elder_re.search(summary)
+            if label:
+                elder_hits[label.group(1).title()] += 1
+
+        if work_re.search(summary):
+            if hour is not None and 7 <= hour <= 18:
+                work_hours.append(hour)
+            elif hour is None:
+                work_hours.append(9)  # count presence even without time
+        if health_re.search(summary):
+            health_n += 1
+        if learn_re.search(summary) and not work_re.search(summary):
+            learn_n += 1
+        if sleep_re.search(summary):
+            sleep_n += 1
+
+    facts: list[Fact] = []
+
+    def _add(statement: str, *, salience: float, ftype: FactType = FactType.VALUE_STATEMENT) -> None:
+        facts.append(
+            Fact(
+                user_id=user_id,
+                type=ftype,
+                statement=statement,
+                salience=salience,
+                confidence=0.78,
+                source_signal_ids=[],
+                written_by="agenda_priorities@v1",
+            )
+        )
+
+    # Family / kids — one priority per child, inferred from routines.
+    for name, n in child_events.most_common(3):
+        if n < 2:
+            continue
+        _add(
+            f"Family time with {name} — protecting school, sports, and their day-to-day",
+            salience=0.92,
+            ftype=FactType.RELATIONSHIP,
+        )
+
+    for name, n in elder_hits.most_common(2):
+        if n < 1:
+            continue
+        _add(
+            f"Staying close with {name} — visits and check-ins matter",
+            salience=0.84,
+            ftype=FactType.RELATIONSHIP,
+        )
+
+    # Work block inference from timed work-ish events.
+    if len(work_hours) >= 3:
+        start_h = min(work_hours)
+        end_h = max(work_hours) + 1
+        # Sensible defaults if the spread is weird.
+        if end_h - start_h < 3:
+            start_h, end_h = 9, 17
+        start_h = max(7, min(start_h, 11))
+        end_h = max(start_h + 4, min(end_h, 19))
+        _add(
+            f"Work focus on weekdays — roughly {_fmt_hour(start_h)}–{_fmt_hour(end_h)} stays protected",
+            salience=0.88,
+            ftype=FactType.COMMITMENT,
+        )
+    elif len(work_hours) >= 1:
+        _add(
+            "Protecting focused work time during the week",
+            salience=0.75,
+            ftype=FactType.COMMITMENT,
+        )
+
+    if health_n >= 2:
+        _add(
+            "Health and recovery — appointments and mental-health care stay on the calendar",
+            salience=0.8,
+        )
+    elif health_n == 1:
+        _add(
+            "Making space for health and recovery when it comes up",
+            salience=0.7,
+        )
+
+    if learn_n >= 2:
+        _add(
+            "Learning and training — classes that keep you growing outside work",
+            salience=0.72,
+        )
+
+    if sleep_n >= 1 or (early_n >= 2 and late_n >= 2):
+        _add(
+            "Sleep and mental recovery — the week shouldn’t run you into the ground",
+            salience=0.78,
+        )
+
+    # Deduplicate near-identical priorities.
+    seen: set[str] = set()
+    unique: list[Fact] = []
+    for fact in facts:
+        key = fact.statement.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(fact)
+    return unique[:7]
+
+
 async def refresh_profile_and_manifesto(
     *,
     user_id: str,
@@ -329,9 +554,11 @@ async def refresh_profile_and_manifesto(
 
 
 __all__ = [
+    "agenda_life_facts",
     "build_manifesto_statement",
     "calendar_pattern_facts",
     "detect_contradictions",
+    "infer_priority_facts",
     "refresh_profile_and_manifesto",
     "synthesize_snapshot",
 ]

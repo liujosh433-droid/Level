@@ -1,13 +1,22 @@
 "use client";
 
-import { FormEvent, Suspense, useEffect, useRef, useState } from "react";
+import { CSSProperties, Suspense, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { ActivityIcon } from "@/components/ActivityIcon";
 import { AppShell } from "@/components/AppShell";
+import {
+  DashboardWorkspace,
+  RailSection,
+  TellLevelPanel,
+  TellLevelReply,
+  TellLevelYou,
+} from "@/components/dashboard";
 import {
   AuthError,
   confirmProposal,
   createDecision,
+  dayCheckIn,
   declineProposal,
   fetchMe,
   fetchToday,
@@ -21,31 +30,67 @@ import styles from "./today.module.css";
 
 type ChatItem =
   | { id: string; kind: "turn"; turn: Turn }
-  | { id: string; kind: "proposal"; proposal: CommitmentProposal };
+  | { id: string; kind: "proposal"; proposal: CommitmentProposal }
+  | { id: string; kind: "checkin"; you: string; reply: string };
+
+function buildDayScript(view: TodayView): string {
+  const name = view.greeting_name || "there";
+  const parts: string[] = [
+    `Hi ${name}. Here's your Level briefing for ${view.weekday_label}.`,
+  ];
+  if (view.events.length === 0) {
+    parts.push("Your calendar looks clear today.");
+  } else {
+    parts.push(
+      `You have ${view.events.length} thing${view.events.length === 1 ? "" : "s"} on the calendar.`,
+    );
+    for (const ev of view.events.slice(0, 8)) {
+      const when = ev.when_label || "Sometime today";
+      // "At …," + period gives the synthesizer a clearer event boundary than "8:00 AM: …"
+      let line = `At ${when}, ${ev.summary}.`;
+      if (ev.cues?.length) {
+        line += ` Remember: ${ev.cues.join(". ")}.`;
+      }
+      parts.push(line);
+    }
+  }
+  if (view.recommendations?.length) {
+    parts.push(
+      `From what we know about you: ${view.recommendations.slice(0, 2).join(" ")}`,
+    );
+  }
+  parts.push("You've got this — one honest step at a time.");
+  // Ellipsis between beats → a short spoken pause (space alone smushes events together).
+  return parts.join(" ... ");
+}
 
 function TodayInner() {
   const router = useRouter();
   const [userId, setUserId] = useState("");
+  const [displayName, setDisplayName] = useState<string | null>(null);
   const [today, setToday] = useState<TodayView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
-  const [listening, setListening] = useState(false);
+  const [speaking, setSpeaking] = useState(false);
   const [decisionId, setDecisionId] = useState<string | null>(null);
   const [items, setItems] = useState<ChatItem[]>([]);
-  const recognitionRef = useRef<SpeechRecognition | null>(null);
+  const speakGenRef = useRef(0);
+  const speakTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     void (async () => {
       try {
         const me = await fetchMe();
         setUserId(me.user_id);
+        setDisplayName(me.display_name);
         if (!me.google_connected) {
           router.replace("/sources");
           return;
         }
         const data = await fetchToday();
         setToday(data);
+        if (data.display_name) setDisplayName(data.display_name);
       } catch (err) {
         if (err instanceof AuthError) {
           router.replace("/welcome");
@@ -58,47 +103,100 @@ function TodayInner() {
 
   function refreshToday() {
     void fetchToday()
-      .then(setToday)
+      .then((data) => {
+        setToday(data);
+        if (data.display_name) setDisplayName(data.display_name);
+      })
       .catch(() => undefined);
   }
 
-  function toggleVoice() {
-    const SR =
-      typeof window !== "undefined"
-        ? window.SpeechRecognition || window.webkitSpeechRecognition
-        : undefined;
-    if (!SR) {
-      setError("Voice isn’t supported in this browser — try Chrome, or type instead.");
-      return;
+  function clearSpeakTimer() {
+    if (speakTimerRef.current != null) {
+      window.clearTimeout(speakTimerRef.current);
+      speakTimerRef.current = null;
     }
-    if (listening && recognitionRef.current) {
-      recognitionRef.current.stop();
-      setListening(false);
-      return;
-    }
-    const rec = new SR();
-    recognitionRef.current = rec;
-    rec.lang = "en-US";
-    rec.interimResults = false;
-    rec.onresult = (ev: SpeechRecognitionEvent) => {
-      const text = Array.from(ev.results)
-        .map((r) => r[0]?.transcript ?? "")
-        .join(" ")
-        .trim();
-      if (text) setDraft((prev) => (prev ? `${prev.trim()} ${text}` : text));
-    };
-    rec.onerror = () => setListening(false);
-    rec.onend = () => setListening(false);
-    setListening(true);
-    rec.start();
   }
 
-  async function onAsk(e: FormEvent) {
-    e.preventDefault();
-    if (!userId || !draft.trim() || busy) return;
+  function stopSpeaking() {
+    speakGenRef.current += 1;
+    clearSpeakTimer();
+    if (typeof window !== "undefined" && window.speechSynthesis) {
+      window.speechSynthesis.onvoiceschanged = null;
+      // Chrome sometimes ignores cancel while "paused"; resume first.
+      try {
+        window.speechSynthesis.resume();
+      } catch {
+        /* ignore */
+      }
+      window.speechSynthesis.cancel();
+    }
+    setSpeaking(false);
+  }
+
+  function speakDay() {
+    if (!today) return;
+    if (typeof window === "undefined" || !window.speechSynthesis) {
+      setError("Spoken briefing isn’t supported in this browser — try Chrome or Safari.");
+      return;
+    }
+    if (speaking) {
+      stopSpeaking();
+      return;
+    }
+    const script = buildDayScript(today);
+    const gen = ++speakGenRef.current;
+
+    const start = () => {
+      if (gen !== speakGenRef.current) return;
+      const utter = new SpeechSynthesisUtterance(script);
+      utter.rate = 1.02;
+      utter.pitch = 1;
+      const voices = window.speechSynthesis.getVoices();
+      const preferred =
+        voices.find(
+          (v) => /en(-|_)US/i.test(v.lang) && /natural|enhanced|premium/i.test(v.name),
+        ) ||
+        voices.find((v) => /en(-|_)US/i.test(v.lang)) ||
+        voices.find((v) => v.lang.startsWith("en"));
+      if (preferred) utter.voice = preferred;
+      utter.onend = () => {
+        if (gen === speakGenRef.current) setSpeaking(false);
+      };
+      utter.onerror = () => {
+        if (gen === speakGenRef.current) setSpeaking(false);
+      };
+      setSpeaking(true);
+      window.speechSynthesis.cancel();
+      window.speechSynthesis.speak(utter);
+    };
+
+    // Chrome often loads voices asynchronously.
+    if (window.speechSynthesis.getVoices().length === 0) {
+      window.speechSynthesis.onvoiceschanged = () => {
+        window.speechSynthesis.onvoiceschanged = null;
+        start();
+      };
+      clearSpeakTimer();
+      speakTimerRef.current = window.setTimeout(start, 250);
+      return;
+    }
+    start();
+  }
+
+  useEffect(() => {
+    return () => {
+      speakGenRef.current += 1;
+      clearSpeakTimer();
+      if (typeof window !== "undefined" && window.speechSynthesis) {
+        window.speechSynthesis.cancel();
+      }
+    };
+  }, []);
+
+  async function onAsk(text: string) {
+    if (!userId || !text.trim() || busy) return;
     setBusy(true);
     setError(null);
-    const text = draft.trim();
     try {
       const schedule = await proposeSchedule(text);
       if (schedule.is_schedule_ask && schedule.proposal) {
@@ -106,6 +204,25 @@ function TodayInner() {
           ...prev,
           { id: schedule.proposal!.proposal_id, kind: "proposal", proposal: schedule.proposal! },
         ]);
+        setDraft("");
+        return;
+      }
+
+      // Day reflections / tips → profile + event cues
+      const looksLikeDecision =
+        /\b(should i|what if|decide|or not|promotion|school choice)\b/i.test(text);
+      if (!looksLikeDecision) {
+        const check = await dayCheckIn(text);
+        setItems((prev) => [
+          ...prev,
+          {
+            id: `checkin-${Date.now()}`,
+            kind: "checkin",
+            you: text,
+            reply: check.reply,
+          },
+        ]);
+        if (check.today) setToday(check.today);
         setDraft("");
         return;
       }
@@ -171,167 +288,278 @@ function TodayInner() {
     }
   }
 
-  return (
-    <AppShell userId={userId}>
-      <p className={styles.kicker}>Today</p>
-      <h1 className={styles.title}>Your day</h1>
+  const name = today?.greeting_name || "there";
+  const weekday = today?.weekday_label || "today";
 
-      {today?.needs_review && (
-        <p className={styles.banner}>
-          Level drafted your profile — take 30 seconds to confirm it.{" "}
-          <Link href="/profile">Review profile →</Link>
-        </p>
-      )}
-
-      <section className={styles.block}>
-        <h2>On your calendar</h2>
-        {!today ? (
-          <p className={styles.meta}>Loading…</p>
-        ) : today.events.length === 0 ? (
-          <p className={styles.meta}>Nothing on the calendar for today.</p>
+  const hearDayButton = today ? (
+    <button
+      type="button"
+      className={speaking ? styles.speakOn : styles.speak}
+      onClick={speakDay}
+      aria-pressed={speaking}
+      aria-label={speaking ? "Stop hearing your day" : "Hear Level describe your day"}
+    >
+      <svg
+        className={styles.speakIcon}
+        viewBox="0 0 24 24"
+        width="16"
+        height="16"
+        aria-hidden="true"
+      >
+        {speaking ? (
+          <path fill="currentColor" d="M6.5 6.5h11v11h-11z" />
         ) : (
-          <ul className={styles.events}>
-            {today.events.map((ev) => (
-              <li key={ev.id || `${ev.summary}-${ev.start}`}>
-                <span className={styles.when}>{ev.when_label}</span>
-                <span>{ev.summary}</span>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-
-      <section className={styles.block}>
-        <h2>Level recommends</h2>
-        {today && today.recommendations.length > 0 ? (
-          <ul className={styles.recs}>
-            {today.recommendations.map((r) => (
-              <li key={r}>{r}</li>
-            ))}
-          </ul>
-        ) : (
-          <p className={styles.meta}>
-            Sync your calendar on Sources to get day-specific nudges.
-          </p>
-        )}
-      </section>
-
-      <section className={styles.block}>
-        <h2>Ask Level</h2>
-        <p className={styles.meta}>
-          Decisions, “do I have time?”, or “add this to my calendar” — Level checks
-          your schedule and profile before you commit.
-        </p>
-        {items.map((item) =>
-          item.kind === "turn" ? (
-            <article key={item.id} className={styles.turn}>
-              {item.turn.user_text && <p className={styles.you}>{item.turn.user_text}</p>}
-              {item.turn.challenger_questions.map((q, i) => (
-                <div key={i} className={styles.level}>
-                  <p>{q.question}</p>
-                  {q.citations.length > 0 && (
-                    <ul className={styles.cites}>
-                      {q.citations.map((c) => (
-                        <li key={c.fact_id}>{c.quote}</li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
-              ))}
-            </article>
-          ) : (
-            <article key={item.id} className={styles.turn}>
-              <p className={styles.you}>{item.proposal.user_text}</p>
-              <div className={styles.level}>
-                <p className={styles.proposalSummary}>{item.proposal.summary}</p>
-                <p>{item.proposal.level_message}</p>
-                {item.proposal.conflicts.length > 0 && (
-                  <ul className={styles.cites}>
-                    {item.proposal.conflicts.map((c) => (
-                      <li key={`${c.summary}-${c.start}`}>Conflict: {c.label}</li>
-                    ))}
-                  </ul>
-                )}
-                {item.proposal.citations.length > 0 && (
-                  <ul className={styles.cites}>
-                    {item.proposal.citations.map((c) => (
-                      <li key={c.fact_id}>{c.quote}</li>
-                    ))}
-                  </ul>
-                )}
-                {item.proposal.status === "pending" && (
-                  <div className={styles.proposalActions}>
-                    {(item.proposal.kind === "add" ||
-                      item.proposal.recommended_action === "confirm") && (
-                      <button
-                        type="button"
-                        className={styles.primaryAction}
-                        disabled={busy}
-                        onClick={() => void onConfirm(item.proposal)}
-                      >
-                        {item.proposal.kind === "availability"
-                          ? "Book this time"
-                          : "Add anyway"}
-                      </button>
-                    )}
-                    {item.proposal.free_slots.slice(0, 3).map((slot) => (
-                      <button
-                        key={slot.start}
-                        type="button"
-                        className={styles.secondaryAction}
-                        disabled={busy}
-                        onClick={() => void onConfirm(item.proposal, slot.start)}
-                      >
-                        Use {slot.label}
-                      </button>
-                    ))}
-                    <button
-                      type="button"
-                      className={styles.ghostAction}
-                      disabled={busy}
-                      onClick={() => void onDecline(item.proposal)}
-                    >
-                      Never mind
-                    </button>
-                  </div>
-                )}
-                {item.proposal.status === "confirmed" && (
-                  <p className={styles.meta}>Added to your Google Calendar.</p>
-                )}
-                {item.proposal.status === "declined" && (
-                  <p className={styles.meta}>Okay — left off the calendar.</p>
-                )}
-              </div>
-            </article>
-          ),
-        )}
-        <div className={styles.askDock}>
-          <form onSubmit={onAsk} className={styles.ask}>
-            {error && <p className={styles.error}>{error}</p>}
-            <textarea
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              rows={3}
-              placeholder='Try: “Diane wants dinner at 6:30 tonight — do I have time?”'
-              disabled={busy || !userId}
+          <>
+            <path
+              fill="currentColor"
+              d="M3 9v6h4l5 4V5L7 9H3zm13.5 3a4.5 4.5 0 0 0-2.3-3.9v7.8A4.4 4.4 0 0 0 16.5 12z"
             />
-            <div className={styles.askRow}>
+            <path
+              fill="currentColor"
+              d="M16.2 4.1v2.1a6.9 6.9 0 0 1 0 11.6v2.1a9 9 0 0 0 0-15.8z"
+            />
+          </>
+        )}
+      </svg>
+      {speaking ? "Stop" : "Hear my day"}
+    </button>
+  ) : null;
+
+  const chatThread = items.map((item) =>
+    item.kind === "turn" ? (
+      <article key={item.id} className={styles.turn}>
+        {item.turn.user_text && <TellLevelYou>{item.turn.user_text}</TellLevelYou>}
+        {item.turn.challenger_questions.map((q, i) => (
+          <TellLevelReply key={i}>
+            <p>{q.question}</p>
+            {q.citations.length > 0 && (
+              <ul className={styles.cites}>
+                {q.citations.map((c) => (
+                  <li key={c.fact_id}>{c.quote}</li>
+                ))}
+              </ul>
+            )}
+          </TellLevelReply>
+        ))}
+      </article>
+    ) : item.kind === "checkin" ? (
+      <article key={item.id} className={styles.turn}>
+        <TellLevelYou>{item.you}</TellLevelYou>
+        <TellLevelReply>{item.reply}</TellLevelReply>
+      </article>
+    ) : (
+      <article key={item.id} className={styles.turn}>
+        <TellLevelYou>{item.proposal.user_text}</TellLevelYou>
+        <TellLevelReply>
+          <p className={styles.proposalSummary}>{item.proposal.summary}</p>
+          <p>{item.proposal.level_message}</p>
+          {item.proposal.conflicts.length > 0 && (
+            <ul className={styles.cites}>
+              {item.proposal.conflicts.map((c) => (
+                <li key={`${c.summary}-${c.start}`}>Conflict: {c.label}</li>
+              ))}
+            </ul>
+          )}
+          {item.proposal.citations.length > 0 && (
+            <ul className={styles.cites}>
+              {item.proposal.citations.map((c) => (
+                <li key={c.fact_id}>{c.quote}</li>
+              ))}
+            </ul>
+          )}
+          {item.proposal.status === "pending" && (
+            <div className={styles.proposalActions}>
+              {(item.proposal.kind === "add" ||
+                item.proposal.recommended_action === "confirm") && (
+                <button
+                  type="button"
+                  className={styles.primaryAction}
+                  disabled={busy}
+                  onClick={() => void onConfirm(item.proposal)}
+                >
+                  {item.proposal.kind === "availability" ? "Book this time" : "Add anyway"}
+                </button>
+              )}
+              {item.proposal.free_slots.slice(0, 3).map((slot) => (
+                <button
+                  key={slot.start}
+                  type="button"
+                  className={styles.secondaryAction}
+                  disabled={busy}
+                  onClick={() => void onConfirm(item.proposal, slot.start)}
+                >
+                  Use {slot.label}
+                </button>
+              ))}
               <button
                 type="button"
-                className={styles.voiceBtn}
-                onClick={toggleVoice}
-                disabled={busy || !userId}
-                aria-pressed={listening}
+                className={styles.ghostAction}
+                disabled={busy}
+                onClick={() => void onDecline(item.proposal)}
               >
-                {listening ? "Stop" : "Voice"}
-              </button>
-              <button type="submit" disabled={busy || !draft.trim()}>
-                {busy ? "Listening…" : "Ask"}
+                Never mind
               </button>
             </div>
-          </form>
+          )}
+          {item.proposal.status === "confirmed" && (
+            <p className={styles.meta}>Added to your Google Calendar.</p>
+          )}
+          {item.proposal.status === "declined" && (
+            <p className={styles.meta}>Okay — left off the calendar.</p>
+          )}
+        </TellLevelReply>
+      </article>
+    ),
+  );
+
+  return (
+    <AppShell userId={userId} displayName={displayName} dashboard>
+      <DashboardWorkspace
+        railAriaLabel="Reminders and ask Level"
+        rail={
+          <>
+            <RailSection title="Reminders">
+              {today && today.recommendations.length > 0 ? (
+                <ul className={styles.reminders}>
+                  {today.recommendations.map((r) => (
+                    <li key={r}>{r}</li>
+                  ))}
+                </ul>
+              ) : (
+                <p className={styles.meta}>
+                  Nothing specific for today’s events yet. Tell Level something once (like forgetting
+                  soccer shoes) and it’ll remind you when that day comes up.
+                </p>
+              )}
+            </RailSection>
+
+            <TellLevelPanel
+              title="Ask Level"
+              lead="How’s the day going — or facing a hard call? Level can weigh it with you using your real calendar and what it’s learned from your past, not generic advice."
+              placeholder="Ex: Need to fit in weekly grandparent visits — what should I move to make time?"
+              value={draft}
+              onChange={setDraft}
+              onSubmit={onAsk}
+              busy={busy}
+              disabled={!userId}
+              voiceEnabled
+              onVoiceError={setError}
+              error={error}
+              headerActions={hearDayButton}
+            >
+              {items.length > 0 ? chatThread : null}
+            </TellLevelPanel>
+          </>
+        }
+      >
+        <div className={styles.titleRow}>
+          <h1 className={styles.title}>
+            Hi {name}, Happy {weekday}
+          </h1>
         </div>
-      </section>
+
+        {today?.needs_review && (
+          <p className={styles.banner}>
+            Level drafted your profile — take 30 seconds to confirm it.{" "}
+            <Link href="/profile">Review profile →</Link>
+          </p>
+        )}
+
+        <section className={styles.block}>
+          <h2>On your calendar</h2>
+          {!today ? (
+            <p className={styles.meta}>Loading…</p>
+          ) : today.events.length === 0 ? (
+            <p className={styles.meta}>Nothing on the calendar for today.</p>
+          ) : (
+            <ul className={styles.events}>
+              {today.events.map((ev) => {
+                const color = ev.color || "#8aa4b0";
+                return (
+                  <li
+                    key={ev.id || `${ev.summary}-${ev.start}`}
+                    className={styles.eventCard}
+                    data-kind={ev.activity_kind}
+                    style={{ ["--event-color" as string]: color } as CSSProperties}
+                  >
+                    <div className={styles.eventArt} aria-hidden>
+                      <ActivityIcon kind={ev.activity_kind} className={styles.eventIcon} />
+                    </div>
+                    <div className={styles.eventBody}>
+                      <div className={styles.eventMeta}>
+                        <span className={styles.when}>{ev.when_label}</span>
+                        <span className={styles.kindChip}>{ev.activity_kind}</span>
+                      </div>
+                      <span className={styles.eventTitle}>{ev.summary}</span>
+                      {ev.cues?.length > 0 && (
+                        <ul className={styles.eventCues}>
+                          {ev.cues.map((c) => (
+                            <li key={c}>{c}</li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </section>
+
+        {today?.tomorrow && (
+          <section className={`${styles.block} ${styles.tomorrow}`}>
+            <div className={styles.tomorrowHead}>
+              <div>
+                <h2>Tomorrow</h2>
+                <p className={styles.tomorrowDate}>
+                  {today.tomorrow.weekday_label}
+                  {today.tomorrow.date_label ? ` · ${today.tomorrow.date_label}` : ""}
+                </p>
+              </div>
+              <span className={styles.countChip}>
+                {today.tomorrow.events.length === 0
+                  ? "Clear"
+                  : `${today.tomorrow.events.length} event${
+                      today.tomorrow.events.length === 1 ? "" : "s"
+                    }`}
+              </span>
+            </div>
+
+            {today.tomorrow.events.length === 0 ? (
+              <p className={styles.meta}>Nothing on the calendar yet.</p>
+            ) : (
+              <ul className={styles.tomorrowEvents}>
+                {today.tomorrow.events.map((ev) => (
+                  <li
+                    key={ev.id || `t-${ev.summary}-${ev.start}`}
+                    style={{ ["--event-color" as string]: ev.color || "#8aa4b0" }}
+                  >
+                    <span className={styles.tomDot} aria-hidden="true" />
+                    <span className={styles.when}>{ev.when_label}</span>
+                    <div className={styles.tomBody}>
+                      <span className={styles.tomTitle}>{ev.summary}</span>
+                      {ev.cues?.[0] ? (
+                        <span className={styles.tomCue}>{ev.cues[0]}</span>
+                      ) : null}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            {today.tomorrow.remember.length > 0 && (
+              <div className={styles.tipRow}>
+                <p className={styles.tipLabel}>Remember</p>
+                <ul className={styles.tipChips}>
+                  {today.tomorrow.remember.map((r) => (
+                    <li key={r}>{r}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </section>
+        )}
+      </DashboardWorkspace>
     </AppShell>
   );
 }

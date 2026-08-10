@@ -164,6 +164,9 @@
 .primary {
   background: var(--signal);
   color: var(--ink);
+  cursor: pointer;
+  font: inherit;
+  text-decoration: none;
 }
 
 .primary:hover {

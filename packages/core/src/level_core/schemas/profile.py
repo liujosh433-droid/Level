@@ -12,6 +12,7 @@ from level_core.schemas.base import TraceableModel, _new_id
 class BulletCategory(str, Enum):
     ROLE = "role"
     VALUE = "value"
+    PRIORITY = "priority"
     COMMITMENT = "commitment"
     CONSTRAINT = "constraint"
     LOAD = "load"

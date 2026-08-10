@@ -1,4 +1,36 @@
 :root {
+  /* Light, calm coastal day — same family as the home art frame. */
+  --ink: #f4f9fa;
+  --depth: #e7f1f3;
+  --horizon: #d2e3e8;
+  --mist: #5a7380;
+  --foam: #163038;
+  --signal: #2d9f8a;
+  --signal-soft: rgba(45, 159, 138, 0.14);
+  --signal-deep: #217a6a;
+  --warn: #c4843a;
+  --danger: #c44d4d;
+  --line: rgba(22, 48, 56, 0.1);
+  --line-strong: rgba(22, 48, 56, 0.2);
+  --field: #ffffff;
+  --surface: rgba(255, 255, 255, 0.72);
+  --surface-strong: #ffffff;
+  --chrome: rgba(244, 249, 250, 0.88);
+  --radius: 6px;
+  --radius-lg: 14px;
+  --font-display: "Fraunces", Georgia, serif;
+  --font-body: "Source Sans 3", "Helvetica Neue", sans-serif;
+  --shell-max: 42rem;
+  --pad-x: clamp(1.1rem, 4.5vw, 2rem);
+  --pad-y: clamp(1rem, 3vw, 1.75rem);
+  --nav-h: 3.5rem;
+  --bottom-nav-h: 4.25rem;
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --touch: 44px;
+}
+
+/* Landing / welcome keep the deeper cinematic wash. */
+.themeDark {
   --ink: #0c161c;
   --depth: #142830;
   --horizon: #234553;
@@ -12,17 +44,11 @@
   --line: rgba(197, 213, 219, 0.14);
   --line-strong: rgba(197, 213, 219, 0.28);
   --field: rgba(18, 40, 50, 0.72);
-  --radius: 6px;
-  --radius-lg: 14px;
-  --font-display: "Fraunces", Georgia, serif;
-  --font-body: "Source Sans 3", "Helvetica Neue", sans-serif;
-  --shell-max: 42rem;
-  --pad-x: clamp(1.1rem, 4.5vw, 2rem);
-  --pad-y: clamp(1rem, 3vw, 1.75rem);
-  --nav-h: 3.5rem;
-  --bottom-nav-h: 4.25rem;
-  --safe-bottom: env(safe-area-inset-bottom, 0px);
-  --touch: 44px;
+  --surface: rgba(20, 40, 48, 0.45);
+  --surface-strong: rgba(12, 22, 28, 0.92);
+  --chrome: rgba(12, 22, 28, 0.92);
+  color: var(--foam);
+  background: var(--ink);
 }
 
 * {
@@ -53,9 +79,10 @@ body::before {
   inset: 0;
   z-index: -2;
   background:
-    radial-gradient(ellipse 90% 60% at 78% -8%, rgba(61, 184, 160, 0.2), transparent 58%),
-    radial-gradient(ellipse 55% 45% at -5% 95%, rgba(35, 69, 83, 0.95), transparent 52%),
-    linear-gradient(168deg, #0c161c 0%, #142830 48%, #0e1c24 100%);
+    radial-gradient(ellipse 70% 55% at 78% 12%, rgba(45, 159, 138, 0.16), transparent 58%),
+    radial-gradient(ellipse 55% 45% at 8% 88%, rgba(35, 69, 83, 0.08), transparent 55%),
+    radial-gradient(ellipse 40% 35% at 50% 40%, rgba(247, 251, 252, 0.9), transparent 70%),
+    linear-gradient(168deg, #f7fbfc 0%, #e8f1f3 52%, #dfecef 100%);
   animation: wash 22s ease-in-out infinite alternate;
 }
 
@@ -65,8 +92,20 @@ body::after {
   inset: 0;
   z-index: -1;
   pointer-events: none;
-  opacity: 0.035;
+  opacity: 0.028;
   background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* Keep landing/welcome cinematic while app pages stay bright. */
+body:has(.themeDark)::before {
+  background:
+    radial-gradient(ellipse 90% 60% at 78% -8%, rgba(61, 184, 160, 0.2), transparent 58%),
+    radial-gradient(ellipse 55% 45% at -5% 95%, rgba(35, 69, 83, 0.95), transparent 52%),
+    linear-gradient(168deg, #0c161c 0%, #142830 48%, #0e1c24 100%);
+}
+
+body:has(.themeDark)::after {
+  opacity: 0.035;
 }
 
 a {
@@ -95,7 +134,7 @@ button:disabled {
 }
 
 ::selection {
-  background: rgba(61, 184, 160, 0.35);
+  background: rgba(45, 159, 138, 0.28);
   color: var(--foam);
 }
 
@@ -104,7 +143,7 @@ button:disabled {
     filter: hue-rotate(0deg) brightness(1);
   }
   to {
-    filter: hue-rotate(6deg) brightness(1.04);
+    filter: hue-rotate(6deg) brightness(1.03);
   }
 }
 

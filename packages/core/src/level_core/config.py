@@ -97,6 +97,14 @@ class Settings(BaseSettings):
         alias="GOOGLE_OAUTH_REDIRECT_URI",
     )
     web_app_url: str = Field(default="http://localhost:3000", alias="LEVEL_WEB_APP_URL")
+    public_api_url: str = Field(
+        default="",
+        alias="LEVEL_PUBLIC_API_URL",
+        description=(
+            "Public HTTPS base URL for this API (e.g. https://api.example.com). "
+            "Required for Google Calendar push notifications; leave blank locally."
+        ),
+    )
     session_secret: str = Field(
         default="",
         alias="LEVEL_SESSION_SECRET",

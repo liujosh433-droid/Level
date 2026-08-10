@@ -409,10 +409,14 @@
   min-height: var(--touch);
   padding: 0.8rem 1.3rem;
   border-radius: var(--radius);
+  border: none;
   background: var(--signal);
   color: var(--ink);
+  font: inherit;
   font-weight: 600;
   font-size: 1.02rem;
+  cursor: pointer;
+  text-decoration: none;
   transition: background 0.15s ease, color 0.15s ease, transform 0.15s ease;
 }
 

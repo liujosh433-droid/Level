@@ -3,7 +3,7 @@
 import { FormEvent, Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
-import { API_BASE, AuthError, ensureSession, fetchMe } from "@/lib/api";
+import { AuthError, ensureSession, fetchGoogleSyncStatus, fetchMe, getApiBase } from "@/lib/api";
 import styles from "./sources.module.css";
 
 const DRIVE_KEY = "level_include_drive";
@@ -14,17 +14,40 @@ const CHATGPT_STEPS = [
   "Open the email, download the file, then choose it here.",
 ] as const;
 
+const SYNC_BEATS = [
+  { at: 0, label: "Saying hi to Google…", progress: 12 },
+  { at: 3, label: "Reading your calendar…", progress: 34 },
+  { at: 8, label: "Noticing the shape of your week…", progress: 58 },
+  { at: 16, label: "Putting your profile together…", progress: 78 },
+  { at: 28, label: "Almost ready — hang tight…", progress: 90 },
+] as const;
+
+type Phase = "connect" | "syncing" | "addons";
+
+function syncBeatForElapsed(seconds: number): (typeof SYNC_BEATS)[number] {
+  let beat = SYNC_BEATS[0];
+  for (const b of SYNC_BEATS) {
+    if (seconds >= b.at) beat = b;
+  }
+  return beat;
+}
+
 function SourcesInner() {
   const params = useSearchParams();
   const router = useRouter();
   const [userId, setUserId] = useState("");
   const [email, setEmail] = useState<string | null>(null);
   const [googleConnected, setGoogleConnected] = useState(false);
+  const [canWriteCalendar, setCanWriteCalendar] = useState(true);
   const [includeDrive, setIncludeDrive] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [phase, setPhase] = useState<"google" | "chatgpt" | "done">("google");
+  const [phase, setPhase] = useState<Phase>("connect");
   const [showHowto, setShowHowto] = useState(false);
+  const [ready, setReady] = useState(false);
+  const [syncElapsed, setSyncElapsed] = useState(0);
+  const [syncProgress, setSyncProgress] = useState(10);
+  const [syncLabel, setSyncLabel] = useState(SYNC_BEATS[0].label);
 
   useEffect(() => {
     const stored = localStorage.getItem(DRIVE_KEY);
@@ -32,17 +55,103 @@ function SourcesInner() {
   }, []);
 
   useEffect(() => {
-    if (params.get("connected") === "1") {
-      setGoogleConnected(true);
-    }
-    void ensureSession("Caregiver")
-      .then((me) => {
+    const fromOAuth = params.get("connected") === "1";
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        // Don't auto-create a guest here — that was minting new users and
+        // bouncing already-linked caregivers back to "Connect Google".
+        const me = await fetchMe();
+        if (cancelled) return;
         setUserId(me.user_id);
         setEmail(me.email);
-        setGoogleConnected(me.google_connected || params.get("connected") === "1");
-      })
-      .catch((err) => setStatus(err instanceof Error ? err.message : String(err)));
-  }, [params]);
+        setGoogleConnected(me.google_connected || fromOAuth);
+        setCanWriteCalendar(me.can_write_calendar !== false);
+
+        if (fromOAuth) {
+          setPhase("syncing");
+          setBusy(true);
+          setReady(true);
+          setSyncElapsed(0);
+          setSyncProgress(SYNC_BEATS[0].progress);
+          setSyncLabel(SYNC_BEATS[0].label);
+          const started = Date.now();
+          while (!cancelled && Date.now() - started < 90_000) {
+            const elapsedSec = Math.floor((Date.now() - started) / 1000);
+            const beat = syncBeatForElapsed(elapsedSec);
+            setSyncElapsed(elapsedSec);
+            try {
+              const st = await fetchGoogleSyncStatus();
+              let progress = beat.progress;
+              let label = beat.label;
+              if (st.agenda_event_count > 0) {
+                progress = Math.max(progress, 62);
+                label = "Calendar’s in — finishing your profile…";
+              }
+              if (st.profile_ingested) {
+                progress = Math.max(progress, 92);
+                label = "Profile ready — taking you to Today…";
+              }
+              setSyncProgress(progress);
+              setSyncLabel(label);
+              if (st.initial_sync_done) {
+                if (cancelled) return;
+                setSyncProgress(100);
+                setSyncLabel("You’re set — opening Today…");
+                await new Promise((r) => setTimeout(r, 450));
+                router.replace("/today");
+                return;
+              }
+            } catch {
+              setSyncProgress(beat.progress);
+              setSyncLabel(beat.label);
+            }
+            await new Promise((r) => setTimeout(r, 900));
+          }
+          if (!cancelled) {
+            router.replace("/today");
+          }
+          return;
+        }
+
+        if (me.google_connected) {
+          // Returning user opened Sources intentionally → optional add-ons.
+          setPhase("addons");
+          setReady(true);
+          return;
+        }
+
+        setPhase("connect");
+        setReady(true);
+      } catch (err) {
+        if (cancelled) return;
+        if (err instanceof AuthError) {
+          // First-time / expired cookie: create a guest and show Connect.
+          // (fetchMe already retried — this is a real missing session.)
+          try {
+            const guest = await ensureSession();
+            if (cancelled) return;
+            setUserId(guest.user_id);
+            setGoogleConnected(Boolean(guest.google_connected));
+            setPhase(guest.google_connected ? "addons" : "connect");
+            setReady(true);
+            return;
+          } catch (inner) {
+            setStatus(inner instanceof Error ? inner.message : String(inner));
+            setReady(true);
+            return;
+          }
+        }
+        setStatus(err instanceof Error ? err.message : String(err));
+        setReady(true);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [params, router]);
 
   function toggleDrive(next: boolean) {
     setIncludeDrive(next);
@@ -53,29 +162,27 @@ function SourcesInner() {
     setBusy(true);
     setStatus(null);
     try {
-      await ensureSession("Caregiver");
-      window.location.href = `${API_BASE}/v1/auth/google/start`;
+      await ensureSession();
+      const drive = includeDrive ? "1" : "0";
+      window.location.href = `${getApiBase()}/v1/auth/google/start?include_drive=${drive}`;
     } catch (err) {
       setStatus(err instanceof Error ? err.message : String(err));
       setBusy(false);
     }
   }
 
-  async function syncGoogle() {
+  async function syncDrive() {
     setBusy(true);
     setStatus(null);
     try {
-      await ensureSession("Caregiver");
-      const body = new FormData();
-      body.set("include_drive", includeDrive ? "true" : "false");
-      const res = await fetch(`${API_BASE}/v1/sources/google/sync`, {
+      await ensureSession();
+      const res = await fetch(`${getApiBase()}/v1/sources/google/drive`, {
         method: "POST",
-        body,
         credentials: "include",
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
-      setPhase("chatgpt");
+      setStatus(data.detail || "Drive notes added.");
     } catch (err) {
       setStatus(err instanceof Error ? err.message : String(err));
     } finally {
@@ -88,22 +195,21 @@ function SourcesInner() {
     setBusy(true);
     setStatus(null);
     try {
-      await ensureSession("Caregiver");
+      await ensureSession();
       const input = e.currentTarget.elements.namedItem("export") as HTMLInputElement;
       const file = input?.files?.[0];
       if (!file) return;
       const body = new FormData();
       body.set("file", file);
       body.set("max_messages", "40");
-      const res = await fetch(`${API_BASE}/v1/sources/chatgpt`, {
+      const res = await fetch(`${getApiBase()}/v1/sources/chatgpt`, {
         method: "POST",
         body,
         credentials: "include",
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
-      setPhase("done");
-      router.push("/profile");
+      setStatus(data.detail || "ChatGPT export added.");
     } catch (err) {
       setStatus(err instanceof Error ? err.message : String(err));
     } finally {
@@ -111,46 +217,32 @@ function SourcesInner() {
     }
   }
 
-  function goProfile() {
-    router.push("/profile");
+  if (!ready) {
+    return (
+      <AppShell userId={userId || undefined} wide>
+        <div className={styles.wrap}>
+          <section className={`${styles.panel} ${styles.syncPanel}`}>
+            <div className={styles.syncCard}>
+              <div className={styles.syncSpinner} aria-hidden>
+                <span />
+              </div>
+              <p className={styles.syncLabel}>Just a sec…</p>
+            </div>
+          </section>
+        </div>
+      </AppShell>
+    );
   }
-
-  // Refresh me after OAuth return
-  useEffect(() => {
-    if (params.get("connected") !== "1") return;
-    void fetchMe()
-      .then((me) => {
-        setUserId(me.user_id);
-        setEmail(me.email);
-        setGoogleConnected(me.google_connected);
-      })
-      .catch((err) => {
-        if (!(err instanceof AuthError)) {
-          setStatus(err instanceof Error ? err.message : String(err));
-        }
-      });
-  }, [params]);
-
-  const progress = phase === "google" ? 1 : 2;
 
   return (
     <AppShell userId={userId || undefined} wide>
       <div className={styles.wrap}>
-        <div className={styles.progress} aria-label={`Step ${progress} of 2`}>
-          {[1, 2].map((n) => (
-            <span
-              key={n}
-              className={n <= progress ? `${styles.dot} ${styles.dotOn}` : styles.dot}
-            />
-          ))}
-        </div>
-
-        {phase === "google" && (
-          <section className={`${styles.panel} ${styles.enter}`} key="google">
-            <p className={styles.kicker}>Step 1/2</p>
+        {phase === "connect" && (
+          <section className={`${styles.panel} ${styles.enter}`} key="connect">
+            <p className={styles.kicker}>Get started</p>
             <h1 className={styles.title}>Sync your week</h1>
             <p className={styles.intro}>
-              Let’s get started with your Google Calendar — so Level can see your usual week.
+              Connect Google Calendar so Level can see your usual week.
             </p>
 
             <label className={styles.check}>
@@ -165,60 +257,94 @@ function SourcesInner() {
               </span>
             </label>
 
-            {!googleConnected ? (
-              <button
-                type="button"
-                className={styles.primary}
-                disabled={busy}
-                onClick={() => void connectGoogle()}
-              >
-                {busy ? "Starting…" : "Connect Google"}
-              </button>
-            ) : (
-              <>
-                <p className={styles.line}>
-                  {email ? `Linked as ${email}.` : "Google is linked."} Ready when you are.
-                </p>
-                <button
-                  type="button"
-                  className={styles.primary}
-                  disabled={busy}
-                  onClick={() => void syncGoogle()}
-                >
-                  {busy ? "Working…" : "Bring in my week"}
-                </button>
-                <button
-                  type="button"
-                  className={styles.soft}
-                  disabled={busy}
-                  onClick={() => void connectGoogle()}
-                >
-                  Reconnect Google (needed to add events from Level)
-                </button>
-              </>
-            )}
+            <button
+              type="button"
+              className={styles.primary}
+              disabled={busy}
+              onClick={() => void connectGoogle()}
+            >
+              {busy ? "Starting…" : "Connect Google"}
+            </button>
           </section>
         )}
 
-        {phase === "chatgpt" && (
-          <section className={`${styles.panel} ${styles.enter}`} key="chatgpt">
-            <p className={styles.kicker}>Step 2/2</p>
-            <h1 className={styles.title}>Add ChatGPT?</h1>
+        {phase === "syncing" && (
+          <section
+            className={`${styles.panel} ${styles.syncPanel} ${styles.enter}`}
+            key="syncing"
+            aria-busy="true"
+            aria-live="polite"
+          >
+            <p className={styles.kicker}>Almost there</p>
+            <h1 className={styles.title}>Pulling in your week</h1>
             <p className={styles.line}>
-              Optional — only if you’ve used it for hard choices before. Skip anytime.
+              {email ? `Linked as ${email}.` : "Google is linked."} Grab a breath — Level is
+              learning your real schedule, not a generic template.
             </p>
 
-            <div className={styles.actions}>
-              <button
-                type="button"
-                className={styles.ghost}
-                onClick={() => setShowHowto((v) => !v)}
+            <div className={styles.syncCard}>
+              <div className={styles.syncSpinner} aria-hidden>
+                <span />
+              </div>
+              <p className={styles.syncLabel}>{syncLabel}</p>
+              <div
+                className={styles.progressTrack}
+                role="progressbar"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={syncProgress}
+                aria-label="Google sync progress"
               >
-                {showHowto ? "Hide steps" : "Show me how"}
-              </button>
-              <button type="button" className={styles.primary} onClick={goProfile}>
-                Skip for now
-              </button>
+                <div
+                  className={styles.progressFill}
+                  style={{ width: `${syncProgress}%` }}
+                />
+              </div>
+              <p className={styles.syncHint}>
+                Usually under a minute
+                {syncElapsed > 20 ? " — still working, almost there" : ""}
+              </p>
+            </div>
+          </section>
+        )}
+
+        {phase === "addons" && (
+          <section className={`${styles.panel} ${styles.enter}`} key="addons">
+            <h1 className={styles.title}>Add more context</h1>
+            <p className={styles.intro}>
+              {email ? `Calendar linked as ${email}.` : "Google Calendar is linked."} Optional
+              extras below — skip anytime.
+            </p>
+
+            <div className={styles.addonList}>
+              <div className={styles.addon}>
+                <div>
+                  <h2>Google Drive</h2>
+                  <p>Notes and docs tied to your schedule.</p>
+                </div>
+                <button
+                  type="button"
+                  className={styles.ghost}
+                  disabled={busy || !googleConnected}
+                  onClick={() => void syncDrive()}
+                >
+                  {busy ? "Working…" : "Add Drive"}
+                </button>
+              </div>
+
+              <div className={styles.addon}>
+                <div>
+                  <h2>ChatGPT</h2>
+                  <p>Past hard-choice chats, if you’ve used them.</p>
+                </div>
+                <button
+                  type="button"
+                  className={styles.ghost}
+                  onClick={() => setShowHowto((v) => !v)}
+                >
+                  {showHowto ? "Hide" : "Add export"}
+                </button>
+              </div>
             </div>
 
             {showHowto && (
@@ -247,16 +373,26 @@ function SourcesInner() {
                 </form>
               </div>
             )}
-          </section>
-        )}
 
-        {phase === "done" && (
-          <section className={`${styles.panel} ${styles.enter}`} key="done">
-            <p className={styles.kicker}>Ready</p>
-            <h1 className={styles.title}>You’re set</h1>
-            <button type="button" className={styles.primary} onClick={goProfile}>
-              See my profile
-            </button>
+            <div className={styles.actions}>
+              <button
+                type="button"
+                className={styles.primary}
+                onClick={() => router.push("/today")}
+              >
+                Go to Today
+              </button>
+              {!canWriteCalendar && (
+                <button
+                  type="button"
+                  className={styles.soft}
+                  disabled={busy}
+                  onClick={() => void connectGoogle()}
+                >
+                  Update Google permissions
+                </button>
+              )}
+            </div>
           </section>
         )}
 

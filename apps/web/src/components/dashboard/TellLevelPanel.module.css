@@ -1,0 +1,192 @@
+.panel {
+  padding: 1rem 0 0;
+  border-top: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.65rem;
+  margin-bottom: 0.35rem;
+}
+
+.head h2 {
+  font-family: var(--font-display);
+  font-size: clamp(1.1rem, 2.6vw, 1.25rem);
+  font-weight: 550;
+  margin: 0;
+}
+
+.lead {
+  margin: 0 0 0.65rem;
+  color: var(--mist);
+  font-size: 0.95rem;
+  line-height: 1.4;
+}
+
+.dock {
+  position: sticky;
+  bottom: calc(var(--bottom-nav-h) + var(--safe-bottom) + 0.35rem);
+  z-index: 15;
+  margin-top: 0;
+  padding: 0.85rem;
+  border-radius: var(--radius-lg);
+  background: var(--chrome);
+  border: 1px solid var(--line-strong);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 6px 20px rgba(22, 48, 56, 0.08);
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+.row {
+  display: flex;
+  gap: 0.55rem;
+  align-items: stretch;
+}
+
+.row > button[type="submit"] {
+  flex: 1;
+}
+
+.voiceBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  min-height: var(--touch);
+  min-width: 5.5rem;
+  padding: 0.75rem 1rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--line-strong);
+  background: transparent;
+  color: var(--foam);
+  font-weight: 600;
+}
+
+.micIcon {
+  flex-shrink: 0;
+  display: block;
+}
+
+.voiceBtn[aria-pressed="true"] {
+  border-color: var(--signal);
+  color: var(--signal);
+}
+
+.form textarea {
+  width: 100%;
+  resize: vertical;
+  min-height: 5.25rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--field);
+  color: var(--foam);
+  line-height: 1.45;
+}
+
+.form textarea::placeholder {
+  color: color-mix(in srgb, var(--mist) 75%, transparent);
+}
+
+.form button[type="submit"] {
+  align-self: stretch;
+  min-height: var(--touch);
+  padding: 0.75rem 1.25rem;
+  border: none;
+  border-radius: var(--radius);
+  background: var(--signal);
+  color: var(--ink);
+  font-weight: 700;
+  transition: background 0.15s ease, transform 0.15s ease;
+}
+
+.form button[type="submit"]:hover:not(:disabled) {
+  background: var(--signal-deep);
+  color: #f2f7f8;
+}
+
+.form button:disabled {
+  opacity: 0.45;
+}
+
+.error {
+  color: var(--danger);
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.thread {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  max-height: 14rem;
+  overflow: auto;
+  margin: 0.85rem 0 0;
+}
+
+.you {
+  color: var(--mist);
+  margin: 0 0 0.55rem;
+  font-weight: 500;
+}
+
+.level {
+  padding: 0.85rem 0.95rem;
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  margin: 0 0 0.55rem;
+}
+
+.level p {
+  margin: 0;
+}
+
+.level p + p {
+  margin-top: 0.45rem;
+}
+
+@media (min-width: 768px) {
+  .dock {
+    bottom: 1rem;
+    box-shadow: none;
+  }
+
+  .form button[type="submit"] {
+    align-self: flex-end;
+    min-width: 7.5rem;
+  }
+}
+
+@media (min-width: 960px) {
+  .panel {
+    /* Soft divider when stacked under Reminders (or other rail blocks). */
+    border-top: 1px solid var(--line);
+    padding-top: 1rem;
+  }
+
+  .panel:first-child {
+    border-top: none;
+    padding-top: 0;
+  }
+
+  .thread {
+    max-height: 16rem;
+  }
+
+  .dock {
+    position: relative;
+    bottom: auto;
+    box-shadow: 0 6px 20px rgba(22, 48, 56, 0.08);
+  }
+}

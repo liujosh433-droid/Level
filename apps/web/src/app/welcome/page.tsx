@@ -2,6 +2,10 @@
 
 import Image from "next/image";
 import Link from "next/link";
+import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+import { ensureSession } from "@/lib/api";
+import { resolveHomeDestination } from "@/lib/home";
 import styles from "./welcome.module.css";
 
 const BEATS = [
@@ -36,8 +40,52 @@ const HOW = [
 ] as const;
 
 export default function WelcomePage() {
+  const router = useRouter();
+  const [checking, setChecking] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    void resolveHomeDestination().then(({ dest }) => {
+      if (cancelled) return;
+      // Already in — skip the pitch and go home (Today if Google is linked).
+      if (dest === "/today" || dest === "/sources") {
+        router.replace(dest);
+        return;
+      }
+      setChecking(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [router]);
+
+  async function start() {
+    try {
+      // Mint/resume a cookie BEFORE Sources — otherwise Sources sees 401 and
+      // bounces right back here ("Lets get started" loop).
+      const me = await ensureSession();
+      if (me.google_connected) {
+        router.push("/today");
+        return;
+      }
+      router.push("/sources");
+    } catch {
+      router.push("/sources");
+    }
+  }
+
+  if (checking) {
+    return (
+      <main className={`themeDark ${styles.page}`}>
+        <div className={styles.sky} aria-hidden="true">
+          <div className={styles.wash} />
+        </div>
+      </main>
+    );
+  }
+
   return (
-    <main className={styles.page}>
+    <main className={`themeDark ${styles.page}`}>
       <div className={styles.sky} aria-hidden="true">
         <div className={styles.wash} />
         <span className={`${styles.mist} ${styles.mistA}`} />
@@ -132,9 +180,9 @@ export default function WelcomePage() {
         </section>
 
         <div className={styles.actions}>
-          <Link href="/sources" className={styles.primary}>
+          <button type="button" className={styles.primary} onClick={start}>
             Lets get started!
-          </Link>
+          </button>
         </div>
       </div>
     </main>

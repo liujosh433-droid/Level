@@ -9,6 +9,7 @@ import json
 import os
 import secrets
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -18,6 +19,13 @@ from google_auth_oauthlib.flow import Flow
 
 from level_core.config import Settings, get_settings
 from level_core.schemas.user import OAuthToken
+
+
+@dataclass(frozen=True, slots=True)
+class OAuthStatePayload:
+    code_verifier: str
+    link_user_id: str | None = None
+    include_drive: bool = False
 
 # Signed OAuth ``state`` survives API reloads (uvicorn --reload clears memory).
 # Also carries the PKCE code_verifier so token exchange works on a new Flow.
@@ -88,6 +96,7 @@ def mint_oauth_state(
     *,
     code_verifier: str,
     link_user_id: str | None = None,
+    include_drive: bool = False,
 ) -> str:
     """HMAC-signed state carrying PKCE verifier (+ optional guest user to link)."""
     settings = settings or get_settings()
@@ -98,6 +107,8 @@ def mint_oauth_state(
     }
     if link_user_id:
         body["u"] = link_user_id
+    if include_drive:
+        body["d"] = 1
     raw = _b64url(json.dumps(body, separators=(",", ":")).encode("utf-8"))
     sig = hmac.new(_state_secret(settings), raw.encode("ascii"), hashlib.sha256).hexdigest()
     return f"{raw}.{sig}"
@@ -105,8 +116,8 @@ def mint_oauth_state(
 
 def parse_oauth_state(
     state: str, settings: Settings | None = None
-) -> tuple[str, str | None] | None:
-    """Validate state → ``(code_verifier, link_user_id | None)``."""
+) -> OAuthStatePayload | None:
+    """Validate state → PKCE verifier + optional link / Drive flags."""
     settings = settings or get_settings()
     if "." not in state:
         return None
@@ -123,12 +134,17 @@ def parse_oauth_state(
         ts = int(body["t"])
         verifier = str(body["v"])
         link_user_id = str(body["u"]) if body.get("u") else None
+        include_drive = bool(body.get("d"))
     except (KeyError, TypeError, ValueError, json.JSONDecodeError):
         return None
     age = int(time.time()) - ts
     if age < 0 or age > _STATE_MAX_AGE_SECONDS or not verifier:
         return None
-    return verifier, link_user_id
+    return OAuthStatePayload(
+        code_verifier=verifier,
+        link_user_id=link_user_id,
+        include_drive=include_drive,
+    )
 
 
 def verify_oauth_state(state: str, settings: Settings | None = None) -> bool:
@@ -139,12 +155,16 @@ def authorization_url(
     settings: Settings | None = None,
     *,
     link_user_id: str | None = None,
+    include_drive: bool = False,
 ) -> tuple[str, str]:
     """Return (auth_url, state)."""
     settings = settings or get_settings()
     verifier, challenge = _make_pkce()
     state = mint_oauth_state(
-        settings, code_verifier=verifier, link_user_id=link_user_id
+        settings,
+        code_verifier=verifier,
+        link_user_id=link_user_id,
+        include_drive=include_drive,
     )
     flow = build_flow(settings, state=state)
     # Keep verifier on the Flow in case the library reads it later.
@@ -165,14 +185,13 @@ def exchange_code(code: str, state: str, settings: Settings | None = None) -> Cr
     parsed = parse_oauth_state(state, settings)
     if not parsed:
         raise ValueError("invalid OAuth state / missing PKCE verifier")
-    verifier, _link = parsed
     flow = build_flow(settings)
-    flow.code_verifier = verifier  # type: ignore[attr-defined]
+    flow.code_verifier = parsed.code_verifier  # type: ignore[attr-defined]
     # With include_granted_scopes, Google may also return older grants
     # (e.g. calendar.readonly from a prior connect). oauthlib rejects that
     # mismatch unless we relax scope checking.
     os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = "1"
-    flow.fetch_token(code=code, code_verifier=verifier)
+    flow.fetch_token(code=code, code_verifier=parsed.code_verifier)
     return flow.credentials
 
 
@@ -224,6 +243,7 @@ def fetch_userinfo(creds: Credentials) -> dict[str, Any]:
 
 __all__ = [
     "GOOGLE_SCOPES",
+    "OAuthStatePayload",
     "authorization_url",
     "credentials_from_token",
     "exchange_code",

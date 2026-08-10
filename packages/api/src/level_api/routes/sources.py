@@ -2,13 +2,26 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    Response,
+    UploadFile,
+    status,
+)
 from pydantic import BaseModel, Field
 
 from level_api.auth_deps import require_user
-from level_api.dependencies import get_memory, get_token_store
+from level_api.dependencies import get_calendar_sync_store, get_memory, get_token_store
+from level_api.services.google_sync import agenda_only_refresh
 from level_core.agents.ingest_normalizer import IngestNormalizer
 from level_core.auth.tokens import TokenStore
+from level_core.calendar.sync_state import CalendarSyncStore
 from level_core.config import get_settings
 from level_core.guardrails.inbound import InboundGuardrail
 from level_core.ingest.chatgpt_export import parse_chatgpt_export
@@ -17,7 +30,11 @@ from level_core.ingest.pipeline import IngestPipeline
 from level_core.memory.base import MemoryBank
 from level_core.models.factory import build_embedding_client, build_gemini_client
 from level_core.observability.logger import get_logger
-from level_core.profile.synthesize import calendar_pattern_facts, refresh_profile_and_manifesto
+from level_core.profile.synthesize import (
+    infer_priority_facts,
+    refresh_profile_and_manifesto,
+)
+from level_core.schemas.base import _now_utc
 from level_core.schemas.profile import BulletStatus, ProfileSnapshot
 from level_core.schemas.signal import Fact, Signal
 
@@ -57,6 +74,59 @@ async def _refresh_profile(memory: MemoryBank, user_id: str) -> ProfileSnapshot:
     await memory.manifestos.save_profile_snapshot(snapshot)
     await memory.manifestos.save_manifesto(manifesto)
     return snapshot
+
+
+def _snapshot_needs_priority_rebuild(snapshot: ProfileSnapshot | None) -> bool:
+    if snapshot is None or not snapshot.bullets:
+        return True
+    # Old calendar-analytics bullets should be replaced with inferred priorities.
+    from level_core.profile.synthesize import _is_analytics_statement
+
+    analytic = sum(1 for b in snapshot.bullets if _is_analytics_statement(b.text))
+    return analytic >= max(1, (len(snapshot.bullets) + 1) // 2)
+
+
+async def ensure_profile_from_agenda(
+    *,
+    user_id: str,
+    memory: MemoryBank,
+    sync_store: CalendarSyncStore,
+) -> ProfileSnapshot | None:
+    """Rebuild priorities from the on-disk agenda (survives API reload / empty Memory Bank)."""
+    existing = await memory.manifestos.get_profile_snapshot(user_id=user_id)
+    if existing and existing.bullets and not _snapshot_needs_priority_rebuild(existing):
+        return existing
+
+    state = await sync_store.get(user_id)
+    if state is None or not state.events:
+        return existing
+
+    events = [
+        {"summary": e.summary, "start": e.start} for e in state.events.values() if e.summary
+    ]
+    facts = infer_priority_facts(events, user_id=user_id)
+    if not facts:
+        return existing
+
+    await _persist_pattern_facts(memory, facts)
+    snap = await _refresh_profile(memory, user_id)
+    if snap.bullets:
+        state = await sync_store.get(user_id) or state
+        state = state.model_copy(
+            update={
+                "profile_ingested_at": state.profile_ingested_at or _now_utc(),
+                "initial_sync_done": True,
+                "initial_sync_error": None,
+            }
+        )
+        await sync_store.upsert(state)
+        _logger.info(
+            "profile_healed_from_agenda",
+            user_id=user_id,
+            bullets=len(snap.bullets),
+            events=len(state.events),
+        )
+    return snap
 
 
 async def _persist_pattern_facts(memory: MemoryBank, facts: list[Fact]) -> int:
@@ -145,13 +215,91 @@ async def upload_chatgpt_export(
     return summary
 
 
+class GoogleSyncStatus(BaseModel):
+    google_connected: bool = False
+    initial_sync_done: bool = False
+    profile_ingested: bool = False
+    agenda_event_count: int = 0
+    watch_active: bool = False
+    error: str | None = None
+
+
+@router.get("/google/status", response_model=GoogleSyncStatus)
+async def google_sync_status(
+    user_id: str = Depends(require_user),
+    tokens: TokenStore = Depends(get_token_store),
+    sync_store: CalendarSyncStore = Depends(get_calendar_sync_store),
+) -> GoogleSyncStatus:
+    token = await tokens.get_google_token(user_id)
+    connected = token is not None and bool(token.refresh_token or token.access_token)
+    state = await sync_store.get(user_id)
+    if not connected:
+        return GoogleSyncStatus(google_connected=False)
+    if state is None:
+        return GoogleSyncStatus(google_connected=True, initial_sync_done=False)
+    now_ms = int(_now_utc().timestamp() * 1000)
+    watch_active = bool(
+        state.channel_id
+        and state.channel_expiration_ms
+        and state.channel_expiration_ms > now_ms
+    )
+    return GoogleSyncStatus(
+        google_connected=True,
+        initial_sync_done=state.initial_sync_done,
+        profile_ingested=state.profile_ingested_at is not None,
+        agenda_event_count=len(state.events),
+        watch_active=watch_active,
+        error=state.initial_sync_error,
+    )
+
+
+@router.post("/google/webhook")
+async def google_calendar_webhook(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    sync_store: CalendarSyncStore = Depends(get_calendar_sync_store),
+) -> Response:
+    """Google Calendar push receiver — agenda cache only, never LLM profile."""
+    channel_id = request.headers.get("X-Goog-Channel-ID") or ""
+    resource_state = (request.headers.get("X-Goog-Resource-State") or "").lower()
+    channel_token = request.headers.get("X-Goog-Channel-Token") or ""
+
+    if resource_state == "sync":
+        return Response(status_code=204)
+
+    if not channel_id:
+        return Response(status_code=400)
+
+    state = await sync_store.get_by_channel_id(channel_id)
+    if state is None:
+        _logger.warning("google_webhook_unknown_channel", channel_id=channel_id)
+        return Response(status_code=204)
+
+    if state.channel_token and channel_token and channel_token != state.channel_token:
+        _logger.warning("google_webhook_bad_token", channel_id=channel_id)
+        return Response(status_code=403)
+
+    # Critical: agenda-only — do not call _run_signals / _refresh_profile.
+    background_tasks.add_task(agenda_only_refresh, state.user_id)
+    _logger.info(
+        "google_webhook_queued_agenda_refresh",
+        user_id=state.user_id,
+        channel_id=channel_id,
+        resource_state=resource_state,
+        llm=False,
+    )
+    return Response(status_code=204)
+
+
 @router.post("/google/sync", response_model=IngestSummary)
 async def sync_google(
     include_drive: bool = Form(True),
     user_id: str = Depends(require_user),
     memory: MemoryBank = Depends(get_memory),
     tokens: TokenStore = Depends(get_token_store),
+    sync_store: CalendarSyncStore = Depends(get_calendar_sync_store),
 ) -> IngestSummary:
+    """Optional manual re-ingest (LLM). First connect auto-runs this via onboard."""
     token = await tokens.get_google_token(user_id)
     if token is None:
         raise HTTPException(
@@ -162,6 +310,7 @@ async def sync_google(
     signals: list[Signal] = []
     try:
         from level_core.auth.google_oauth import credentials_from_token, token_from_credentials
+        from level_core.calendar.agenda_sync import ensure_calendar_watch, refresh_agenda_cache
         from level_core.config import get_settings as _gs
 
         # Refresh access token if needed and persist it.
@@ -172,14 +321,22 @@ async def sync_google(
         await tokens.upsert_token(refreshed)
         token = refreshed
 
-        # Calendar first → topics + patterns; Drive only if topic-matched.
+        # Keep agenda cache fresh without waiting for a webhook.
+        await refresh_agenda_cache(user_id=user_id, token=token, sync_store=sync_store)
+        await ensure_calendar_watch(user_id=user_id, token=token, sync_store=sync_store)
+
+        # Calendar first → inferred priorities; Drive only if topic-matched.
         cal = await pull_calendar(token, user_id=user_id, max_events=25)
         signals.extend(cal.signals)
-        pattern_facts = calendar_pattern_facts(
-            [s.text or "" for s in cal.signals],
-            user_id=user_id,
+        state = await sync_store.get(user_id)
+        priority_events = (
+            [{"summary": e.summary, "start": e.start} for e in state.events.values()]
+            if state and state.events
+            else [{"summary": (s.text or "").split(": ", 1)[-1], "start": None} for s in cal.signals]
         )
-        pattern_n = await _persist_pattern_facts(memory, pattern_facts)
+        pattern_n = await _persist_pattern_facts(
+            memory, infer_priority_facts(priority_events, user_id=user_id)
+        )
 
         drive_count = 0
         if include_drive:
@@ -218,6 +375,75 @@ async def sync_google(
         f"Please review the profile below."
     )
     summary.detail = f"{prefix} {summary.detail}".strip() if summary.detail else prefix
+
+    prior = await sync_store.get(user_id)
+    from level_core.calendar.sync_state import CalendarSyncState
+
+    state = prior or CalendarSyncState(user_id=user_id)
+    await sync_store.upsert(
+        state.model_copy(
+            update={
+                "profile_ingested_at": _now_utc(),
+                "initial_sync_done": True,
+                "initial_sync_error": None,
+            }
+        )
+    )
+    return summary
+
+
+@router.post("/google/drive", response_model=IngestSummary)
+async def sync_google_drive(
+    user_id: str = Depends(require_user),
+    memory: MemoryBank = Depends(get_memory),
+    tokens: TokenStore = Depends(get_token_store),
+) -> IngestSummary:
+    """Optional add-on: pull Drive notes matched to the calendar (intentional LLM pass)."""
+    token = await tokens.get_google_token(user_id)
+    if token is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Connect Google Calendar first.",
+        )
+    try:
+        from level_core.auth.google_oauth import credentials_from_token, token_from_credentials
+        from level_core.config import get_settings as _gs
+
+        creds = credentials_from_token(token)
+        refreshed = token_from_credentials(creds, user_id=user_id, settings=_gs())
+        if refreshed.refresh_token is None and token.refresh_token:
+            refreshed = refreshed.model_copy(update={"refresh_token": token.refresh_token})
+        await tokens.upsert_token(refreshed)
+        token = refreshed
+
+        cal = await pull_calendar(token, user_id=user_id, max_events=25)
+        signals: list[Signal] = []
+        async for s in fetch_drive_signals(
+            token,
+            user_id=user_id,
+            topics=cal.topics,
+            modified_after=cal.window_start,
+            modified_before=cal.window_end,
+            max_files=6,
+        ):
+            signals.append(s)
+    except Exception as exc:  # noqa: BLE001
+        _logger.exception("google_drive_sync_failed", user_id=user_id)
+        raise HTTPException(status_code=502, detail=f"Drive sync failed: {exc}") from exc
+
+    if not signals:
+        return IngestSummary(
+            detail="No Drive docs matched your calendar topics yet — try again after more schedule activity."
+        )
+
+    summary = await _run_signals(memory, signals)
+    snap = await _refresh_profile(memory, user_id)
+    summary.profile_bullets = len(snap.bullets)
+    summary.contradictions = len(snap.contradictions)
+    summary.detail = (
+        f"Added {summary.accepted} Drive notes to your profile "
+        f"({summary.profile_bullets} bullets). {summary.detail}"
+    ).strip()
     return summary
 
 
@@ -284,11 +510,17 @@ class ProfileResponse(BaseModel):
     contradictions: list[ContradictionOut] = Field(default_factory=list)
 
 
-@router.get("/profile", response_model=ProfileResponse)
-async def get_profile(
-    user_id: str = Depends(require_user),
-    memory: MemoryBank = Depends(get_memory),
+async def _build_profile_response(
+    user_id: str,
+    memory: MemoryBank,
+    sync_store: CalendarSyncStore | None = None,
 ) -> ProfileResponse:
+    snapshot = await memory.manifestos.get_profile_snapshot(user_id=user_id)
+    if (snapshot is None or not snapshot.bullets) and sync_store is not None:
+        await ensure_profile_from_agenda(
+            user_id=user_id, memory=memory, sync_store=sync_store
+        )
+
     facts = await memory.facts.list_for_user(user_id=user_id, limit=200)
     manifesto = await memory.manifestos.get_current_manifesto(user_id=user_id)
     profile = await memory.manifestos.get_bias_profile(user_id=user_id)
@@ -340,6 +572,15 @@ async def get_profile(
     )
 
 
+@router.get("/profile", response_model=ProfileResponse)
+async def get_profile(
+    user_id: str = Depends(require_user),
+    memory: MemoryBank = Depends(get_memory),
+    sync_store: CalendarSyncStore = Depends(get_calendar_sync_store),
+) -> ProfileResponse:
+    return await _build_profile_response(user_id, memory, sync_store)
+
+
 class BulletUpdate(BaseModel):
     bullet_id: str
     status: BulletStatus
@@ -377,16 +618,17 @@ async def review_profile(
         }
     )
     await memory.manifestos.save_profile_snapshot(snapshot)
-    return await get_profile(user_id, memory)
+    return await _build_profile_response(user_id, memory)
 
 
 @router.post("/profile/refresh", response_model=ProfileResponse)
 async def refresh_profile_route(
     user_id: str = Depends(require_user),
     memory: MemoryBank = Depends(get_memory),
+    sync_store: CalendarSyncStore = Depends(get_calendar_sync_store),
 ) -> ProfileResponse:
     await _refresh_profile(memory, user_id)
-    return await get_profile(user_id, memory)
+    return await _build_profile_response(user_id, memory, sync_store)
 
 
 class ManualNoteRequest(BaseModel):
@@ -432,6 +674,7 @@ async def profile_chat(
     payload: ProfileChatRequest,
     user_id: str = Depends(require_user),
     memory: MemoryBank = Depends(get_memory),
+    sync_store: CalendarSyncStore = Depends(get_calendar_sync_store),
 ) -> ProfileChatResponse:
     """Learn from a short note and refresh the profile (caregiver-friendly)."""
     import uuid
@@ -451,7 +694,7 @@ async def profile_chat(
     )
     summary = await _run_signals(memory, [signal])
     snap = await _refresh_profile(memory, user_id)
-    profile = await get_profile(user_id, memory)
+    profile = await _build_profile_response(user_id, memory, sync_store)
 
     reply = (
         f"Got it — I saved that and updated your profile"

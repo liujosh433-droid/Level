@@ -28,7 +28,7 @@
   padding: 0.75rem 0.85rem;
   border-radius: var(--radius-lg);
   border: 1px solid var(--line);
-  background: rgba(20, 40, 48, 0.4);
+  background: var(--surface);
   cursor: pointer;
   width: 100%;
   max-width: 28rem;
@@ -59,7 +59,7 @@
   width: 0.45rem;
   height: 0.45rem;
   border-radius: 50%;
-  background: rgba(197, 213, 219, 0.28);
+  background: color-mix(in srgb, var(--mist) 28%, transparent);
   transition: background 0.25s ease, transform 0.25s ease;
 }
 
@@ -77,6 +77,93 @@
 
 .enter {
   animation: panelIn 0.55s ease-out both;
+}
+
+.syncPanel {
+  width: 100%;
+  max-width: 28rem;
+}
+
+.syncCard {
+  width: 100%;
+  margin-top: 0.35rem;
+  padding: 1.15rem 1.1rem 1.05rem;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--line);
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.7rem;
+}
+
+.syncSpinner {
+  width: 2.25rem;
+  height: 2.25rem;
+  display: grid;
+  place-items: center;
+}
+
+.syncSpinner span {
+  width: 1.55rem;
+  height: 1.55rem;
+  border-radius: 50%;
+  border: 2.5px solid color-mix(in srgb, var(--signal) 28%, transparent);
+  border-top-color: var(--signal);
+  animation: spin 0.85s linear infinite;
+}
+
+.syncLabel {
+  margin: 0;
+  color: var(--foam);
+  font-size: 1.05rem;
+  font-weight: 600;
+  line-height: 1.35;
+  min-height: 1.4em;
+}
+
+.progressTrack {
+  width: 100%;
+  height: 0.45rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--mist) 14%, transparent);
+  overflow: hidden;
+}
+
+.progressFill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--signal) 75%, #2a6b5c),
+    var(--signal)
+  );
+  transition: width 0.55s ease;
+}
+
+.syncHint {
+  margin: 0;
+  color: var(--mist);
+  font-size: 0.88rem;
+  line-height: 1.35;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .syncSpinner span {
+    animation: none;
+    border-top-color: color-mix(in srgb, var(--signal) 28%, transparent);
+    border-color: var(--signal);
+  }
+
+  .progressFill {
+    transition: none;
+  }
 }
 
 .kicker {
@@ -173,6 +260,48 @@
   margin-top: 0.25rem;
 }
 
+.addonList {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  width: 100%;
+  max-width: 28rem;
+  margin: 0.35rem 0 0.5rem;
+}
+
+.addon {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.85rem;
+  padding: 0.85rem 0.95rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+}
+
+.addon h2 {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 650;
+  color: var(--foam);
+}
+
+.addon p {
+  margin: 0.2rem 0 0;
+  font-size: 0.9rem;
+  line-height: 1.35;
+  color: var(--mist);
+}
+
+.addon .ghost {
+  flex-shrink: 0;
+  min-width: 7.5rem;
+  min-height: 2.5rem;
+  padding: 0.45rem 0.85rem;
+  font-size: 0.92rem;
+}
+
 .howtoWrap {
   width: 100%;
   margin-top: 0.5rem;
@@ -196,7 +325,7 @@
   padding: 0.7rem 0.8rem;
   border-radius: var(--radius-lg);
   border: 1px solid var(--line);
-  background: rgba(20, 40, 48, 0.45);
+  background: var(--surface);
   animation: panelIn 0.45s ease-out both;
 }
 

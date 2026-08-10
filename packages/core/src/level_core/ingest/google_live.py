@@ -386,17 +386,18 @@ async def create_calendar_event(
     )
 
 
-async def fetch_today_events(
+async def fetch_day_events(
     token: OAuthToken,
     *,
+    day_offset: int = 0,
     now: datetime | None = None,
     timezone_name: str = "America/Los_Angeles",
 ) -> list[dict[str, Any]]:
-    """Return today's primary-calendar events (for the Today home screen)."""
+    """Return primary-calendar events for a local calendar day (``day_offset`` from today)."""
     from zoneinfo import ZoneInfo
 
     now = now or datetime.now(tz=timezone.utc)
-    local = now.astimezone(ZoneInfo(timezone_name))
+    local = now.astimezone(ZoneInfo(timezone_name)) + timedelta(days=day_offset)
     day_start = local.replace(hour=0, minute=0, second=0, microsecond=0)
     day_end = local.replace(hour=23, minute=59, second=59, microsecond=0)
     raw = await list_primary_events_window(
@@ -404,7 +405,6 @@ async def fetch_today_events(
         time_min=day_start.astimezone(timezone.utc),
         time_max=day_end.astimezone(timezone.utc),
     )
-    # Keep recurring instances for *today* — they are the real schedule.
     out: list[dict[str, Any]] = []
     for event in raw:
         summary = (event.get("summary") or "(no title)").strip()
@@ -422,6 +422,151 @@ async def fetch_today_events(
             }
         )
     return out
+
+
+async def fetch_today_events(
+    token: OAuthToken,
+    *,
+    now: datetime | None = None,
+    timezone_name: str = "America/Los_Angeles",
+) -> list[dict[str, Any]]:
+    """Return today's primary-calendar events (for the Today home screen)."""
+    return await fetch_day_events(
+        token, day_offset=0, now=now, timezone_name=timezone_name
+    )
+
+
+@dataclass(slots=True)
+class IncrementalCalendarPull:
+    items: list[dict[str, Any]] = field(default_factory=list)
+    next_sync_token: str | None = None
+    full_resync: bool = False
+
+
+class SyncTokenExpiredError(RuntimeError):
+    """Google returned 410 — caller must drop syncToken and full-sync again."""
+
+
+def _list_events_page(
+    service: Any,
+    *,
+    sync_token: str | None = None,
+    time_min: str | None = None,
+    time_max: str | None = None,
+    page_token: str | None = None,
+) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "calendarId": "primary",
+        "singleEvents": True,
+        "showDeleted": True,
+        "maxResults": 250,
+    }
+    if page_token:
+        kwargs["pageToken"] = page_token
+    if sync_token:
+        kwargs["syncToken"] = sync_token
+    else:
+        if time_min:
+            kwargs["timeMin"] = time_min
+        if time_max:
+            kwargs["timeMax"] = time_max
+        kwargs["orderBy"] = "startTime"
+    return service.events().list(**kwargs).execute()
+
+
+async def pull_calendar_incremental(
+    token: OAuthToken,
+    *,
+    sync_token: str | None = None,
+    days_back: int = 14,
+    days_forward: int = 28,
+) -> IncrementalCalendarPull:
+    """List primary events; with ``sync_token`` returns only deltas.
+
+    Does not touch Memory Bank / LLM — agenda freshness only.
+    """
+    from googleapiclient.errors import HttpError
+
+    creds = credentials_from_token(token)
+    service = build("calendar", "v3", credentials=creds, cache_discovery=False)
+    window_start, window_end = calendar_window(
+        days_back=days_back, days_forward=days_forward
+    )
+    items: list[dict[str, Any]] = []
+    page_token: str | None = None
+    next_sync: str | None = None
+    full_resync = not bool(sync_token)
+    first_page = True
+
+    try:
+        while True:
+            use_sync = bool(sync_token) and not full_resync and first_page
+            use_window = full_resync and first_page
+            resp = _list_events_page(
+                service,
+                sync_token=sync_token if use_sync else None,
+                time_min=window_start.isoformat() if use_window else None,
+                time_max=window_end.isoformat() if use_window else None,
+                page_token=page_token,
+            )
+            first_page = False
+            items.extend(resp.get("items") or [])
+            page_token = resp.get("nextPageToken")
+            next_sync = resp.get("nextSyncToken") or next_sync
+            if not page_token:
+                break
+            if len(items) >= 1200:
+                break
+    except HttpError as exc:
+        if getattr(exc, "resp", None) is not None and exc.resp.status == 410:
+            raise SyncTokenExpiredError("calendar syncToken expired") from exc
+        raise
+
+    return IncrementalCalendarPull(
+        items=items,
+        next_sync_token=next_sync,
+        full_resync=full_resync,
+    )
+
+
+async def watch_primary_calendar(
+    token: OAuthToken,
+    *,
+    channel_id: str,
+    address: str,
+    channel_token: str,
+    ttl_seconds: int = 6 * 24 * 3600,
+) -> dict[str, Any]:
+    """Register a Google Calendar push channel for primary events."""
+    creds = credentials_from_token(token)
+    service = build("calendar", "v3", credentials=creds, cache_discovery=False)
+    expiration_ms = int(
+        (datetime.now(tz=timezone.utc) + timedelta(seconds=ttl_seconds)).timestamp()
+        * 1000
+    )
+    body = {
+        "id": channel_id,
+        "type": "web_hook",
+        "address": address,
+        "token": channel_token,
+        "expiration": expiration_ms,
+    }
+    return service.events().watch(calendarId="primary", body=body).execute()
+
+
+async def stop_calendar_channel(
+    token: OAuthToken,
+    *,
+    channel_id: str,
+    resource_id: str,
+) -> None:
+    creds = credentials_from_token(token)
+    service = build("calendar", "v3", credentials=creds, cache_discovery=False)
+    try:
+        service.channels().stop(body={"id": channel_id, "resourceId": resource_id}).execute()
+    except Exception:  # noqa: BLE001
+        # Channel may already be gone — ignore.
+        return
 
 
 async def fetch_drive_signals(
@@ -558,14 +703,20 @@ async def fetch_drive_signals(
 
 __all__ = [
     "CalendarPull",
+    "IncrementalCalendarPull",
+    "SyncTokenExpiredError",
     "calendar_window",
     "create_calendar_event",
     "drive_topic_score",
     "fetch_calendar_signals",
+    "fetch_day_events",
     "fetch_drive_signals",
     "fetch_today_events",
     "filter_calendar_events",
     "list_primary_events_window",
     "pull_calendar",
+    "pull_calendar_incremental",
+    "stop_calendar_channel",
     "topics_from_calendar_titles",
+    "watch_primary_calendar",
 ]

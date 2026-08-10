@@ -1,6 +1,23 @@
 /** Thin client for the Level FastAPI backend (cookie session). */
 
-const API_BASE = process.env.NEXT_PUBLIC_LEVEL_API_URL ?? "http://localhost:8080";
+/**
+ * Browser calls go same-origin (`/v1/...`) via Next rewrites so the session
+ * cookie is first-party on :3000 — avoids localhost vs 127.0.0.1 cookie drops.
+ * Server/SSR can still use an absolute URL.
+ */
+function resolveApiBase(): string {
+  if (typeof window !== "undefined") {
+    return "";
+  }
+  const fromEnv = process.env.NEXT_PUBLIC_LEVEL_API_URL?.replace(/\/$/, "");
+  if (fromEnv) return fromEnv;
+  return "http://127.0.0.1:8080";
+}
+
+/** Base URL for API calls and OAuth navigations. */
+export function getApiBase(): string {
+  return resolveApiBase();
+}
 
 export type ChallengeQuestion = {
   question: string;
@@ -53,6 +70,7 @@ export type Me = {
   email: string | null;
   display_name: string | null;
   google_connected: boolean;
+  can_write_calendar?: boolean;
 };
 
 export type TodayEvent = {
@@ -62,13 +80,29 @@ export type TodayEvent = {
   end: string | null;
   all_day: boolean;
   when_label: string;
+  activity_kind: string;
+  color: string;
+  cues: string[];
+};
+
+export type TomorrowPreview = {
+  weekday_label: string;
+  date_label: string;
+  summary: string;
+  remember: string[];
+  events: TodayEvent[];
 };
 
 export type TodayView = {
   user_id: string;
+  display_name?: string | null;
+  greeting_name: string;
+  weekday_label: string;
+  date_label: string;
   google_connected: boolean;
   events: TodayEvent[];
   recommendations: string[];
+  tomorrow?: TomorrowPreview | null;
   profile_ready: boolean;
   needs_review: boolean;
   fact_count: number;
@@ -106,8 +140,12 @@ export class AuthError extends Error {
   }
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
+  const res = await fetch(`${resolveApiBase()}${path}`, {
     ...init,
     credentials: "include",
     headers: {
@@ -126,6 +164,21 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+/** Retry briefly — API --reload often returns 401 for a beat mid-restart. */
+async function requestWithAuthRetry<T>(path: string, init?: RequestInit): Promise<T> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      return await request<T>(path, init);
+    } catch (err) {
+      lastErr = err;
+      if (!(err instanceof AuthError) || attempt === 3) throw err;
+      await sleep(250 * (attempt + 1));
+    }
+  }
+  throw lastErr;
+}
+
 /** @deprecated identity is the httpOnly cookie — localStorage is not auth. */
 export function getStoredUserId(): string {
   return "";
@@ -142,8 +195,21 @@ export function clearLocalSession(): void {
   localStorage.removeItem("level_include_drive");
 }
 
+export type GoogleSyncStatus = {
+  google_connected: boolean;
+  initial_sync_done: boolean;
+  profile_ingested: boolean;
+  agenda_event_count: number;
+  watch_active: boolean;
+  error: string | null;
+};
+
 export async function fetchMe(): Promise<Me> {
-  return request<Me>("/v1/auth/me");
+  return requestWithAuthRetry<Me>("/v1/auth/me");
+}
+
+export async function fetchGoogleSyncStatus(): Promise<GoogleSyncStatus> {
+  return request<GoogleSyncStatus>("/v1/sources/google/status");
 }
 
 /** Resume cookie session or create a guest — always leaves you logged in. */
@@ -161,7 +227,16 @@ export async function ensureSession(displayName?: string): Promise<Me> {
 export async function createGuest(displayName?: string): Promise<Me> {
   return request<Me>("/v1/auth/guest", {
     method: "POST",
-    body: JSON.stringify({ display_name: displayName ?? "Guest parent" }),
+    body: JSON.stringify(
+      displayName ? { display_name: displayName } : {},
+    ),
+  });
+}
+
+export async function updateDisplayName(displayName: string): Promise<Me> {
+  return request<Me>("/v1/auth/me", {
+    method: "PATCH",
+    body: JSON.stringify({ display_name: displayName }),
   });
 }
 
@@ -199,6 +274,15 @@ export async function fetchProfile(): Promise<Profile> {
 
 export async function fetchToday(): Promise<TodayView> {
   return request<TodayView>("/v1/today");
+}
+
+export async function dayCheckIn(
+  message: string,
+): Promise<{ reply: string; facts_added: number; cues_added: number; today: TodayView | null }> {
+  return request(`/v1/today/check-in`, {
+    method: "POST",
+    body: JSON.stringify({ message }),
+  });
 }
 
 export async function profileChat(
@@ -250,5 +334,3 @@ export async function declineProposal(proposalId: string): Promise<CommitmentPro
     body: JSON.stringify({}),
   });
 }
-
-export { API_BASE };

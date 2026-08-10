@@ -1,12 +1,53 @@
 "use client";
 
 import Image from "next/image";
-import Link from "next/link";
+import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+import { resolveHomeDestination } from "@/lib/home";
 import styles from "./page.module.css";
 
 export default function HomePage() {
+  const router = useRouter();
+  const [checking, setChecking] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    void resolveHomeDestination().then(({ dest }) => {
+      if (cancelled) return;
+      if (dest === "/today" || dest === "/sources") {
+        router.replace(dest);
+        return;
+      }
+      setChecking(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [router]);
+
+  function start() {
+    // Always walk through the pitch for new folks; welcome mints the session.
+    void resolveHomeDestination().then(({ dest }) => {
+      if (dest === "/today") {
+        router.push("/today");
+        return;
+      }
+      router.push("/welcome");
+    });
+  }
+
+  if (checking) {
+    return (
+      <main className={`themeDark ${styles.hero}`}>
+        <div className={styles.sky} aria-hidden="true">
+          <div className={styles.wash} />
+        </div>
+      </main>
+    );
+  }
+
   return (
-    <main className={styles.hero}>
+    <main className={`themeDark ${styles.hero}`}>
       <div className={styles.sky} aria-hidden="true">
         <div className={styles.wash} />
         <span className={`${styles.mist} ${styles.mistA}`} />
@@ -24,9 +65,9 @@ export default function HomePage() {
             For busy caregivers and single parents — honest help with the hard calls.
           </p>
           <div className={styles.cta}>
-            <Link href="/welcome" className={styles.primary}>
+            <button type="button" className={styles.primary} onClick={start}>
               Get Started
-            </Link>
+            </button>
             <p className={styles.hint}>We’ll explain first — then a quick connect</p>
           </div>
         </div>

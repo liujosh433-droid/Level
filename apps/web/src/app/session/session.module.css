@@ -14,7 +14,7 @@
   align-items: baseline;
   gap: 1rem;
   padding-bottom: 1rem;
-  border-bottom: 1px solid rgba(197, 213, 219, 0.15);
+  border-bottom: 1px solid var(--line);
 }
 
 .brand {
@@ -62,7 +62,7 @@
 .biasPanel {
   margin-top: 1rem;
   padding: 0.85rem 0 0.25rem;
-  border-bottom: 1px solid rgba(197, 213, 219, 0.1);
+  border-bottom: 1px solid var(--line);
   animation: rise 0.4s ease-out both;
 }
 
@@ -204,7 +204,7 @@
   flex-direction: column;
   gap: 0.75rem;
   padding-top: 1rem;
-  border-top: 1px solid rgba(197, 213, 219, 0.15);
+  border-top: 1px solid var(--line);
 }
 
 .composer textarea {
@@ -212,9 +212,9 @@
   resize: vertical;
   min-height: 6rem;
   padding: 0.9rem 1rem;
-  border: 1px solid rgba(197, 213, 219, 0.25);
+  border: 1px solid var(--line-strong);
   border-radius: var(--radius);
-  background: rgba(18, 36, 46, 0.75);
+  background: var(--field);
   color: var(--foam);
   font: inherit;
   outline: none;

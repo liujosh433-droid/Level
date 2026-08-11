@@ -73,12 +73,12 @@ job-retain: ## Run retention prune (TTL + soft cap)
 
 .PHONY: demo-judge
 demo-judge: ## Continuous Action proof: ingest → Care Profile → async challenge → retain
-	LEVEL_ENV=local LEVEL_INGEST_FIXTURES=1 LEVEL_JOB_USER_IDS=demo-parent \
+	LEVEL_ENV=local LEVEL_DEMO=1 LEVEL_INGEST_FIXTURES=1 LEVEL_JOB_USER_IDS=demo-parent \
 		$(UV) run python scripts/demo_continuous_action.py
 
-.PHONY: seed
-seed: ## Seed demo caregiver narrative into Memory Bank (calls Gemini)
-	$(UV) run python scripts/seed_demo_data.py
+.PHONY: seed-demo
+seed-demo: ## Opt-in local Memory seed (LEVEL_SEED_DEMO=1) for pitch rehearsals
+	LEVEL_ENV=local LEVEL_SEED_DEMO=1 $(UV) run python -c "import asyncio; from level_api.bootstrap import seed_local_demo; from level_api.dependencies import cached_memory, cached_settings; from level_core.models.factory import build_embedding_client; s=cached_settings(); asyncio.run(seed_local_demo(memory=cached_memory(), embedder=build_embedding_client(s), settings=s))"
 
 .PHONY: web
 web: ## Run the Next.js web app locally

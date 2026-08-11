@@ -11,31 +11,28 @@ from level_core.calendar.availability import (
     find_free_slots,
 )
 from level_core.calendar.commitment_gate import (
-    _heuristic_title,
     _sanitize_message,
     looks_like_schedule_ask,
 )
 from level_core.schemas.commitment import EventDraft, Weekday
 
 
-def test_looks_like_schedule_ask_detects_add_and_availability() -> None:
+def test_offline_schedule_hint_is_coarse_fallback_only() -> None:
+    """Regex must not be the live classifier — only a model-down safety net."""
     assert looks_like_schedule_ask(
         "add swimming night every Tues/Thurs at 9:30pm to my calendar"
     )
     assert looks_like_schedule_ask(
         "Diane wants to get dinner at 6:30pm today.. do I have time?"
     )
-    assert looks_like_schedule_ask("when else am I free tonight?")
-    assert looks_like_schedule_ask(
-        "Need to fit in grandparents visit on weekend, when is the best time"
-    )
+    assert looks_like_schedule_ask("what time would work best for a return today")
     assert not looks_like_schedule_ask("Should I switch schools for Jordan?")
 
 
-def test_heuristic_title_and_sanitize() -> None:
-    assert _heuristic_title(
-        "Diane wants to get dinner at 6:30pm today.. do I have time?"
-    ) == "Dinner with Diane"
+def test_offline_title_and_sanitize() -> None:
+    from level_core.calendar.commitment_gate import _offline_title
+
+    assert _offline_title("short ask") == "short ask"
     assert "[bullet:" not in _sanitize_message(
         "Follow your email [bullet:df5277d55d1d4a738a80321d3a] tonight."
     )

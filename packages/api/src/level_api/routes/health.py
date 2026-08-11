@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends
 
 from level_api.dependencies import get_registry
 from level_core.agents.registry import AgentRegistry
+from level_core.config import get_settings
 
 router = APIRouter(tags=["health"])
 
@@ -18,8 +19,6 @@ router = APIRouter(tags=["health"])
 @router.get("/healthz")
 async def healthz() -> dict[str, object]:
     """Liveness probe + runtime backend fingerprint (so local vs cloud is obvious)."""
-    from level_core.config import get_settings
-
     settings = get_settings()
     return {
         "status": "ok",

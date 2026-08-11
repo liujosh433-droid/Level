@@ -883,11 +883,10 @@ def merge_people_into_care_profile(
 
 
 def classify_calendar_event(summary: str) -> CareRoleId | None:
-    """Offline fallback classifier when AI ``calendar_role_by_summary`` is empty.
+    """LEGACY regex classifier — tests / ``LEVEL_ALLOW_HEURISTIC_CARE`` only.
 
-    Prefer holistic Gemini inference (:mod:`care_infer_llm`). This regex path
-    only keeps the care graph populated until background AI catches up — it
-    will never cover every real calendar title.
+    Live paths use AI ``calendar_role_by_summary``. Do not call this for product
+    intelligence; see :mod:`level_core.profile.ai_wrappers`.
     """
     text = " ".join((summary or "").split()).strip()
     if not text or text == "(no title)":
@@ -993,21 +992,25 @@ def resolve_event_care_role(
     role_by_summary: dict[str, str] | None = None,
     allow_heuristic_fallback: bool = False,
 ) -> CareRoleId | None:
-    """Prefer AI calendar hints; optionally classify titles the catalog missed."""
+    """Resolve role from AI ``calendar_role_by_summary`` only.
+
+    ``allow_heuristic_fallback`` is ignored on the live path (kept for call-site
+    compatibility). Use :func:`classify_calendar_event` only under
+    ``LEVEL_ALLOW_HEURISTIC_CARE`` / tests.
+    """
+    _ = allow_heuristic_fallback
     text = summary or ""
     hints = role_by_summary or {}
-    if hints:
-        key = re.sub(r"\s+", " ", text.strip().lower())
-        raw = hints.get(key)
-        if raw:
-            try:
-                return CareRoleId(raw)
-            except ValueError:
-                pass
-        if not allow_heuristic_fallback:
-            return None
-        return classify_calendar_event(text)
-    return classify_calendar_event(text)
+    if not hints:
+        return None
+    key = re.sub(r"\s+", " ", text.strip().lower())
+    raw = hints.get(key)
+    if not raw:
+        return None
+    try:
+        return CareRoleId(raw)
+    except ValueError:
+        return None
 
 
 def group_events_by_care_role(
@@ -1015,20 +1018,15 @@ def group_events_by_care_role(
     *,
     role_by_summary: dict[str, str] | None = None,
 ) -> dict[CareRoleId, int]:
-    """Count calendar events per care-role category.
-
-    Prefer AI ``role_by_summary`` hints. Titles missing from the catalog still
-    get a coarse offline classify so the graph/load bar aren't skewed to only
-    the few titles Gemini has tagged so far.
-    """
+    """Count calendar events per care-role from the AI catalog only."""
     counts: Counter[CareRoleId] = Counter()
     if not events:
         return {}
+    hints = role_by_summary or {}
     for ev in events:
         role = resolve_event_care_role(
             ev.get("summary") or "",
-            role_by_summary=role_by_summary,
-            allow_heuristic_fallback=True,
+            role_by_summary=hints or None,
         )
         if role is not None:
             counts[role] += 1
@@ -1101,50 +1099,73 @@ def build_week_role_load(
 ) -> list[dict[str, float | int | str]]:
     """Stacked load share for the current week — composition, not a balance target.
 
+    Uses AI ``calendar_role_by_summary`` only (no regex invent). Untagged events
+    go into an ``uncategorized`` slice so a partial catalog cannot read as
+    ``100% childcare``.
+
     Returns rows: role_id, label, color, percent, event_count, minutes.
     """
     week = filter_events_for_local_week(
         events, timezone_name=timezone_name, now=now
     )
     hints = dict(profile.calendar_role_by_summary) if profile else {}
-    minutes: Counter[CareRoleId] = Counter()
-    counts: Counter[CareRoleId] = Counter()
+    minutes: Counter[str] = Counter()
+    counts: Counter[str] = Counter()
     for ev in week:
         summary = str(ev.get("summary") or "")
-        # AI hint when present; classify uncatalogued titles so partial catalogs
-        # don't make one role look like 100% of the week.
+        mins = _event_duration_minutes(ev)
+        if mins <= 0:
+            continue
         role = resolve_event_care_role(
             summary,
             role_by_summary=hints or None,
-            allow_heuristic_fallback=True,
         )
-        if role is None:
-            continue
-        minutes[role] += _event_duration_minutes(ev)
-        counts[role] += 1
+        key = role.value if role is not None else "uncategorized"
+        minutes[key] += mins
+        counts[key] += 1
     total = sum(minutes.values())
     if total <= 0:
         return []
+
+    def _meta(role_key: str) -> tuple[str, str]:
+        if role_key == "uncategorized":
+            return "Still classifying", "#94A3B8"
+        try:
+            rid = CareRoleId(role_key)
+            return CARE_ROLE_LABELS[rid], CARE_ROLE_COLORS[rid]
+        except ValueError:
+            return role_key, "#94A3B8"
+
+    # Known roles first (by minutes), uncategorized last.
+    ordered = sorted(
+        minutes.items(),
+        key=lambda kv: (kv[0] == "uncategorized", -kv[1], kv[0]),
+    )
     rows: list[dict[str, float | int | str]] = []
-    for role, mins in sorted(minutes.items(), key=lambda kv: (-kv[1], kv[0].value)):
+    for role_key, mins in ordered:
         pct = round(100.0 * mins / total)
-        if pct < 1 and counts[role] > 0:
+        if pct < 1 and counts[role_key] > 0:
             pct = 1
+        label, color = _meta(role_key)
         rows.append(
             {
-                "role_id": role.value,
-                "label": CARE_ROLE_LABELS[role],
-                "color": CARE_ROLE_COLORS[role],
+                "role_id": role_key,
+                "label": label,
+                "color": color,
                 "percent": int(pct),
-                "event_count": int(counts[role]),
+                "event_count": int(counts[role_key]),
                 "minutes": int(round(mins)),
             }
         )
-    # Fix rounding so percents sum to ~100.
     if rows:
         drift = 100 - sum(int(r["percent"]) for r in rows)
         if drift != 0:
-            rows[0]["percent"] = int(rows[0]["percent"]) + drift
+            # Prefer adjusting the largest non-uncategorized slice.
+            anchor = next(
+                (i for i, r in enumerate(rows) if r["role_id"] != "uncategorized"),
+                0,
+            )
+            rows[anchor]["percent"] = int(rows[anchor]["percent"]) + drift
     return rows
 
 
@@ -1538,7 +1559,7 @@ def _reject_care_role(
 
 
 def adjust_care_profile_from_note(profile: CareProfile, note: str) -> CareProfile:
-    """Light upsert when the user tells Level more about their care load."""
+    """LEGACY keyword upsert — tests / opt-in only. Prefer AI note apply."""
     text = note.lower()
     rejects: list[CareRoleId] = []
     if _NO_COPARENT_RE.search(text):
@@ -2075,7 +2096,7 @@ def build_about_summary(
             if any(k in low for k in ("walk", "hiking", "run")):
                 interest_hits.append("walks")
             if any(k in low for k in ("soccer",)):
-                interest_hits.append("Jordan's soccer" if "jordan" in low else "soccer")
+                interest_hits.append("soccer")
         # Personality / temperament — only explicit language
         if any(
             k in low

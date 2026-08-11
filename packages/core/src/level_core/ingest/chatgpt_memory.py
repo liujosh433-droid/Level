@@ -54,8 +54,12 @@ def _clean_fact(raw: str) -> str | None:
     return line[:500]
 
 
-def heuristic_extract_memory_facts(text: str, *, limit: int = _MAX_FACTS) -> list[str]:
-    """Split a pasted memory dump into usable lines when Gemini is unavailable."""
+def split_memory_lines(text: str, *, limit: int = _MAX_FACTS) -> list[str]:
+    """Structural line split only — not care classification.
+
+    Used when Gemini is unavailable so the paste isn't dropped entirely.
+    Prefer AI extract on the live path.
+    """
     chunks = re.split(r"[\n\r]+|(?<=[.!?])\s+(?=[A-Z])", text)
     out: list[str] = []
     seen: set[str] = set()
@@ -73,12 +77,17 @@ def heuristic_extract_memory_facts(text: str, *, limit: int = _MAX_FACTS) -> lis
     return out
 
 
+def heuristic_extract_memory_facts(text: str, *, limit: int = _MAX_FACTS) -> list[str]:
+    """Deprecated alias for :func:`split_memory_lines` (tests)."""
+    return split_memory_lines(text, limit=limit)
+
+
 async def extract_from_chatgpt_memory(
     text: str,
     *,
     gemini: GeminiClient | None = None,
 ) -> MemoryExtract:
-    """Use Gemini to pull care-relevant facts; fall back to heuristic lines."""
+    """Use Gemini to pull care-relevant facts; line-split wrapper if model is down."""
     paste = (text or "").strip()
     if len(paste) < 20:
         raise ValueError("Paste a longer ChatGPT Memory summary (at least a few lines).")
@@ -166,25 +175,11 @@ def memory_extract_to_facts(
         if len(statement) < 20:
             statement = f"From ChatGPT Memory: {statement}"
         statement = statement[:500]
-        # Light type guess for retrieval.
-        low = statement.lower()
-        if any(w in low for w in ("prefer", "likes", "concise", "direct")):
-            ftype = FactType.PREFERENCE
-        elif any(w in low for w in ("can't", "cannot", "won't", "must not", "past 6")):
-            ftype = FactType.CONSTRAINT
-        elif any(
-            w in low
-            for w in ("son", "daughter", "mother", "mom", "dad", "co-parent", "alex", "jordan")
-        ):
-            ftype = FactType.RELATIONSHIP
-        elif any(w in low for w in ("care", "value", "present for", "protect")):
-            ftype = FactType.VALUE_STATEMENT
-        else:
-            ftype = FactType.CONSTRAINT
+        # Typing is left generic — Gemini already filtered for care relevance.
         facts.append(
             Fact(
                 user_id=user_id,
-                type=ftype,
+                type=FactType.CONSTRAINT,
                 statement=statement,
                 source_signal_ids=[f"chatgpt-memory:{fp}:{i}"],
                 salience=0.7,
@@ -235,4 +230,5 @@ __all__ = [
     "heuristic_extract_memory_facts",
     "memory_extract_to_facts",
     "memory_extract_to_signals",
+    "split_memory_lines",
 ]

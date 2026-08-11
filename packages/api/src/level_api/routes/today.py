@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
+import uuid
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -17,27 +19,40 @@ from level_api.dependencies import (
     get_memory,
     get_token_store,
 )
+from level_api.routes.sources import (
+    _bg_enrich_care,
+    _seed_care_from_agenda_fast,
+    ensure_profile_from_agenda,
+)
 from level_core.auth.tokens import TokenStore
 from level_core.calendar.activity_art import activity_color, infer_activity_kind
 from level_core.calendar.agenda_sync import day_events_cached_or_live, refresh_agenda_cache
 from level_core.calendar.event_cues import EventCue, EventCueStore, match_cues_for_summary
-from level_core.calendar.sync_state import CalendarSyncStore
+from level_core.calendar.sync_state import (
+    CalendarSyncStore,
+    events_for_local_day,
+)
 from level_core.config import get_settings
 from level_core.errors import ModelUnavailable
 from level_core.memory.base import MemoryBank
 from level_core.models.base import GenerationRequest
 from level_core.models.factory import build_gemini_client
 from level_core.observability.logger import get_logger
+from level_core.profile.care_infer_llm import classify_week_event_roles_ai
 from level_core.profile.synthesize import (
     build_holding_summary,
     build_week_role_load,
     cached_care_graph,
+    filter_events_for_local_week,
+    invalidate_care_graph_cache,
+    resolve_event_care_role,
 )
 from level_core.profile.today import (
     build_recommendations,
     build_tomorrow_preview,
     format_event_time,
 )
+from level_core.schemas.base import _now_utc
 from level_core.schemas.care import CareGraph
 from level_core.schemas.decision import DecisionStatus
 from level_core.schemas.signal import Fact, FactType, Signal, SignalSource
@@ -164,9 +179,16 @@ def _first_name(display_name: str | None) -> str:
     return raw.split()[0][:40]
 
 
-def _to_today_event(raw: dict, user_cues: list) -> TodayEvent:
+def _to_today_event(
+    raw: dict,
+    user_cues: list,
+    *,
+    role_by_summary: dict[str, str] | None = None,
+) -> TodayEvent:
     summary = raw.get("summary") or "(no title)"
-    kind = infer_activity_kind(summary)
+    key = " ".join(summary.strip().lower().split())
+    care_role = (role_by_summary or {}).get(key)
+    kind = infer_activity_kind(summary, care_role=care_role)
     return TodayEvent(
         id=raw.get("id") or "",
         summary=summary,
@@ -242,6 +264,67 @@ async def _warm_agenda_cache_bg(user_id: str, token: OAuthToken, sync_store: Cal
         _logger.warning("agenda_cache_bg_warm_failed", user_id=user_id, error=str(exc))
 
 
+async def _bg_classify_week_roles(
+    user_id: str,
+    memory: MemoryBank,
+    sync_store: CalendarSyncStore,
+) -> None:
+    """Background: classify this week's titles into care roles (do not block /today)."""
+    try:
+        care = await memory.manifestos.get_care_profile(user_id=user_id)
+        if care is None:
+            return
+        state = await sync_store.get(user_id)
+        if state is None or not state.events:
+            return
+        agenda_events = [
+            {
+                "summary": ev.summary,
+                "start": ev.start,
+                "end": ev.end,
+                "all_day": ev.all_day,
+            }
+            for ev in state.events.values()
+            if ev.summary
+        ]
+        week_events = filter_events_for_local_week(agenda_events)
+        hints = dict(care.calendar_role_by_summary)
+        needs = any(
+            resolve_event_care_role(
+                str(ev.get("summary") or ""),
+                role_by_summary=hints or None,
+            )
+            is None
+            for ev in week_events
+        )
+        if not needs or not week_events:
+            return
+        week_hints = await classify_week_event_roles_ai(
+            week_events=week_events,  # type: ignore[arg-type]
+            profile=care,
+            gemini=build_gemini_client(get_settings()),
+        )
+        if not week_hints:
+            return
+        merged = {**hints, **week_hints}
+        care = care.model_copy(
+            update={
+                "calendar_role_by_summary": merged,
+                "version": int(care.version or 1) + 1,
+                "updated_at": _now_utc(),
+            }
+        )
+        invalidate_care_graph_cache(user_id)
+        await memory.manifestos.save_care_profile(care)
+        _logger.info(
+            "week_roles_classified_bg",
+            user_id=user_id,
+            tagged=len(week_hints),
+        )
+    except Exception:  # noqa: BLE001
+        _logger.exception("week_roles_classify_bg_failed", user_id=user_id)
+
+
 @router.get("", response_model=TodayResponse)
 async def get_today(
     background_tasks: BackgroundTasks,
@@ -255,21 +338,25 @@ async def get_today(
     cues: EventCueStore = Depends(get_event_cue_store),
     sync_store: CalendarSyncStore = Depends(get_calendar_sync_store),
 ) -> TodayResponse:
-    user = await tokens.get_user(user_id)
+    user, token, user_cues = await asyncio.gather(
+        tokens.get_user(user_id),
+        tokens.get_google_token(user_id),
+        cues.list_for_user(user_id),
+    )
     display_name = format_person_name(user.display_name) if user else None
     weekday, date_label = _greeting_labels()
 
-    token = await tokens.get_google_token(user_id)
     google_connected = token is not None and bool(
         token.refresh_token or token.access_token
     )
-    user_cues = await cues.list_for_user(user_id)
     events_out: list[TodayEvent] = []
     tomorrow_events: list[TodayEvent] = []
+    care = None
+    state = None
     if token is not None:
         try:
             # Parallel day pulls; never block on full agenda resync (that was the lag).
-            raw_today, raw_tomorrow = await asyncio.gather(
+            raw_today, raw_tomorrow, state, care = await asyncio.gather(
                 day_events_cached_or_live(
                     user_id=user_id,
                     token=token,
@@ -282,8 +369,9 @@ async def get_today(
                     sync_store=sync_store,
                     day_offset=1,
                 ),
+                sync_store.get(user_id),
+                memory.manifestos.get_care_profile(user_id=user_id),
             )
-            state = await sync_store.get(user_id)
             updated = state.agenda_updated_at if state else None
             if updated is not None and updated.tzinfo is None:
                 updated = updated.replace(tzinfo=timezone.utc)
@@ -296,12 +384,24 @@ async def get_today(
                 background_tasks.add_task(_warm_agenda_cache_bg, user_id, token, sync_store)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=502, detail=f"Calendar read failed: {exc}") from exc
-        events_out = [_to_today_event(e, user_cues) for e in raw_today]
-        tomorrow_events = [_to_today_event(e, user_cues) for e in raw_tomorrow]
+        role_hints = dict(care.calendar_role_by_summary) if care else None
+        events_out = [
+            _to_today_event(e, user_cues, role_by_summary=role_hints)
+            for e in raw_today
+        ]
+        tomorrow_events = [
+            _to_today_event(e, user_cues, role_by_summary=role_hints)
+            for e in raw_tomorrow
+        ]
+    else:
+        care = await memory.manifestos.get_care_profile(user_id=user_id)
 
-    facts = await memory.facts.list_for_user(user_id=user_id, limit=200)
-    snapshot = await memory.manifestos.get_profile_snapshot(user_id=user_id)
-    manifesto = await memory.manifestos.get_current_manifesto(user_id=user_id)
+    facts, snapshot, manifesto, decisions = await asyncio.gather(
+        memory.facts.list_for_user(user_id=user_id, limit=200),
+        memory.manifestos.get_profile_snapshot(user_id=user_id),
+        memory.manifestos.get_current_manifesto(user_id=user_id),
+        memory.decisions.list_for_user(user_id=user_id, limit=20),
+    )
     recs = build_recommendations(
         today_events=[e.model_dump() for e in events_out],
         snapshot=snapshot,
@@ -344,30 +444,20 @@ async def get_today(
         events=tomorrow_events[:8],
     )
 
+    # Hot path: use decision trigger only — do not await turn history per decision.
     pending: list[PendingChallenge] = []
     try:
-        decisions = await memory.decisions.list_for_user(user_id=user_id, limit=20)
         for d in decisions:
             if d.status is not DecisionStatus.OPEN:
                 continue
             if d.origin != "async_role_theft":
                 continue
-            turns = await memory.decisions.list_turns(
-                user_id=user_id, decision_id=d.decision_id
-            )
-            q = None
-            ctype = None
-            for t in reversed(turns):
-                if t.challenger_questions:
-                    q = t.challenger_questions[0].question
-                    ctype = t.challenger_questions[0].challenge_type
-                    break
             pending.append(
                 PendingChallenge(
                     decision_id=d.decision_id,
                     trigger_label=d.trigger_label or "Care collision on your calendar",
-                    question=q,
-                    challenge_type=ctype,
+                    question=None,
+                    challenge_type="role_theft",
                 )
             )
             if len(pending) >= 3:
@@ -380,7 +470,6 @@ async def get_today(
     week_load: list[WeekRoleLoad] = []
     conflict_summaries: list[str] = []
     try:
-        care = await memory.manifestos.get_care_profile(user_id=user_id)
         agenda_events: list[dict] = [
             {
                 "summary": e.summary,
@@ -392,32 +481,56 @@ async def get_today(
             if e.summary
         ]
         # Prefer full agenda cache for category counts when available.
-        try:
-            state = await sync_store.get(user_id)
-            if state and state.events:
-                agenda_events = [
-                    {
-                        "summary": ev.summary,
-                        "start": ev.start,
-                        "end": ev.end,
-                        "all_day": ev.all_day,
-                    }
-                    for ev in state.events.values()
-                    if ev.summary
-                ]
-        except Exception:  # noqa: BLE001
-            pass
-        # Never block Today on Gemini — enrich off the request path.
-        if care is not None and agenda_events and not care.calendar_role_by_summary:
-            from level_api.routes.sources import _bg_enrich_care_if_needed
+        if state and state.events:
+            agenda_events = [
+                {
+                    "summary": ev.summary,
+                    "start": ev.start,
+                    "end": ev.end,
+                    "all_day": ev.all_day,
+                }
+                for ev in state.events.values()
+                if ev.summary
+            ]
+        elif state is None:
+            try:
+                state = await sync_store.get(user_id)
+                if state and state.events:
+                    agenda_events = [
+                        {
+                            "summary": ev.summary,
+                            "start": ev.start,
+                            "end": ev.end,
+                            "all_day": ev.all_day,
+                        }
+                        for ev in state.events.values()
+                        if ev.summary
+                    ]
+            except Exception:  # noqa: BLE001
+                pass
 
-            background_tasks.add_task(
-                _bg_enrich_care_if_needed, user_id, memory, sync_store
-            )
+        if agenda_events and (
+            care is None
+            or not care.roles
+            or not care.calendar_role_by_summary
+        ):
+            if care is None or not care.roles:
+                background_tasks.add_task(
+                    ensure_profile_from_agenda,
+                    user_id=user_id,
+                    memory=memory,
+                    sync_store=sync_store,
+                )
+            else:
+                background_tasks.add_task(
+                    _bg_enrich_care,
+                    user_id,
+                    memory,
+                    sync_store,
+                    force=True,
+                )
+        # Opt-in regex seed only (LEVEL_ALLOW_HEURISTIC_CARE=1).
         if (care is None or not care.roles) and agenda_events:
-            from level_api.routes.sources import _seed_care_from_agenda_fast
-            from level_core.profile.synthesize import invalidate_care_graph_cache
-
             care = await _seed_care_from_agenda_fast(
                 user_id=user_id,
                 memory=memory,
@@ -425,13 +538,27 @@ async def get_today(
                 events=agenda_events,
             )
             invalidate_care_graph_cache(user_id)
-            if care is not None and not care.calendar_role_by_summary:
-                from level_api.routes.sources import _bg_enrich_care_if_needed
 
-                background_tasks.add_task(
-                    _bg_enrich_care_if_needed, user_id, memory, sync_store
-                )
         if care is not None:
+            week_events = filter_events_for_local_week(agenda_events)
+            hints = dict(care.calendar_role_by_summary)
+            needs_week_ai = any(
+                resolve_event_care_role(
+                    str(ev.get("summary") or ""),
+                    role_by_summary=hints or None,
+                )
+                is None
+                for ev in week_events
+            )
+            # Never await Gemini on /today — classify in the background.
+            if needs_week_ai and week_events:
+                background_tasks.add_task(
+                    _bg_classify_week_roles,
+                    user_id,
+                    memory,
+                    sync_store,
+                )
+
             care_graph, _, _ = cached_care_graph(care, agenda_events or None)
             holding = [
                 HoldingChip.model_validate(row)
@@ -478,20 +605,16 @@ async def day_check_in(
     sync_store: CalendarSyncStore = Depends(get_calendar_sync_store),
 ) -> DayCheckInResponse:
     """Friendly day check-in → profile fact + optional event-linked reminder."""
-    import re
-    import uuid
-
-    from level_api.routes.sources import _bg_enrich_care
-    from level_core.profile.synthesize import invalidate_care_graph_cache
-    from level_core.schemas.base import _now_utc
-
     settings = get_settings()
     gemini = build_gemini_client(settings)
     message = payload.message.strip()
 
     # Today's titles help the model attach reminders to real calendar events.
     agenda_titles: list[str] = []
-    token = await tokens.get_google_token(user_id)
+    token, state = await asyncio.gather(
+        tokens.get_google_token(user_id),
+        sync_store.get(user_id),
+    )
     try:
         if token is not None:
             raw_today = await day_events_cached_or_live(
@@ -505,16 +628,12 @@ async def day_check_in(
                 for e in raw_today
                 if (e.get("summary") or "").strip()
             ][:20]
-        if not agenda_titles:
-            state = await sync_store.get(user_id)
-            if state and state.events:
-                from level_core.calendar.sync_state import events_for_local_day
-
-                agenda_titles = [
-                    e["summary"]
-                    for e in events_for_local_day(state, day_offset=0)
-                    if e.get("summary")
-                ][:20]
+        if not agenda_titles and state and state.events:
+            agenda_titles = [
+                e["summary"]
+                for e in events_for_local_day(state, day_offset=0)
+                if e.get("summary")
+            ][:20]
     except Exception:  # noqa: BLE001
         agenda_titles = []
 
@@ -564,6 +683,8 @@ async def day_check_in(
 
     note = (parsed.profile_note or message).strip()[:500]
     facts_added = 0
+    fact = None
+    signal = None
     if len(note) >= 8:
         fact = Fact(
             user_id=user_id,
@@ -572,7 +693,6 @@ async def day_check_in(
             source_signal_ids=[],
             salience=0.7,
         )
-        await memory.facts.upsert(fact)
         facts_added = 1
         signal = Signal(
             user_id=user_id,
@@ -580,7 +700,6 @@ async def day_check_in(
             external_id=f"day-checkin:{uuid.uuid4().hex[:12]}",
             text=f"Day check-in: {message}",
         )
-        await memory.signals.upsert(signal)
 
     cues_added = 0
     keywords = [k.strip().lower() for k in parsed.keywords if k and k.strip()][:8]
@@ -596,38 +715,51 @@ async def day_check_in(
             break
     keywords = keywords[:8]
     reminder = (parsed.reminder or "").strip()[:220]
+    cue = None
     if keywords and reminder:
-        await cue_store.add(
-            EventCue(
-                user_id=user_id,
-                keywords=keywords,
-                reminder=reminder,
-                source_text=message[:400],
-            )
+        cue = EventCue(
+            user_id=user_id,
+            keywords=keywords,
+            reminder=reminder,
+            source_text=message[:400],
         )
         cues_added = 1
 
     # Apply AI-chosen role tags immediately; holistic enrich reconciles the rest.
     role_raw = (parsed.care_role or "").strip().lower()
     titles_to_tag = [t.strip() for t in parsed.matched_titles if t and t.strip()]
+    care = None
     if role_raw and titles_to_tag:
         try:
             care = await memory.manifestos.get_care_profile(user_id=user_id)
-            if care is not None:
-                hints = dict(care.calendar_role_by_summary)
-                for title in titles_to_tag:
-                    key = re.sub(r"\s+", " ", title.strip().lower())
-                    if key:
-                        hints[key] = role_raw
-                care = care.model_copy(
-                    update={
-                        "calendar_role_by_summary": hints,
-                        "version": int(care.version or 1) + 1,
-                        "updated_at": _now_utc(),
-                    }
-                )
-                invalidate_care_graph_cache(user_id)
-                await memory.manifestos.save_care_profile(care)
+        except Exception:  # noqa: BLE001
+            care = None
+
+    persist_jobs = []
+    if fact is not None and signal is not None:
+        persist_jobs.append(memory.facts.upsert(fact))
+        persist_jobs.append(memory.signals.upsert(signal))
+    if cue is not None:
+        persist_jobs.append(cue_store.add(cue))
+    if persist_jobs:
+        await asyncio.gather(*persist_jobs)
+
+    if role_raw and titles_to_tag and care is not None:
+        try:
+            hints = dict(care.calendar_role_by_summary)
+            for title in titles_to_tag:
+                key = re.sub(r"\s+", " ", title.strip().lower())
+                if key:
+                    hints[key] = role_raw
+            care = care.model_copy(
+                update={
+                    "calendar_role_by_summary": hints,
+                    "version": int(care.version or 1) + 1,
+                    "updated_at": _now_utc(),
+                }
+            )
+            invalidate_care_graph_cache(user_id)
+            await memory.manifestos.save_care_profile(care)
         except Exception:  # noqa: BLE001
             _logger.warning("checkin_care_tag_failed", user_id=user_id)
 

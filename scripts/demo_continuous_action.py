@@ -24,6 +24,7 @@ async def main() -> int:
 
     os.environ.setdefault("LEVEL_ENV", "local")
     os.environ.setdefault("LEVEL_INGEST_FIXTURES", "1")
+    os.environ.setdefault("LEVEL_DEMO", "1")
     user_id = os.getenv("LEVEL_JOB_USER_IDS", "demo-parent").split(",")[0].strip()
     os.environ["LEVEL_JOB_USER_IDS"] = user_id
 

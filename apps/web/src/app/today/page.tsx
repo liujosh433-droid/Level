@@ -17,13 +17,13 @@ import {
 import {
   AuthError,
   confirmProposal,
-  createDecision,
   dayCheckIn,
   declineProposal,
   fetchMe,
   fetchToday,
   proposeSchedule,
-  takeTurn,
+  readTodayCache,
+  writeTodayCache,
   type CommitmentProposal,
   type TodayView,
   type Turn,
@@ -75,24 +75,29 @@ function TodayInner() {
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [speaking, setSpeaking] = useState(false);
-  const [decisionId, setDecisionId] = useState<string | null>(null);
   const [items, setItems] = useState<ChatItem[]>([]);
   const [booting, setBooting] = useState(true);
   const speakGenRef = useRef(0);
   const speakTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
+    const cached = readTodayCache();
+    if (cached) {
+      setToday(cached);
+      if (cached.display_name) setDisplayName(cached.display_name);
+      setBooting(false);
+    }
     void (async () => {
       try {
-        const me = await fetchMe();
+        const [me, data] = await Promise.all([fetchMe(), fetchToday()]);
         setUserId(me.user_id);
         setDisplayName(me.display_name);
-        if (!me.google_connected) {
+        if (!me.google_connected && !data.google_connected) {
           router.replace("/sources");
           return;
         }
-        const data = await fetchToday();
         setToday(data);
+        writeTodayCache(data);
         if (data.display_name) setDisplayName(data.display_name);
       } catch (err) {
         if (err instanceof AuthError) {
@@ -110,6 +115,7 @@ function TodayInner() {
     return fetchToday()
       .then((data) => {
         setToday(data);
+        writeTodayCache(data);
         if (data.display_name) setDisplayName(data.display_name);
       })
       .catch(() => undefined);
@@ -203,56 +209,30 @@ function TodayInner() {
     setBusy(true);
     setError(null);
     try {
-      // Skip the schedule propose hop unless the text looks like a calendar ask.
-      const looksLikeSchedule =
-        /\b(add|schedule|put|book|block)\b.+\b(calendar|every|weekly|recurring|mon(day)?|tue(s|sday)?|wed(nesday)?|thu(r|rs|rsday)?|fri(day)?|sat(urday)?|sun(day)?)\b/i.test(
-          text,
-        ) ||
-        /\b(do i have time|am i free|when (else )?am i free|when can i|free at|fit in|make (it|dinner|lunch)|have room|does .+ work|can i (do|make|meet)|available)\b/i.test(
-          text,
-        );
-
-      if (looksLikeSchedule) {
-        const schedule = await proposeSchedule(text);
-        if (schedule.is_schedule_ask && schedule.proposal) {
-          setItems((prev) => [
-            ...prev,
-            { id: schedule.proposal!.proposal_id, kind: "proposal", proposal: schedule.proposal! },
-          ]);
-          setDraft("");
-          return;
-        }
-      }
-
-      // Day reflections / tips → profile + event cues
-      const looksLikeDecision =
-        /\b(should i|what if|decide|or not|promotion|school choice)\b/i.test(text);
-      if (!looksLikeDecision) {
-        const check = await dayCheckIn(text);
+      // AI decides schedule vs not — no client keyword gate.
+      const schedule = await proposeSchedule(text);
+      if (schedule.is_schedule_ask && schedule.proposal) {
         setItems((prev) => [
           ...prev,
-          {
-            id: `checkin-${Date.now()}`,
-            kind: "checkin",
-            you: text,
-            reply: check.reply,
-          },
+          { id: schedule.proposal!.proposal_id, kind: "proposal", proposal: schedule.proposal! },
         ]);
         setDraft("");
-        // Refresh Today off the critical path (check-in no longer blocks on it).
-        void refreshToday();
         return;
       }
 
-      let id = decisionId;
-      if (!id) {
-        const d = await createDecision();
-        id = d.decision_id;
-        setDecisionId(id);
-      }
-      const turn = await takeTurn(id, text);
-      setItems((prev) => [...prev, { id: turn.turn_id, kind: "turn", turn }]);
+      // Day reflections / tips → profile + event cues
+      const check = await dayCheckIn(text);
+      setItems((prev) => [
+        ...prev,
+        {
+          id: `checkin-${Date.now()}`,
+          kind: "checkin",
+          you: text,
+          reply: check.reply,
+        },
+      ]);
       setDraft("");
+      void refreshToday();
     } catch (err) {
       if (err instanceof AuthError) {
         router.replace("/welcome");
@@ -473,7 +453,14 @@ function TodayInner() {
                   value={draft}
                   onChange={setDraft}
                   onSubmit={onAsk}
-                  busy={busy || booting}
+                  busy={busy}
+                  busyLabel="Thinking…"
+                  busyHints={[
+                    "Looking at your calendar…",
+                    "Weighing what this would crowd out…",
+                    "Checking your care load…",
+                    "Putting an honest answer together…",
+                  ]}
                   disabled={!userId || booting}
                   voiceEnabled
                   stickyInput={false}

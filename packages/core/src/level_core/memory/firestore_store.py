@@ -17,6 +17,7 @@ Schema follows the layout documented in ARCHITECTURE.md:
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
@@ -220,13 +221,15 @@ class FirestoreManifestoRepository:
             .collection("state")
             .document("manifesto")
         )
-        await ref.set(_to_dict(manifesto))
         history_ref = (
             _user_ref(self._client, manifesto.user_id)
             .collection("manifesto_versions")
             .document(str(manifesto.version))
         )
-        await history_ref.set(_to_dict(manifesto))
+        await asyncio.gather(
+            ref.set(_to_dict(manifesto)),
+            history_ref.set(_to_dict(manifesto)),
+        )
 
     @traced("firestore.bias_profile.get")
     async def get_bias_profile(self, *, user_id: str) -> BiasProfile | None:

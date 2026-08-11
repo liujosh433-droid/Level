@@ -50,19 +50,11 @@ _WEEKDAY_INDEX = {
     Weekday.SU: 6,
 }
 
-_ADD_HINT = re.compile(
-    r"\b(add|schedule|put|book|block)\b.+\b("
-    r"calendar|every|weekly|recurring|"
-    r"mon(day)?|tue(s|sday)?|wed(nesday)?|thu(r|rs|rsday)?|"
-    r"fri(day)?|sat(urday)?|sun(day)?"
-    r")\b",
-    re.I,
-)
-_AVAIL_HINT = re.compile(
+# Offline / model-down ONLY — never used to decide intent when Gemini is up.
+_OFFLINE_SCHEDULE_HINT = re.compile(
     r"\b("
-    r"do i have time|am i free|when (else )?am i free|when can i|"
-    r"free at|fit in|make (it|dinner|lunch)|have room|"
-    r"does .+ work|can i (do|make|meet)|available"
+    r"calendar|schedule|book|add .+\bto my|"
+    r"am i free|do i have time|what time|when can i|fit in|available"
     r")\b",
     re.I,
 )
@@ -106,10 +98,11 @@ class _ScheduleResolve(BaseModel):
 
 
 def looks_like_schedule_ask(text: str) -> bool:
+    """Offline fallback gate only. Live path trusts Gemini ``is_schedule_ask``."""
     t = text.strip()
     if len(t) < 8:
         return False
-    return bool(_ADD_HINT.search(t) or _AVAIL_HINT.search(t))
+    return bool(_OFFLINE_SCHEDULE_HINT.search(t))
 
 
 def _weekday_map(raw: list[str]) -> list[Weekday]:
@@ -156,45 +149,12 @@ def _weekday_map(raw: list[str]) -> list[Weekday]:
     return out
 
 
-def _heuristic_title(text: str) -> str:
-    """Offline fallback title only — prefer the model on the live path."""
-    t = text.strip()
-    m = re.search(
-        r"\b([A-Z][a-z]+)\s+wants?\s+to\s+(?:get\s+|have\s+)?(dinner|lunch|coffee|drinks|brunch)\b",
-        t,
-    )
-    if m:
-        return f"{m.group(2).title()} with {m.group(1)}"
-    m = re.search(
-        r"\b(dinner|lunch|coffee|drinks|brunch)\s+with\s+([A-Za-z]+)\b",
-        t,
-        re.I,
-    )
-    if m:
-        return f"{m.group(1).title()} with {m.group(2).title()}"
-    m = re.search(
-        r"\b(add|schedule|put|book)\s+(.+?)\s+(every|on|at|to my)\b",
-        t,
-        re.I,
-    )
-    if m:
-        return m.group(2).strip()[:80]
-    return (t[:60] + "…") if len(t) > 60 else (t or "Plan")
-
-
-def _heuristic_time(text: str) -> str | None:
-    """Offline fallback — only used when Gemini is unavailable."""
-    m = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b", text, re.I)
-    if not m:
-        return None
-    hour = int(m.group(1))
-    minute = int(m.group(2) or "0")
-    ampm = m.group(3).lower()
-    if ampm == "pm" and hour < 12:
-        hour += 12
-    if ampm == "am" and hour == 12:
-        hour = 0
-    return f"{hour:02d}:{minute:02d}"
+def _offline_title(text: str) -> str:
+    """Last-resort label when the model is down — no keyword reinterpretation."""
+    t = (text or "").strip()
+    if not t:
+        return "Plan"
+    return (t[:60] + "…") if len(t) > 60 else t
 
 
 def _normalize_parsed(
@@ -203,24 +163,23 @@ def _normalize_parsed(
     today: str,
     source_text: str,
 ) -> _ParsedIntent:
-    """Light schema cleanup on model output — does not re-interpret the ask.
+    """Schema cleanup only — does not re-interpret the ask with keywords.
 
-    Critical: never force availability onto ``today``; that ignored weekend /
-    relative day preferences the model already encoded in ``by_days``.
+    Day/time/duration/title come from the model. We only fix invalid shapes
+    and drop a ``local_date`` that contradicts model ``by_days``.
     """
+    _ = today  # call-site clarity; day pinning is the model's job
     if parsed.kind not in ("add", "availability"):
         parsed.kind = "availability"
     title = (parsed.title or "").strip()
     if not title or title.lower() in {"untitled", "plan", "event", "none"}:
-        # Last resort label from raw text — model should normally supply this.
-        title = _heuristic_title(source_text)
+        title = _offline_title(source_text)
     parsed.title = title[:120]
     if not parsed.local_time or not re.match(r"^\d{2}:\d{2}$", parsed.local_time):
-        parsed.local_time = _heuristic_time(source_text) or "18:30"
+        parsed.local_time = "18:30"
     if parsed.duration_minutes < 15:
-        parsed.duration_minutes = 90
-    # If the model set preferred weekdays, drop a conflicting pinned date whose
-    # weekday is outside that set (structured conflict, not keyword matching).
+        parsed.duration_minutes = 60
+    # Structured conflict: pinned date weekday outside model by_days → drop date.
     by_days = _weekday_map(parsed.by_days)
     if by_days and parsed.local_date:
         try:
@@ -233,92 +192,48 @@ def _normalize_parsed(
                 parsed.local_date = None
         except ValueError:
             parsed.local_date = None
-    # Do NOT set local_date = today for bare availability — leave null so
-    # draft_window / by_days drive the search.
-    _ = today  # kept for call-site clarity / future logging
     if not parsed.timezone:
         parsed.timezone = "America/Los_Angeles"
     parsed.is_schedule_ask = True
     return parsed
 
 
-async def _parse_intent(
-    text: str,
+def _ground_availability_reply(
     *,
-    gemini: GeminiClient,
-    settings: Settings,
-    now: datetime,
-) -> _ParsedIntent | None:
-    if not looks_like_schedule_ask(text):
-        return None
-    # Use Pacific as product default for caregivers in this demo.
-    from zoneinfo import ZoneInfo
-
-    local = now.astimezone(ZoneInfo("America/Los_Angeles"))
-    today = local.strftime("%Y-%m-%d")
-    weekday_name = local.strftime("%A")
-    try:
-        resp = await gemini.generate(
-            GenerationRequest(
-                model_id=settings.fast_model,
-                system_instruction=(
-                    "You parse caregiver schedule requests for Level holistically. "
-                    "Infer day/time/title from meaning — do not keyword-match naively.\n"
-                    "Output STRICT JSON matching the schema.\n"
-                    "kind=add when they want something on the calendar; "
-                    "kind=availability when they ask if/when they have time or "
-                    "what time works best.\n"
-                    "title: short human label from the ask "
-                    "(e.g. 'Grandparents visit'), never Untitled/Plan.\n"
-                    "by_days: MO,TU,WE,TH,FR,SA,SU for preferred weekdays. "
-                    "Weekend / Sat / Sun → [\"SA\",\"SU\"] with local_date null. "
-                    "Never set local_date to today's weekday date when they asked "
-                    "for weekend or another relative day window.\n"
-                    "local_date: YYYY-MM-DD only when they name a specific day "
-                    "(today/tonight/Thursday/Aug 15). Otherwise null and use by_days.\n"
-                    "local_time: 24h HH:MM. If they gave no clock time, choose a "
-                    "sensible default for the activity (visits ~14:00, dinner ~18:30).\n"
-                    "duration_minutes: visits ~120, dinner/lunch ~90, coffee ~60, "
-                    "meetings ~30 unless they said otherwise."
-                ),
-                prompt=(
-                    f"Today is {weekday_name}, {today} (America/Los_Angeles).\n"
-                    "Infer the schedule intent from the user's words.\n\n"
-                    f"User said: {text.strip()}\n\n"
-                    "Examples of correct shape:\n"
-                    '- "grandparents visit on the weekend, when is best?" → '
-                    'availability, title="Grandparents visit", by_days=["SA","SU"], '
-                    "local_date=null, local_time≈14:00, duration≈120\n"
-                    '- "dinner with Diane tonight at 6:30?" → availability, '
-                    f'title="Dinner with Diane", local_date={today}, '
-                    "by_days=[], local_time=18:30, duration=90\n"
-                ),
-                response_schema=_ParsedIntent.model_json_schema(),
-                temperature=0.1,
-                max_output_tokens=400,
-            )
+    title: str,
+    free_slots: list[Any],
+    conflicts: list[Any],
+) -> str:
+    """Name real free slots from the calendar — not keyword fluff."""
+    best = free_slots[0].label
+    more = ", ".join(s.label for s in free_slots[1:3])
+    name = (title or "").strip()
+    if not name or name.lower() in {"plan", "untitled", "event", "none"}:
+        name = "that"
+    if conflicts:
+        msg = (
+            f"That overlaps {conflicts[0].label}. "
+            f"Clearest opening for {name}: {best}."
         )
-        data = json.loads(resp.text)
-        parsed = _ParsedIntent.model_validate(data)
-    except (ModelUnavailable, json.JSONDecodeError, ValueError):
-        # Offline fallback only — live path trusts Gemini.
-        kind = "add" if _ADD_HINT.search(text) else "availability"
-        parsed = _ParsedIntent(
-            is_schedule_ask=True,
-            kind=kind,
-            title=_heuristic_title(text),
-            local_date=None,
-            by_days=[],
-            local_time=_heuristic_time(text) or "18:30",
-            duration_minutes=90,
-            timezone="America/Los_Angeles",
-        )
-    except Exception:  # noqa: BLE001
-        return None
+    else:
+        msg = f"Best opening for {name}: {best}."
+    if more:
+        msg += f" Also free: {more}."
+    return msg
 
-    if not parsed.is_schedule_ask and not looks_like_schedule_ask(text):
-        return None
-    return _normalize_parsed(parsed, today=today, source_text=text)
+
+def _offline_intent(text: str) -> _ParsedIntent:
+    """Model-down draft only — coarse shape, not product intelligence."""
+    return _ParsedIntent(
+        is_schedule_ask=True,
+        kind="availability",
+        title=_offline_title(text),
+        local_date=None,
+        by_days=[],
+        local_time="18:30",
+        duration_minutes=60,
+        timezone="America/Los_Angeles",
+    )
 
 
 def _draft_from_parsed(parsed: _ParsedIntent) -> EventDraft:
@@ -367,10 +282,12 @@ async def _profile_context(
 ) -> tuple[str, dict[str, str], str | None]:
     """Return (prompt block, fact_id → statement, care_snippet) for grounding."""
     # Cap reads — full history was making schedule proposes feel slow.
-    facts = await memory.facts.list_for_user(user_id=user_id, limit=48)
-    care = await memory.manifestos.get_care_profile(user_id=user_id)
+    facts, care, snapshot = await asyncio.gather(
+        memory.facts.list_for_user(user_id=user_id, limit=48),
+        memory.manifestos.get_care_profile(user_id=user_id),
+        memory.manifestos.get_profile_snapshot(user_id=user_id),
+    )
     care_snip = care_profile_snippet(care) or None
-    snapshot = await memory.manifestos.get_profile_snapshot(user_id=user_id)
 
     priority_types = {
         FactType.COMMITMENT,
@@ -469,19 +386,26 @@ async def _resolve_schedule(
                 model_id=settings.fast_model,
                 system_instruction=(
                     "You are Level — a warm decision partner for a busy caregiver. "
-                    "Parse the schedule ask holistically AND answer in one JSON object.\n"
+                    "Decide holistically whether this is a schedule ask, then parse "
+                    "and answer in one JSON object. Do not rely on keyword lists.\n"
                     "Fields:\n"
-                    "- is_schedule_ask, kind (add|availability), title, by_days "
-                    "(MO..SU), local_date (YYYY-MM-DD or null), local_time (HH:MM), "
+                    "- is_schedule_ask: true only if they want to add something to "
+                    "the calendar OR ask when/whether they have time for something. "
+                    "False for day reflections, feelings, tips, or hard life decisions "
+                    "with no scheduling ask.\n"
+                    "- kind (add|availability), title, by_days (MO..SU), "
+                    "local_date (YYYY-MM-DD or null), local_time (HH:MM), "
                     "duration_minutes, recurring, timezone, notes\n"
-                    "- level_message: complete reply the user will read — at most "
-                    "3 short sentences, finished thoughts only. Do not trail off. "
-                    "Name care collisions when relevant. Suggest times only from "
-                    "the calendar context when possible.\n"
+                    "- level_message: at most 3 short complete sentences. "
+                    "For availability / 'what time works', name a specific clock-time "
+                    "gap from the calendar context. Never vague filler like "
+                    "'when you have a moment'.\n"
                     "- recommended_action: confirm|revise|decline\n"
                     "- citation_fact_ids: only ids from Citable facts\n\n"
                     "Rules: weekend asks → by_days SA,SU and local_date null. "
-                    "Never pin weekend asks to today's weekday date. "
+                    "today/tonight/this afternoon → local_date=today. "
+                    "Short errands/returns/store runs → duration_minutes ~30–45. "
+                    "Visits ~120, dinner ~90, coffee ~60 unless they said otherwise. "
                     "Never invent free times that contradict the agenda. "
                     "No flattery, no lectures, no raw [bullet:...] ids."
                 ),
@@ -489,7 +413,11 @@ async def _resolve_schedule(
                     f"Today is {weekday_name}, {today} (America/Los_Angeles).\n\n"
                     f"User said: {user_text.strip()}\n\n"
                     f"Upcoming calendar (context):\n{agenda_block}\n\n"
-                    f"{profile_block}\n"
+                    f"{profile_block}\n\n"
+                    "If this is not a schedule ask, set is_schedule_ask=false and "
+                    "leave other fields empty/default.\n"
+                    "If they asked what time works, answer with a concrete gap "
+                    "from that calendar.\n"
                 ),
                 response_schema=_ScheduleResolve.model_json_schema(),
                 temperature=0.2,
@@ -675,16 +603,14 @@ async def propose_from_text(
     now: datetime | None = None,
     sync_store: CalendarSyncStore | None = None,
 ) -> CommitmentProposal | None:
-    """If ``user_text`` is a schedule ask, return a persisted proposal; else None.
+    """If Gemini says this is a schedule ask, return a persisted proposal.
 
-    One Gemini call (intent + full reply) after a narrow calendar/profile fetch.
+    Live path is AI-first: Gemini sets ``is_schedule_ask`` and the draft.
+    Regex is only used if the model is unavailable (offline fallback).
     """
     settings = settings or get_settings()
     gemini = gemini or build_gemini_client(settings)
     now = now or datetime.now(tz=timezone.utc)
-
-    if not looks_like_schedule_ask(user_text):
-        return None
 
     local = now.astimezone(ZoneInfo("America/Los_Angeles"))
     today = local.strftime("%Y-%m-%d")
@@ -722,14 +648,15 @@ async def propose_from_text(
     cite_ids: list[str] = []
 
     if resolved is None:
-        parsed = await _parse_intent(
-            user_text, gemini=gemini, settings=settings, now=now
-        )
-        if parsed is None:
+        # Model down — coarse offline gate only.
+        if not looks_like_schedule_ask(user_text):
             return None
-        kind = (
-            CommitmentKind.ADD if parsed.kind == "add" else CommitmentKind.AVAILABILITY
+        parsed = _normalize_parsed(
+            _offline_intent(user_text),
+            today=today,
+            source_text=user_text,
         )
+        kind = CommitmentKind.AVAILABILITY
         draft = _draft_from_parsed(parsed)
     else:
         if not resolved.is_schedule_ask:
@@ -795,9 +722,17 @@ async def propose_from_text(
         days=2 if not draft.by_days else 4,
         max_slots=3,
         preferred_weekdays=preferred,
+        day_start_hour=8 if draft.local_date else 11,
     )
 
-    if not level_message:
+    # Availability answers must name calendar-derived free slots (not model fluff).
+    if kind == CommitmentKind.AVAILABILITY and free_slots:
+        level_message = _ground_availability_reply(
+            title=draft.title,
+            free_slots=free_slots,
+            conflicts=conflicts,
+        )
+    elif not level_message:
         advice = await _advise(
             kind=kind,
             user_text=user_text,

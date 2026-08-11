@@ -516,19 +516,21 @@ def test_cached_care_graph_reuses_when_unchanged() -> None:
     assert g3 is not g1
 
 
-def test_week_load_fills_uncatalogued_titles() -> None:
-    """Partial AI catalogs must not make one tagged role look like 100%."""
+def test_week_load_complete_ai_catalog() -> None:
+    """Full AI catalog → multi-role composition."""
     from datetime import datetime, timezone
 
     from level_core.profile.synthesize import build_week_role_load
     from level_core.schemas.care import CareProfile
 
-    # Tuesday in the middle of a known week.
     now = datetime(2026, 8, 11, 18, 0, tzinfo=timezone.utc)
     care = CareProfile(
         user_id="u",
-        # Only childcare was tagged by AI so far.
-        calendar_role_by_summary={"jordan's soccer": "child_care"},
+        calendar_role_by_summary={
+            "jordan's soccer": "child_care",
+            "meeting": "paid_work",
+            "mom checkup": "elder_care",
+        },
     )
     events = [
         {
@@ -555,8 +557,54 @@ def test_week_load_fills_uncatalogued_titles() -> None:
     assert "child_care" in roles
     assert "paid_work" in roles
     assert "elder_care" in roles
+    assert "uncategorized" not in roles
     assert sum(int(r["percent"]) for r in load) == 100
-    # Must not be a single 100% slice.
+    assert max(int(r["percent"]) for r in load) < 100
+
+
+def test_week_load_partial_catalog_not_100_percent_one_role() -> None:
+    """Regression: only childcare tagged must NOT render as 100% childcare.
+
+    Untagged week events stay visible as ``uncategorized`` so the bar reflects
+    the whole week while background AI finishes the catalog.
+    """
+    from datetime import datetime, timezone
+
+    from level_core.profile.synthesize import build_week_role_load
+    from level_core.schemas.care import CareProfile
+
+    now = datetime(2026, 8, 11, 18, 0, tzinfo=timezone.utc)
+    care = CareProfile(
+        user_id="u",
+        calendar_role_by_summary={"jordan's soccer": "child_care"},
+    )
+    events = [
+        {
+            "summary": "Jordan's soccer",
+            "start": "2026-08-11T17:00:00-07:00",
+            "end": "2026-08-11T18:00:00-07:00",
+            "all_day": False,
+        },
+        {
+            "summary": "Meeting",
+            "start": "2026-08-12T09:00:00-07:00",
+            "end": "2026-08-12T10:00:00-07:00",
+            "all_day": False,
+        },
+        {
+            "summary": "Mom checkup",
+            "start": "2026-08-13T11:00:00-07:00",
+            "end": "2026-08-13T12:00:00-07:00",
+            "all_day": False,
+        },
+    ]
+    load = build_week_role_load(care, events, now=now)
+    roles = {r["role_id"] for r in load}
+    assert "child_care" in roles
+    assert "uncategorized" in roles
+    child = next(r for r in load if r["role_id"] == "child_care")
+    assert int(child["percent"]) < 100
+    assert sum(int(r["percent"]) for r in load) == 100
     assert max(int(r["percent"]) for r in load) < 100
 
 
@@ -576,17 +624,25 @@ def test_classify_and_group_calendar_events() -> None:
     assert classify_calendar_event("Night class") is None
     assert classify_calendar_event("Night class — career cert") is None
     assert classify_calendar_event("Evening course") is None
-    # Without AI hints, grouping uses the offline classifier so synced calendars
-    # still render while background AI catches up.
-    counts_fallback = group_events_by_care_role(
+    # Without AI hints, grouping stays empty (AI catalog only).
+    counts_empty = group_events_by_care_role(
         [
             {"summary": "Pickup", "start": None},
             {"summary": "Soccer", "start": None},
             {"summary": "1:1", "start": None},
         ]
     )
-    assert counts_fallback[CareRoleId.CHILD_CARE] == 2
-    assert counts_fallback[CareRoleId.PAID_WORK] == 1
+    assert counts_empty == {}
+    # Untagged titles stay out — no regex gap-fill on the live path.
+    counts_partial = group_events_by_care_role(
+        [
+            {"summary": "Pickup", "start": None},
+            {"summary": "Soccer", "start": None},
+            {"summary": "1:1", "start": None},
+        ],
+        role_by_summary={"pickup": "child_care"},
+    )
+    assert counts_partial == {CareRoleId.CHILD_CARE: 1}
     counts = group_events_by_care_role(
         [
             {"summary": "Pickup", "start": None},

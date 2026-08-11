@@ -2,7 +2,8 @@
 
 Pipeline: calendar / notes / memory snippets → Gemini structured infer →
 Care Profile mutation. Regex heuristics live only as offline fallback in
-``synthesize.infer_care_profile_heuristic``.
+opt-in ``LEVEL_ALLOW_HEURISTIC_CARE`` / tests only
+(:func:`synthesize.infer_care_profile_heuristic`). See ``ai_wrappers``.
 """
 
 from __future__ import annotations
@@ -87,6 +88,12 @@ class CareNoteUpdate(BaseModel):
     helpers: list[CareHelperAssign] = Field(default_factory=list)
     evidence: str = ""
     conflicts: list[str] = Field(default_factory=list)
+
+
+class WeekEventClassifyOut(BaseModel):
+    """Specialized wrapper: this week's titles → care roles."""
+
+    events: list[CareEventAssign] = Field(default_factory=list)
 
 
 def _norm_title(text: str) -> str:
@@ -932,6 +939,97 @@ def _is_likely_name(token: str) -> bool:
     }
 
 
+async def classify_week_event_roles_ai(
+    *,
+    week_events: list[dict[str, str | None]],
+    profile: CareProfile | None,
+    gemini: GeminiClient | None = None,
+    model_id: str | None = None,
+) -> dict[str, str]:
+    """Specialized AI wrapper: classify this week's calendar into care roles.
+
+    Uses the caregiver's known roles + week titles. Returns normalized
+    title → role_id for merging into ``calendar_role_by_summary``.
+    """
+    titles = _unique_titles(week_events, limit=36)
+    if not titles:
+        return {}
+    client = gemini or build_gemini_client(get_settings())
+    settings = get_settings()
+    model = model_id or settings.fast_model
+
+    role_lines: list[str] = []
+    if profile and profile.roles:
+        for r in profile.roles:
+            if r.status is BulletStatus.REJECTED:
+                continue
+            peeps = f" (people: {', '.join(r.people[:4])})" if r.people else ""
+            role_lines.append(f"- {r.role_id.value}: {CARE_ROLE_LABELS[r.role_id]}{peeps}")
+    roles_block = "\n".join(role_lines) or "\n".join(
+        f"- {rid.value}: {CARE_ROLE_LABELS[rid]}" for rid in CareRoleId
+    )
+    titles_block = "\n".join(f"- {t}" for t in titles)
+    prompt = (
+        "Classify each calendar event into ONE care role for this busy caregiver.\n"
+        "Use the care roles they hold + the event titles. Reason holistically — "
+        "do not keyword-match naively.\n"
+        "Valid role ids: child_care, elder_care, paid_work, self_recovery, "
+        "household_logistics, partner_coparent, other.\n"
+        "Meeting / call / sync / 1:1 → paid_work unless clearly personal.\n"
+        "School pickup / soccer / kid activities → child_care.\n"
+        "Mom/Dad medical or visits → elder_care.\n"
+        "Therapy / sleep / recovery for the caregiver → self_recovery.\n"
+        "Groceries / forms / errands → household_logistics.\n"
+        "Classes/courses are paid_work if career, else other — never self_recovery.\n"
+        "Return JSON: events[{summary, role}] using the exact title strings.\n\n"
+        f"Care roles held:\n{roles_block}\n\n"
+        f"This week's events:\n{titles_block}\n"
+    )
+    try:
+        resp = await client.generate(
+            GenerationRequest(
+                model_id=model,
+                prompt=prompt,
+                system_instruction=(
+                    "You are Level. Assign each calendar title to a care role. "
+                    "JSON only. No lectures."
+                ),
+                response_schema=WeekEventClassifyOut.model_json_schema(),
+                temperature=0.1,
+                max_output_tokens=900,
+                metadata={"task": "week_event_classify"},
+            )
+        )
+    except ModelUnavailable:
+        _logger.info("week_event_classify_unavailable")
+        return {}
+    except Exception:  # noqa: BLE001
+        _logger.exception("week_event_classify_failed")
+        return {}
+
+    text = (resp.text or "").strip()
+    if not text:
+        return {}
+    try:
+        parsed = WeekEventClassifyOut.model_validate(json.loads(text))
+    except Exception:  # noqa: BLE001
+        _logger.warning("week_event_classify_parse_failed", preview=text[:160])
+        return {}
+
+    out: dict[str, str] = {}
+    title_set = {_norm_title(t) for t in titles}
+    for item in parsed.events:
+        key = _norm_title(item.summary)
+        role = (item.role or "").strip().lower()
+        if not key or key not in title_set:
+            continue
+        if role not in _ALL_ROLES:
+            continue
+        out[key] = role
+    _logger.info("week_event_classify_done", titles=len(titles), tagged=len(out))
+    return out
+
+
 __all__ = [
     "CareEventAssign",
     "CareHelperAssign",
@@ -939,9 +1037,11 @@ __all__ = [
     "CareNoteUpdate",
     "CarePersonAssign",
     "CareRoleInfer",
+    "WeekEventClassifyOut",
     "apply_holistic_inference",
     "apply_note_to_care_profile_ai",
     "care_profile_from_holistic",
+    "classify_week_event_roles_ai",
     "enrich_care_profile_holistic",
     "infer_care_holistic",
     "infer_care_profile_ai",

@@ -1,16 +1,17 @@
 """Shared Care Profile persistence used by API sync and ingest jobs.
 
-Evolving Knowledge Engine: calendar (and similar) signals actively *mutate*
-the Care Profile — not just get read at session time.
-
-Primary path: events + memory → Gemini holistic infer → Care Profile.
-Heuristic regex inference is offline fallback only.
+Evolving Knowledge Engine: calendar signals mutate the Care Profile via Gemini.
+When AI is unavailable we degrade (keep previous / return None) — we do not
+invent roles with regex. Opt-in ``LEVEL_ALLOW_HEURISTIC_CARE=1`` is the only
+exception (pitch / offline emergencies).
 """
 
 from __future__ import annotations
 
+import asyncio
+import os
+
 from level_core.config import get_settings
-from level_core.errors import ModelUnavailable
 from level_core.memory.base import MemoryBank
 from level_core.models.factory import build_embedding_client, build_gemini_client
 from level_core.observability.logger import get_logger
@@ -18,14 +19,19 @@ from level_core.profile.care_infer_llm import (
     infer_care_profile_ai,
     reconcile_exclusive_people,
 )
-from level_core.profile.synthesize import (
-    infer_care_profile_heuristic,
-    refresh_profile_and_manifesto,
-)
+from level_core.profile.synthesize import refresh_profile_and_manifesto
 from level_core.schemas.profile import ProfileSnapshot
 from level_core.schemas.signal import Fact, Signal, SignalSource
 
 _logger = get_logger(__name__)
+
+
+def _heuristic_care_allowed() -> bool:
+    return os.getenv("LEVEL_ALLOW_HEURISTIC_CARE", "").lower() in {
+        "1",
+        "true",
+        "yes",
+    }
 
 
 async def persist_care_profile_from_events(
@@ -38,12 +44,14 @@ async def persist_care_profile_from_events(
     """Infer Care Profile from agenda-like events via AI, then persist.
 
     Preserves Keep / Not me via previous-profile merge inside the AI builder.
-    Falls back to heuristic inference only when Gemini is unavailable.
+    On AI failure: leave previous Care Profile untouched (honest degrade).
     """
     if not events:
         return None
-    previous = await memory.manifestos.get_care_profile(user_id=user_id)
-    existing = await memory.facts.list_for_user(user_id=user_id, limit=200)
+    previous, existing = await asyncio.gather(
+        memory.manifestos.get_care_profile(user_id=user_id),
+        memory.facts.list_for_user(user_id=user_id, limit=200),
+    )
     snippets = [
         f.statement
         for f in existing
@@ -67,13 +75,24 @@ async def persist_care_profile_from_events(
     except Exception:  # noqa: BLE001
         _logger.exception("care_ai_infer_failed", user_id=user_id)
 
-    if care is None:
-        source = "heuristic_fallback"
+    if care is None and _heuristic_care_allowed():
+        from level_core.profile.synthesize import infer_care_profile_heuristic
+
+        source = "heuristic_opt_in"
         care, facts = infer_care_profile_heuristic(
             events, user_id=user_id, previous=previous
         )
         care = reconcile_exclusive_people(care)
-        _logger.warning("care_profile_heuristic_fallback", user_id=user_id)
+        _logger.warning("care_profile_heuristic_opt_in", user_id=user_id)
+    elif care is None:
+        _logger.warning(
+            "care_profile_ai_insufficient",
+            user_id=user_id,
+            note="Keeping previous Care Profile; no regex invent.",
+        )
+        if previous is not None:
+            return await refresh_persisted_profile(memory, user_id)
+        return None
 
     if not care.roles and not facts:
         return None
@@ -98,9 +117,11 @@ async def persist_care_profile_from_events(
 
 async def refresh_persisted_profile(memory: MemoryBank, user_id: str) -> ProfileSnapshot:
     """Rebuild snapshot + manifesto from facts + care profile and persist."""
-    facts = await memory.facts.list_for_user(user_id=user_id, limit=200)
-    prev = await memory.manifestos.get_current_manifesto(user_id=user_id)
-    care = await memory.manifestos.get_care_profile(user_id=user_id)
+    facts, prev, care = await asyncio.gather(
+        memory.facts.list_for_user(user_id=user_id, limit=200),
+        memory.manifestos.get_current_manifesto(user_id=user_id),
+        memory.manifestos.get_care_profile(user_id=user_id),
+    )
     if care is not None:
         care = reconcile_exclusive_people(care)
     snapshot, manifesto, care_out = await refresh_profile_and_manifesto(
@@ -109,10 +130,13 @@ async def refresh_persisted_profile(memory: MemoryBank, user_id: str) -> Profile
         previous_manifesto=prev,
         care_profile=care,
     )
-    await memory.manifestos.save_profile_snapshot(snapshot)
-    await memory.manifestos.save_manifesto(manifesto)
+    writes = [
+        memory.manifestos.save_profile_snapshot(snapshot),
+        memory.manifestos.save_manifesto(manifesto),
+    ]
     if care_out is not None:
-        await memory.manifestos.save_care_profile(care_out)
+        writes.append(memory.manifestos.save_care_profile(care_out))
+    await asyncio.gather(*writes)
     return snapshot
 
 

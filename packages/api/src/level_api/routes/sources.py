@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import os
 import re
+import uuid
+from datetime import datetime, timezone
 
 from fastapi import (
     APIRouter,
@@ -16,12 +20,20 @@ from fastapi import (
 from pydantic import BaseModel, Field
 
 from level_api.auth_deps import require_user
-from level_api.dependencies import get_calendar_sync_store, get_memory, get_token_store
+from level_api.dependencies import (
+    cached_memory,
+    get_calendar_sync_store,
+    get_memory,
+    get_token_store,
+)
 from level_api.services.google_sync import agenda_only_refresh
 from level_core.agents.ingest_normalizer import IngestNormalizer
+from level_core.auth.google_oauth import credentials_from_token, token_from_credentials
 from level_core.auth.tokens import TokenStore
-from level_core.calendar.sync_state import CalendarSyncStore
+from level_core.calendar.agenda_sync import ensure_calendar_watch, refresh_agenda_cache
+from level_core.calendar.sync_state import CalendarSyncState, CalendarSyncStore
 from level_core.config import get_settings
+from level_core.errors import ModelUnavailable
 from level_core.guardrails.inbound import InboundGuardrail
 from level_core.ingest.chatgpt_memory import (
     extract_from_chatgpt_memory,
@@ -32,22 +44,30 @@ from level_core.ingest.pipeline import IngestPipeline
 from level_core.memory.base import MemoryBank
 from level_core.models.factory import build_embedding_client, build_gemini_client
 from level_core.observability.logger import get_logger
+from level_core.profile.ai_wrappers import degrade_message
+from level_core.profile.care_infer_llm import (
+    apply_note_to_care_profile_ai,
+    enrich_care_profile_holistic,
+    reconcile_exclusive_people,
+)
 from level_core.profile.persist import (
     persist_care_profile_from_events,
     refresh_persisted_profile,
 )
 from level_core.profile.synthesize import (
-    adjust_care_profile_from_note,
+    _is_analytics_statement,
     apply_bullet_feedback_to_care_profile,
     build_about_summary,
     cached_care_graph,
     care_profile_to_snapshot,
+    infer_care_profile_heuristic,
+    invalidate_care_graph_cache,
     refresh_profile_and_manifesto,
 )
-from level_core.schemas.care import CareGraph
 from level_core.schemas.base import _now_utc
+from level_core.schemas.care import CareGraph, CareProfile
 from level_core.schemas.profile import BulletStatus, ProfileSnapshot
-from level_core.schemas.signal import Fact, Signal
+from level_core.schemas.signal import Fact, Signal, SignalSource
 
 router = APIRouter(prefix="/v1/sources", tags=["sources"])
 _logger = get_logger(__name__)
@@ -97,8 +117,6 @@ def _snapshot_needs_priority_rebuild(snapshot: ProfileSnapshot | None) -> bool:
     if snapshot is None or not snapshot.bullets:
         return True
     # Old calendar-analytics bullets should be replaced with inferred priorities.
-    from level_core.profile.synthesize import _is_analytics_statement
-
     analytic = sum(1 for b in snapshot.bullets if _is_analytics_statement(b.text))
     return analytic >= max(1, (len(snapshot.bullets) + 1) // 2)
 
@@ -113,20 +131,20 @@ async def ensure_profile_from_agenda(
 
     Never re-runs Gemini when a care model already exists — page loads must stay cheap.
     """
-    existing = await memory.manifestos.get_profile_snapshot(user_id=user_id)
-    care = await memory.manifestos.get_care_profile(user_id=user_id)
+    existing, care, state = await asyncio.gather(
+        memory.manifestos.get_profile_snapshot(user_id=user_id),
+        memory.manifestos.get_care_profile(user_id=user_id),
+        sync_store.get(user_id),
+    )
     if care is not None and care.roles:
         if existing and existing.bullets and not _snapshot_needs_priority_rebuild(existing):
             return existing
         # Cheap refresh from existing care (no AI).
-        from level_core.profile.persist import refresh_persisted_profile
-
         return await refresh_persisted_profile(memory, user_id)
 
     if existing and existing.bullets and not _snapshot_needs_priority_rebuild(existing):
         return existing
 
-    state = await sync_store.get(user_id)
     if state is None or not state.events:
         return existing
 
@@ -138,7 +156,6 @@ async def ensure_profile_from_agenda(
     if snap is None:
         return existing
     if snap.bullets:
-        state = await sync_store.get(user_id) or state
         state = state.model_copy(
             update={
                 "profile_ingested_at": state.profile_ingested_at or _now_utc(),
@@ -185,8 +202,6 @@ async def _bg_enrich_care(
         ]
         if not events:
             return
-        from level_core.profile.care_infer_llm import enrich_care_profile_holistic
-
         facts = await memory.facts.list_for_user(user_id=user_id, limit=100)
         snippets = [
             f.statement
@@ -196,8 +211,6 @@ async def _bg_enrich_care(
         care = await enrich_care_profile_holistic(
             care, events, fact_snippets=snippets
         )
-        from level_core.profile.synthesize import invalidate_care_graph_cache
-
         invalidate_care_graph_cache(user_id)
         await memory.manifestos.save_care_profile(care)
         await refresh_persisted_profile(memory, user_id)
@@ -257,8 +270,6 @@ async def _persist_pattern_facts(
 
 
 async def _run_signals(memory: MemoryBank, signals: list[Signal]) -> IngestSummary:
-    from level_core.errors import ModelUnavailable
-
     pipeline = _pipeline(memory)
     summary = IngestSummary()
     for signal in signals:
@@ -295,13 +306,6 @@ async def ingest_chatgpt_memory(
     sync_store: CalendarSyncStore = Depends(get_calendar_sync_store),
 ) -> IngestSummary:
     """Paste ChatGPT Memory → extract facts → reassess Care Profile + graph."""
-    from level_core.profile.care_infer_llm import apply_note_to_care_profile_ai
-    from level_core.profile.synthesize import (
-        cached_care_graph,
-        invalidate_care_graph_cache,
-    )
-    from level_core.schemas.care import CareProfile
-
     paste = payload.text.strip()
     settings = get_settings()
     gemini = build_gemini_client(settings)
@@ -337,43 +341,54 @@ async def ingest_chatgpt_memory(
     facts_block = "\n".join(f"- {f}" for f in extracted.facts[:20])
     apply_text = "\n".join(part for part in (care_note, facts_block) if part).strip()
 
+    care_applied = False
     if apply_text:
         updated = await apply_note_to_care_profile_ai(care, apply_text, gemini=gemini)
         if updated is not None:
             care, _reply = updated
+            care = care.model_copy(
+                update={
+                    "version": int(care.version or 1) + 1,
+                    "updated_at": _now_utc(),
+                }
+            )
+            invalidate_care_graph_cache(user_id)
+            await memory.manifestos.save_care_profile(care)
+            care_applied = True
+            agenda: list[dict[str, str | None]] = []
+            try:
+                state = await sync_store.get(user_id)
+                if state and state.events:
+                    agenda = [
+                        {"summary": e.summary, "start": e.start}
+                        for e in state.events.values()
+                    ]
+            except Exception:  # noqa: BLE001
+                agenda = []
+            cached_care_graph(care, agenda or None)
         else:
-            care = adjust_care_profile_from_note(care, apply_text)
-        care = care.model_copy(
-            update={
-                "version": int(care.version or 1) + 1,
-                "updated_at": _now_utc(),
-            }
-        )
-        invalidate_care_graph_cache(user_id)
-        await memory.manifestos.save_care_profile(care)
-
-        # Eagerly rebuild graph with current agenda so Profile is fresh immediately.
-        agenda: list[dict[str, str | None]] = []
-        try:
-            state = await sync_store.get(user_id)
-            if state and state.events:
-                agenda = [
-                    {"summary": e.summary, "start": e.start}
-                    for e in state.events.values()
-                ]
-        except Exception:  # noqa: BLE001
-            agenda = []
-        cached_care_graph(care, agenda or None)
+            _logger.warning(
+                "chatgpt_memory_care_ai_insufficient",
+                user_id=user_id,
+            )
 
     snap = await _refresh_profile(memory, user_id)
     summary.profile_bullets = len(snap.bullets)
     summary.contradictions = len(snap.contradictions)
     n_facts = len(extracted.facts)
-    summary.detail = (
-        f"Pulled {n_facts} care-relevant fact{'s' if n_facts != 1 else ''} "
-        f"from ChatGPT Memory and refreshed your Care Profile "
-        f"({summary.profile_bullets} bullets)."
-    )
+    if care_applied:
+        summary.detail = (
+            f"Pulled {n_facts} care-relevant fact{'s' if n_facts != 1 else ''} "
+            f"from ChatGPT Memory and refreshed your Care Profile "
+            f"({summary.profile_bullets} bullets)."
+        )
+    else:
+        summary.detail = (
+            f"Pulled {n_facts} care-relevant fact{'s' if n_facts != 1 else ''} "
+            f"from ChatGPT Memory. {degrade_message('care_note')}"
+            if n_facts
+            else degrade_message("memory")
+        )
     _logger.info(
         "chatgpt_memory_ingest_done",
         user_id=user_id,
@@ -399,9 +414,11 @@ async def google_sync_status(
     tokens: TokenStore = Depends(get_token_store),
     sync_store: CalendarSyncStore = Depends(get_calendar_sync_store),
 ) -> GoogleSyncStatus:
-    token = await tokens.get_google_token(user_id)
+    token, state = await asyncio.gather(
+        tokens.get_google_token(user_id),
+        sync_store.get(user_id),
+    )
     connected = token is not None and bool(token.refresh_token or token.access_token)
-    state = await sync_store.get(user_id)
     if not connected:
         return GoogleSyncStatus(google_connected=False)
     if state is None:
@@ -477,30 +494,35 @@ async def sync_google(
 
     signals: list[Signal] = []
     try:
-        from level_core.auth.google_oauth import credentials_from_token, token_from_credentials
-        from level_core.calendar.agenda_sync import ensure_calendar_watch, refresh_agenda_cache
-        from level_core.config import get_settings as _gs
-
         # Refresh access token if needed and persist it.
         creds = credentials_from_token(token)
-        refreshed = token_from_credentials(creds, user_id=user_id, settings=_gs())
+        refreshed = token_from_credentials(creds, user_id=user_id, settings=get_settings())
         if refreshed.refresh_token is None and token.refresh_token:
             refreshed = refreshed.model_copy(update={"refresh_token": token.refresh_token})
         await tokens.upsert_token(refreshed)
         token = refreshed
 
         # Keep agenda cache fresh without waiting for a webhook.
-        await refresh_agenda_cache(user_id=user_id, token=token, sync_store=sync_store)
-        await ensure_calendar_watch(user_id=user_id, token=token, sync_store=sync_store)
-
-        cal = await pull_calendar(token, user_id=user_id, max_events=25)
-        signals.extend(cal.signals)
-        state = await sync_store.get(user_id)
-        priority_events = (
-            [{"summary": e.summary, "start": e.start} for e in state.events.values()]
-            if state and state.events
-            else [{"summary": (s.text or "").split(": ", 1)[-1], "start": None} for s in cal.signals]
+        await asyncio.gather(
+            refresh_agenda_cache(user_id=user_id, token=token, sync_store=sync_store),
+            ensure_calendar_watch(user_id=user_id, token=token, sync_store=sync_store),
         )
+
+        state = await sync_store.get(user_id)
+        if state and state.events:
+            priority_events = [
+                {"summary": e.summary, "start": e.start} for e in state.events.values()
+            ]
+            # Prefer agenda cache for care; still pull a thin signal set for ingest.
+            cal = await pull_calendar(token, user_id=user_id, max_events=25)
+            signals.extend(cal.signals)
+        else:
+            cal = await pull_calendar(token, user_id=user_id, max_events=25)
+            signals.extend(cal.signals)
+            priority_events = [
+                {"summary": (s.text or "").split(": ", 1)[-1], "start": None}
+                for s in cal.signals
+            ]
         care_snap = await _infer_persist_care_profile(
             memory, user_id, priority_events, embed=True
         )
@@ -529,8 +551,6 @@ async def sync_google(
     summary.detail = f"{prefix} {summary.detail}".strip() if summary.detail else prefix
 
     prior = await sync_store.get(user_id)
-    from level_core.calendar.sync_state import CalendarSyncState
-
     state = prior or CalendarSyncState(user_id=user_id)
     await sync_store.upsert(
         state.model_copy(
@@ -621,14 +641,24 @@ async def _seed_care_from_agenda_fast(
     sync_store: CalendarSyncStore,
     events: list[dict[str, str | None]],
 ) -> CareProfile | None:
-    """Cheap calendar→Care Profile seed (no Gemini) so the graph isn't empty."""
-    from level_core.profile.care_infer_llm import reconcile_exclusive_people
-    from level_core.profile.synthesize import (
-        infer_care_profile_heuristic,
-        invalidate_care_graph_cache,
-    )
+    """Opt-in regex seed only. Prefer background AI enrich on the live path.
 
+    Set ``LEVEL_ALLOW_HEURISTIC_CARE=1`` to restore the old fast seed when Gemini
+    is     unavailable. Default: leave Care Profile empty until AI mutates it.
+    """
     previous = await memory.manifestos.get_care_profile(user_id=user_id)
+    if os.getenv("LEVEL_ALLOW_HEURISTIC_CARE", "").lower() not in {
+        "1",
+        "true",
+        "yes",
+    }:
+        _logger.info(
+            "care_seed_skipped_awaiting_ai",
+            user_id=user_id,
+            events=len(events),
+        )
+        return previous
+
     care, facts = infer_care_profile_heuristic(
         events, user_id=user_id, previous=previous
     )
@@ -647,7 +677,7 @@ async def _seed_care_from_agenda_fast(
     except Exception:  # noqa: BLE001
         _logger.warning("seed_care_refresh_failed", user_id=user_id)
     _logger.info(
-        "care_seeded_from_agenda",
+        "care_seeded_from_agenda_heuristic",
         user_id=user_id,
         roles=len(care.roles),
         events=len(events),
@@ -663,8 +693,10 @@ async def _build_profile_response(
     background_tasks: BackgroundTasks | None = None,
     allow_blocking_heal: bool = False,
 ) -> ProfileResponse:
-    snapshot = await memory.manifestos.get_profile_snapshot(user_id=user_id)
-    care_probe = await memory.manifestos.get_care_profile(user_id=user_id)
+    snapshot, care_probe = await asyncio.gather(
+        memory.manifestos.get_profile_snapshot(user_id=user_id),
+        memory.manifestos.get_care_profile(user_id=user_id),
+    )
     needs_heal = snapshot is None or not snapshot.bullets
     if needs_heal and sync_store is not None:
         if care_probe is not None and care_probe.roles:
@@ -682,20 +714,26 @@ async def _build_profile_response(
                 sync_store=sync_store,
             )
 
-    facts = await memory.facts.list_for_user(user_id=user_id, limit=200)
-    manifesto = await memory.manifestos.get_current_manifesto(user_id=user_id)
-    profile = await memory.manifestos.get_bias_profile(user_id=user_id)
-    care = await memory.manifestos.get_care_profile(user_id=user_id)
-    snapshot = await memory.manifestos.get_profile_snapshot(user_id=user_id)
+    facts, manifesto, profile, care, snapshot, state = await asyncio.gather(
+        memory.facts.list_for_user(user_id=user_id, limit=200),
+        memory.manifestos.get_current_manifesto(user_id=user_id),
+        memory.manifestos.get_bias_profile(user_id=user_id),
+        memory.manifestos.get_care_profile(user_id=user_id),
+        memory.manifestos.get_profile_snapshot(user_id=user_id),
+        sync_store.get(user_id) if sync_store is not None else asyncio.sleep(0, result=None),
+    )
     # Care Profile is source of truth for role bullets — never serve a stale
     # snapshot that cloned one Memory summary onto every role.
     if care is not None and care.roles:
         projected = care_profile_to_snapshot(care, fact_count=len(facts))
         snapshot = projected
-        try:
-            await memory.manifestos.save_profile_snapshot(projected)
-        except Exception:  # noqa: BLE001
-            pass
+        if background_tasks is not None:
+            background_tasks.add_task(memory.manifestos.save_profile_snapshot, projected)
+        else:
+            try:
+                await memory.manifestos.save_profile_snapshot(projected)
+            except Exception:  # noqa: BLE001
+                pass
     scores: list[BiasScoreOut] = []
     if profile:
         scores = [
@@ -732,20 +770,17 @@ async def _build_profile_response(
         for c in (snapshot.contradictions if snapshot else [])
         if c.status is not BulletStatus.REJECTED
     ]
-    care = await memory.manifestos.get_care_profile(user_id=user_id)
     care_updated = None
     if care and care.updated_at:
         care_updated = care.updated_at.isoformat()
     agenda_events: list[dict[str, str | None]] = []
-    if sync_store is not None:
+    if state and state.events:
         try:
-            state = await sync_store.get(user_id)
-            if state and state.events:
-                agenda_events = [
-                    {"summary": e.summary, "start": e.start}
-                    for e in state.events.values()
-                    if e.summary
-                ]
+            agenda_events = [
+                {"summary": e.summary, "start": e.start}
+                for e in state.events.values()
+                if e.summary
+            ]
         except Exception:  # noqa: BLE001
             agenda_events = []
 
@@ -786,8 +821,6 @@ async def _build_profile_response(
         and background_tasks is not None
         and sync_store is not None
     ):
-        from datetime import datetime, timezone
-
         updated = care.updated_at
         if updated is not None and updated.tzinfo is None:
             updated = updated.replace(tzinfo=timezone.utc)
@@ -925,8 +958,6 @@ async def review_profile(
             }
         )
         await memory.manifestos.save_care_profile(care)
-        from level_core.profile.synthesize import invalidate_care_graph_cache
-
         invalidate_care_graph_cache(user_id)
         prev_m = await memory.manifestos.get_current_manifesto(user_id=user_id)
         _, manifesto, _ = await refresh_profile_and_manifesto(
@@ -961,9 +992,6 @@ async def ingest_manual_note(
     user_id: str = Depends(require_user),
     memory: MemoryBank = Depends(get_memory),
 ) -> IngestSummary:
-    from level_core.schemas.signal import SignalSource
-    import uuid
-
     signal = Signal(
         user_id=user_id,
         source=SignalSource.MANUAL,
@@ -1007,11 +1035,6 @@ def _clean_assistant_reply(text: str, *, fallback: str) -> str:
 
 async def _bg_ingest_profile_chat_note(user_id: str, message: str) -> None:
     """Memory Bank ingest + embeddings — off the chat hot path."""
-    import uuid
-
-    from level_api.dependencies import cached_memory
-    from level_core.schemas.signal import Signal, SignalSource
-
     try:
         memory = cached_memory()
         signal = Signal(
@@ -1039,45 +1062,25 @@ async def profile_chat(
     sync_store: CalendarSyncStore = Depends(get_calendar_sync_store),
 ) -> ProfileChatResponse:
     """Learn from a short note — reply ASAP (one Gemini call), refresh in background."""
-    from level_core.profile.care_infer_llm import apply_note_to_care_profile_ai
-    from level_core.profile.synthesize import (
-        cached_care_graph,
-        care_profile_to_snapshot,
-        invalidate_care_graph_cache,
-    )
-
     message = payload.message.strip()
     care = await memory.manifestos.get_care_profile(user_id=user_id)
     reply = "Got it — I saved that."
     facts_added = 0
 
     if care is None:
-        # Bootstrap once if needed (slower path).
-        import uuid
-
-        from level_core.schemas.signal import Signal, SignalSource
-
-        signal = Signal(
-            user_id=user_id,
-            source=SignalSource.MANUAL,
-            external_id=f"profile-chat:{uuid.uuid4().hex[:12]}",
-            text=(
-                "The user is correcting or enhancing their Level profile. "
-                f"Take this as true about their life:\n{message}"
-            ),
-        )
-        summary = await _run_signals(memory, [signal])
-        facts_added = summary.facts
-        await _refresh_profile(memory, user_id)
-        care = await memory.manifestos.get_care_profile(user_id=user_id)
-        if care is not None:
-            care = adjust_care_profile_from_note(care, message)
+        # Bootstrap: one Gemini note-apply if possible; ingest/refresh off-path.
+        care = CareProfile(user_id=user_id, roles=[], version=1)
+        settings = get_settings()
+        gemini = build_gemini_client(settings)
+        boot = await apply_note_to_care_profile_ai(care, message, gemini=gemini)
+        if boot is not None:
+            care, reply = boot
             invalidate_care_graph_cache(user_id)
             await memory.manifestos.save_care_profile(care)
-        reply = (
-            f"Got it — I saved that"
-            f" ({facts_added} new fact{'s' if facts_added != 1 else ''})."
-        )
+            facts_added = 1
+        else:
+            reply = degrade_message("care_note")
+        background_tasks.add_task(_bg_ingest_profile_chat_note, user_id, message)
         profile = await _build_profile_response(
             user_id,
             memory,
@@ -1091,16 +1094,21 @@ async def profile_chat(
     updated = await apply_note_to_care_profile_ai(care, message, gemini=gemini)
     if updated is not None:
         care, reply = updated
+        invalidate_care_graph_cache(user_id)
+        await memory.manifestos.save_care_profile(care)
     else:
-        care = adjust_care_profile_from_note(care, message)
-        reply = _clean_assistant_reply(reply, fallback=reply)
-    invalidate_care_graph_cache(user_id)
-    await memory.manifestos.save_care_profile(care)
+        reply = degrade_message("care_note")
+        # Still persist the note as a fact in the background — no regex role invent.
 
     # Fast response: project snapshot + graph locally; defer ingest/refresh.
     background_tasks.add_task(_bg_ingest_profile_chat_note, user_id, message)
 
-    snapshot = await memory.manifestos.get_profile_snapshot(user_id=user_id)
+    snapshot, state, manifesto, facts_for_about = await asyncio.gather(
+        memory.manifestos.get_profile_snapshot(user_id=user_id),
+        sync_store.get(user_id),
+        memory.manifestos.get_current_manifesto(user_id=user_id),
+        memory.facts.list_for_user(user_id=user_id, limit=200),
+    )
     projected = care_profile_to_snapshot(care, fact_count=snapshot.fact_count if snapshot else 0)
     bullets = [
         BulletOut(
@@ -1115,19 +1123,16 @@ async def profile_chat(
         if b.status is not BulletStatus.REJECTED
     ]
     agenda_events: list[dict[str, str | None]] = []
-    try:
-        state = await sync_store.get(user_id)
-        if state and state.events:
+    if state and state.events:
+        try:
             agenda_events = [
                 {"summary": e.summary, "start": e.start}
                 for e in state.events.values()
                 if e.summary
             ]
-    except Exception:  # noqa: BLE001
-        agenda_events = []
+        except Exception:  # noqa: BLE001
+            agenda_events = []
     care_graph, _, _ = cached_care_graph(care, agenda_events or None)
-    manifesto = await memory.manifestos.get_current_manifesto(user_id=user_id)
-    facts_for_about = await memory.facts.list_for_user(user_id=user_id, limit=200)
     profile = ProfileResponse(
         user_id=user_id,
         fact_count=snapshot.fact_count if snapshot else len(facts_for_about),

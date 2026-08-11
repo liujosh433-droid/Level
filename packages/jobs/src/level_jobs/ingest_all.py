@@ -12,11 +12,8 @@ from level_core.agents.ingest_normalizer import IngestNormalizer
 from level_core.config import get_settings
 from level_core.guardrails.inbound import InboundGuardrail
 from level_core.ingest.connectors import (
-    ChatExportConnector,
     FixtureConnector,
-    GoogleCalendarConnector,
     SignalConnector,
-    VoiceMemoConnector,
     demo_caregiver_signals,
 )
 from level_core.ingest.pipeline import IngestPipeline
@@ -34,21 +31,15 @@ _logger = get_logger(__name__)
 
 
 def _connectors_for_user(user_id: str, *, use_fixtures: bool) -> list[SignalConnector]:
-    if use_fixtures:
-        signals = demo_caregiver_signals(user_id=user_id)
-        # One fixture connector per source so logs stay readable.
-        by_source: dict[str, list] = {}
-        for s in signals:
-            by_source.setdefault(s.source, []).append(s)
-        return [
-            FixtureConnector(source=source, signals=items)
-            for source, items in by_source.items()
-        ]
-    # Live connectors (OAuth) — currently stubs that yield nothing.
+    if not use_fixtures:
+        return []
+    signals = demo_caregiver_signals(user_id=user_id)
+    by_source: dict[str, list] = {}
+    for s in signals:
+        by_source.setdefault(s.source, []).append(s)
     return [
-        GoogleCalendarConnector(),
-        ChatExportConnector(),
-        VoiceMemoConnector(),
+        FixtureConnector(source=source, signals=items)
+        for source, items in by_source.items()
     ]
 
 
@@ -64,9 +55,28 @@ async def main() -> int:
         guardrail=InboundGuardrail(settings=settings),
     )
 
-    user_ids_env = os.getenv("LEVEL_JOB_USER_IDS", "demo-parent")
+    user_ids_env = os.getenv("LEVEL_JOB_USER_IDS", "")
     user_ids = [u.strip() for u in user_ids_env.split(",") if u.strip()]
-    use_fixtures = os.getenv("LEVEL_INGEST_FIXTURES", "1") in {"1", "true", "TRUE", "yes"}
+    if not user_ids:
+        _logger.info(
+            "ingest_no_users",
+            note="Set LEVEL_JOB_USER_IDS (comma-separated). Fixtures require LEVEL_INGEST_FIXTURES=1.",
+        )
+        return 0
+    use_fixtures = os.getenv("LEVEL_INGEST_FIXTURES", "0").lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    if not use_fixtures:
+        _logger.info(
+            "ingest_skip_no_fixtures",
+            note=(
+                "Live job ingest is driven by API calendar sync + ChatGPT paste. "
+                "Set LEVEL_INGEST_FIXTURES=1 for the pitch fixture narrative."
+            ),
+        )
+        return 0
 
     accepted = 0
     blocked = 0

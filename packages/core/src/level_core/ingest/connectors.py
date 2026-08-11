@@ -1,8 +1,8 @@
 """Source connectors that produce Signals for the ingest pipeline.
 
-Each connector yields zero or more :class:`Signal` objects. In local / demo
-mode we use :class:`FixtureConnector` (deterministic sample data). In cloud
-mode, live Google Calendar connectors use the user's OAuth token.
+Live calendar + ChatGPT Memory enter via the API (OAuth sync / paste).
+``FixtureConnector`` + ``demo_caregiver_signals`` exist only for opt-in
+pitch scripts (``LEVEL_INGEST_FIXTURES=1`` / ``make demo-judge``).
 """
 
 from __future__ import annotations
@@ -29,8 +29,7 @@ class SignalConnector(Protocol):
 class FixtureConnector:
     """Deterministic demo connector — no network, no OAuth.
 
-    Used for local smoke tests and the hackathon demo narrative so judges
-    can reproduce the Memory Bank without granting Calendar scopes.
+    Used only when jobs set ``LEVEL_INGEST_FIXTURES=1``.
     """
 
     source: SignalSource
@@ -43,11 +42,7 @@ class FixtureConnector:
 
 
 def demo_caregiver_signals(user_id: str = "demo-parent") -> list[Signal]:
-    """The demo narrative: a busy single parent juggling school + work.
-
-    These become the Memory Bank facts the Challenger cites during the
-    4-minute demo video.
-    """
+    """Opt-in pitch narrative (Maya / school / work). Not used in normal runtime."""
     now = datetime.now(tz=timezone.utc)
     return [
         Signal(
@@ -151,68 +146,8 @@ def demo_caregiver_signals(user_id: str = "demo-parent") -> list[Signal]:
     ]
 
 
-@dataclass(slots=True)
-class GoogleCalendarConnector:
-    """Live Google Calendar connector (cloud mode).
-
-    Expects a refreshable OAuth token available via ADC / Secret Manager.
-    Until OAuth wiring is complete, ``fetch`` yields nothing and logs —
-    the fixture path covers the demo.
-    """
-
-    source: SignalSource = SignalSource.GCAL
-    calendar_id: str = "primary"
-
-    async def fetch(self, *, user_id: str) -> AsyncIterator[Signal]:
-        # Live pull lands when OAuth client credentials are configured.
-        _ = (user_id, self.calendar_id)
-        return
-        if False:  # pragma: no cover — keeps this an async generator
-            yield Signal(
-                user_id=user_id,
-                source=self.source,
-                external_id="unused",
-                text="",
-            )
-
-
-@dataclass(slots=True)
-class ChatExportConnector:
-    """Reads dropped ChatGPT/Claude/Gemini export files from a GCS prefix."""
-
-    source: SignalSource = SignalSource.CHAT_EXPORT
-    gcs_prefix: str = ""
-
-    async def fetch(self, *, user_id: str) -> AsyncIterator[Signal]:
-        _ = (user_id, self.gcs_prefix)
-        return
-        if False:  # pragma: no cover
-            yield Signal(
-                user_id=user_id, source=self.source, external_id="unused", text=""
-            )
-
-
-@dataclass(slots=True)
-class VoiceMemoConnector:
-    """Reads uploaded voice memos from GCS (expects pre-transcribed text)."""
-
-    source: SignalSource = SignalSource.VOICE_MEMO
-    gcs_prefix: str = ""
-
-    async def fetch(self, *, user_id: str) -> AsyncIterator[Signal]:
-        _ = (user_id, self.gcs_prefix)
-        return
-        if False:  # pragma: no cover
-            yield Signal(
-                user_id=user_id, source=self.source, external_id="unused", text=""
-            )
-
-
 __all__ = [
-    "ChatExportConnector",
     "FixtureConnector",
-    "GoogleCalendarConnector",
     "SignalConnector",
-    "VoiceMemoConnector",
     "demo_caregiver_signals",
 ]

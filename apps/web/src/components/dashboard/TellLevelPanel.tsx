@@ -1,8 +1,15 @@
 "use client";
 
-import { FormEvent, ReactNode, useCallback, useEffect, useRef } from "react";
+import { FormEvent, ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { useVoiceDictation } from "@/hooks/useVoiceDictation";
 import styles from "./TellLevelPanel.module.css";
+
+const DEFAULT_BUSY_HINTS = [
+  "Looking at your calendar…",
+  "Weighing what this would crowd out…",
+  "Checking your care load…",
+  "Almost there…",
+];
 
 export function TellLevelPanel({
   title = "Tell Level more",
@@ -14,7 +21,8 @@ export function TellLevelPanel({
   busy = false,
   disabled = false,
   submitLabel = "Send",
-  busyLabel = "Listening…",
+  busyLabel = "Thinking…",
+  busyHints = DEFAULT_BUSY_HINTS,
   minLength = 1,
   error,
   headerActions,
@@ -33,6 +41,8 @@ export function TellLevelPanel({
   disabled?: boolean;
   submitLabel?: string;
   busyLabel?: string;
+  /** Rotating status lines while Level is working (shown above the reply). */
+  busyHints?: string[];
   minLength?: number;
   error?: string | null;
   headerActions?: ReactNode;
@@ -46,6 +56,24 @@ export function TellLevelPanel({
   useEffect(() => {
     valueRef.current = value;
   }, [value]);
+
+  const [hintIndex, setHintIndex] = useState(0);
+  const hintsRef = useRef(busyHints);
+  hintsRef.current = busyHints;
+
+  useEffect(() => {
+    if (!busy || hintsRef.current.length === 0) {
+      setHintIndex(0);
+      return;
+    }
+    setHintIndex(0);
+    const id = window.setInterval(() => {
+      const n = hintsRef.current.length;
+      if (n === 0) return;
+      setHintIndex((i) => (i + 1) % n);
+    }, 2200);
+    return () => window.clearInterval(id);
+  }, [busy]);
 
   const appendTranscript = useCallback(
     (text: string) => {
@@ -68,6 +96,8 @@ export function TellLevelPanel({
   }
 
   const canSubmit = !busy && !disabled && value.trim().length >= minLength;
+  const statusLine =
+    busy && busyHints.length > 0 ? busyHints[hintIndex % busyHints.length] : null;
 
   return (
     <section className={styles.panel}>
@@ -111,7 +141,7 @@ export function TellLevelPanel({
                 {listening ? "Stop" : "Voice"}
               </button>
             ) : null}
-            <button type="submit" disabled={!canSubmit}>
+            <button type="submit" disabled={!canSubmit} aria-busy={busy}>
               {busy ? busyLabel : submitLabel}
             </button>
           </div>
@@ -119,6 +149,16 @@ export function TellLevelPanel({
       </div>
       {children != null && children !== false ? (
         <div className={styles.thread}>{children}</div>
+      ) : null}
+      {statusLine ? (
+        <div className={styles.waiting} role="status" aria-live="polite">
+          <span className={styles.waitingDots} aria-hidden="true">
+            <i />
+            <i />
+            <i />
+          </span>
+          <p className={styles.waitingText}>{statusLine}</p>
+        </div>
       ) : null}
     </section>
   );

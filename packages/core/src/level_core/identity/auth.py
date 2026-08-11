@@ -12,9 +12,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from level_core.config import Settings, get_settings
+from level_core.observability.logger import get_logger
 
 if TYPE_CHECKING:
     from google.auth.credentials import Credentials
+
+_logger = get_logger(__name__)
 
 
 def default_service_account_for(agent_name: str, project_id: str) -> str:
@@ -88,11 +91,17 @@ def build_identity_context(
             lifetime=3600,
         )
         return IdentityContext(identity=identity, credentials=creds)
-    except Exception:  # noqa: BLE001
-        # Fail open in dev-cloud: fall back to source credentials. In prod
-        # you'd want this to fail closed; for the hackathon build we log via
-        # the exception being visible in the caller's trace.
-        return IdentityContext(identity=identity, credentials=None)
+    except Exception as exc:  # noqa: BLE001
+        # Fail closed in cloud — never run tools as the wrong principal.
+        _logger.error(
+            "identity_impersonation_failed",
+            agent=agent_name,
+            sa=identity.service_account_email,
+            error=str(exc),
+        )
+        raise RuntimeError(
+            f"Failed to impersonate {identity.service_account_email} for {agent_name}"
+        ) from exc
 
 
 __all__ = [

@@ -47,7 +47,7 @@ async def main() -> int:
         gateway=AgentGateway(),
     )
 
-    user_ids_env = os.getenv("LEVEL_JOB_USER_IDS", "demo-parent")
+    user_ids_env = os.getenv("LEVEL_JOB_USER_IDS", "")
     user_ids = [u.strip() for u in user_ids_env.split(",") if u.strip()]
     if not user_ids:
         _logger.info(
@@ -56,10 +56,14 @@ async def main() -> int:
         )
         return 0
 
+    allow_demo_synth = os.getenv("LEVEL_DEMO", "").lower() in {"1", "true", "yes"}
+
     processed = 0
     for user_id in user_ids:
         try:
-            processed += await _process_user(user_id, memory, conductor)
+            processed += await _process_user(
+                user_id, memory, conductor, allow_demo_synth=allow_demo_synth
+            )
         except Exception:  # noqa: BLE001
             _logger.exception("user_processing_failed", user_id=user_id)
             continue
@@ -68,7 +72,7 @@ async def main() -> int:
 
 
 async def _load_agenda_events(user_id: str) -> list[dict[str, str | None]]:
-    """Prefer on-disk calendar sync cache; else empty (demo synth fills in)."""
+    """Prefer on-disk calendar sync cache; else empty."""
     try:
         store = build_calendar_sync_store()
         state = await store.get(user_id)
@@ -97,7 +101,13 @@ def _already_challenged(decisions: list[Decision], collision: RoleCollision) -> 
     return False
 
 
-async def _process_user(user_id: str, memory: MemoryBank, conductor: object) -> int:
+async def _process_user(
+    user_id: str,
+    memory: MemoryBank,
+    conductor: object,
+    *,
+    allow_demo_synth: bool = False,
+) -> int:
     care = await memory.manifestos.get_care_profile(user_id=user_id)
     if care is None or not care.roles:
         _logger.info("async_challenge_skip_no_care_profile", user_id=user_id)
@@ -105,14 +115,12 @@ async def _process_user(user_id: str, memory: MemoryBank, conductor: object) -> 
 
     events = await _load_agenda_events(user_id)
     collisions = find_role_collisions(care=care, events=events)
-    if not collisions:
+    if not collisions and allow_demo_synth:
         demo = synthesize_demo_collision_event(care)
         if demo:
             events = [demo]
-            # Ensure the protected window matches the synth event weekday/hour
             collisions = find_role_collisions(care=care, events=events)
             if not collisions:
-                # Force a collision narrative even if window weekday heuristics miss
                 role = next(
                     (
                         r

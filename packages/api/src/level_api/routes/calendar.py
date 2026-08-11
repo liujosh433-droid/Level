@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from level_api.auth_deps import require_user
@@ -92,6 +94,7 @@ async def propose_commitment(
 )
 async def confirm_proposal(
     proposal_id: str,
+    background_tasks: BackgroundTasks,
     payload: ConfirmRequest | None = None,
     user_id: str = Depends(require_user),
     memory: MemoryBank = Depends(get_memory),
@@ -146,8 +149,6 @@ async def confirm_proposal(
     # patch the cache here. Prefer a synthetic event from the window we just wrote
     # (reliable); fall back to Google's payload shape if needed.
     tz_name = proposal.draft.timezone or "America/Los_Angeles"
-    from zoneinfo import ZoneInfo
-
     wall_tz = ZoneInfo(tz_name)
     synthetic = {
         "id": event_id or f"level:{proposal.proposal_id}",
@@ -188,11 +189,10 @@ async def confirm_proposal(
                 error=str(exc2),
             )
 
-    # Pull Google deltas so the cache matches Calendar (and recovers if inject missed).
-    try:
-        await refresh_agenda_cache(user_id=user_id, token=token, sync_store=sync_store)
-    except Exception as exc:  # noqa: BLE001
-        _logger.warning("agenda_refresh_after_confirm_failed", user_id=user_id, error=str(exc))
+    # Pull Google deltas off the request path — inject already patched the cache.
+    background_tasks.add_task(
+        refresh_agenda_cache, user_id=user_id, token=token, sync_store=sync_store
+    )
 
     try:
         fact = Fact(
@@ -205,7 +205,6 @@ async def confirm_proposal(
             source_signal_ids=[],
             salience=0.75,
         )
-        await memory.facts.upsert(fact)
         signal = Signal(
             user_id=user_id,
             source=SignalSource.GCAL,
@@ -213,7 +212,7 @@ async def confirm_proposal(
             text=f"Calendar (Level-confirmed): {proposal.summary}",
             occurred_at=start,
         )
-        await memory.signals.upsert(signal)
+        await asyncio.gather(memory.facts.upsert(fact), memory.signals.upsert(signal))
     except Exception:  # noqa: BLE001
         pass
 

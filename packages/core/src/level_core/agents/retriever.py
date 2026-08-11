@@ -9,6 +9,7 @@ Hybrid retrieval:
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -157,8 +158,12 @@ class Retriever:
 
     @traced("agent.retriever.run")
     async def run(self, input_: RetrieverInput) -> RetrievedEvidence:
-        all_facts = await self._facts.list_for_user(user_id=input_.user_id, limit=200)
-        care = await self._load_care_profile(input_.user_id)
+        all_facts, care, snapshot, manifesto = await asyncio.gather(
+            self._facts.list_for_user(user_id=input_.user_id, limit=200),
+            self._load_care_profile(input_.user_id),
+            self._manifestos.get_profile_snapshot(user_id=input_.user_id),
+            self._manifestos.get_current_manifesto(user_id=input_.user_id),
+        )
         care_roles = active_care_roles(care)
         care_fact_ids: list[str] = []
         for role in sorted(care_roles, key=lambda r: r.salience, reverse=True)[:4]:
@@ -203,7 +208,6 @@ class Retriever:
                 break
 
         # Include contradiction-linked facts.
-        snapshot = await self._manifestos.get_profile_snapshot(user_id=input_.user_id)
         contradiction_summaries: list[str] = []
         if snapshot:
             for c in snapshot.contradictions:
@@ -228,7 +232,6 @@ class Retriever:
         fact_by_id = {f.fact_id: f for f in facts}
         ordered_facts = [fact_by_id[fid] for fid in ordered_fact_ids if fid in fact_by_id]
 
-        manifesto = await self._manifestos.get_current_manifesto(user_id=input_.user_id)
         manifesto_snippet = manifesto.statement[:800] if manifesto else None
         care_snip = care_profile_snippet(care) or None
 

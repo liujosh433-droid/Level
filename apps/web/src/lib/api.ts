@@ -270,7 +270,58 @@ export type GoogleSyncStatus = {
 };
 
 export async function fetchMe(): Promise<Me> {
+  if (typeof window !== "undefined") {
+    const cached = readMeCache();
+    if (cached) return cached;
+    if (_meInflight) return _meInflight;
+    _meInflight = requestWithAuthRetry<Me>("/v1/auth/me")
+      .then((data) => {
+        writeMeCache(data);
+        return data;
+      })
+      .finally(() => {
+        _meInflight = null;
+      });
+    return _meInflight;
+  }
   return requestWithAuthRetry<Me>("/v1/auth/me");
+}
+
+const ME_CACHE_KEY = "level.me.v1";
+const ME_CACHE_TTL_MS = 30_000;
+let _meInflight: Promise<Me> | null = null;
+
+function readMeCache(): Me | null {
+  try {
+    const raw = sessionStorage.getItem(ME_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { at: number; data: Me };
+    if (!parsed?.data || Date.now() - parsed.at > ME_CACHE_TTL_MS) return null;
+    return parsed.data;
+  } catch {
+    return null;
+  }
+}
+
+function writeMeCache(data: Me): void {
+  try {
+    sessionStorage.setItem(
+      ME_CACHE_KEY,
+      JSON.stringify({ at: Date.now(), data }),
+    );
+  } catch {
+    /* ignore quota */
+  }
+}
+
+export function invalidateMeCache(): void {
+  _meInflight = null;
+  if (typeof window === "undefined") return;
+  try {
+    sessionStorage.removeItem(ME_CACHE_KEY);
+  } catch {
+    /* ignore */
+  }
 }
 
 export async function fetchGoogleSyncStatus(): Promise<GoogleSyncStatus> {
@@ -290,19 +341,25 @@ export async function ensureSession(displayName?: string): Promise<Me> {
 }
 
 export async function createGuest(displayName?: string): Promise<Me> {
-  return request<Me>("/v1/auth/guest", {
+  invalidateMeCache();
+  const me = await request<Me>("/v1/auth/guest", {
     method: "POST",
     body: JSON.stringify(
       displayName ? { display_name: displayName } : {},
     ),
   });
+  writeMeCache(me);
+  return me;
 }
 
 export async function updateDisplayName(displayName: string): Promise<Me> {
-  return request<Me>("/v1/auth/me", {
+  invalidateMeCache();
+  const me = await request<Me>("/v1/auth/me", {
     method: "PATCH",
     body: JSON.stringify({ display_name: displayName }),
   });
+  writeMeCache(me);
+  return me;
 }
 
 export async function logout(): Promise<void> {
@@ -314,6 +371,7 @@ export async function logout(): Promise<void> {
   } catch {
     // Still clear local prefs if the API is unreachable.
   }
+  invalidateMeCache();
   clearLocalSession();
 }
 
@@ -339,6 +397,35 @@ export async function fetchProfile(): Promise<Profile> {
 
 export async function fetchToday(): Promise<TodayView> {
   return request<TodayView>("/v1/today");
+}
+
+const TODAY_CACHE_KEY = "level.today.v1";
+const TODAY_CACHE_TTL_MS = 60_000;
+
+/** Instant paint from last successful Today response (≤60s), then revalidate. */
+export function readTodayCache(): TodayView | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = sessionStorage.getItem(TODAY_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { at: number; data: TodayView };
+    if (!parsed?.data || Date.now() - parsed.at > TODAY_CACHE_TTL_MS) return null;
+    return parsed.data;
+  } catch {
+    return null;
+  }
+}
+
+export function writeTodayCache(data: TodayView): void {
+  if (typeof window === "undefined") return;
+  try {
+    sessionStorage.setItem(
+      TODAY_CACHE_KEY,
+      JSON.stringify({ at: Date.now(), data }),
+    );
+  } catch {
+    /* ignore quota */
+  }
 }
 
 export async function dayCheckIn(

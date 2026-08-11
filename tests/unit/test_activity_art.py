@@ -4,6 +4,8 @@ from level_core.profile.today import build_tomorrow_preview
 
 
 def test_infer_activity_kinds() -> None:
+    # AI care role wins over title keywords.
+    assert infer_activity_kind("Random block", care_role="paid_work") == "work"
     assert infer_activity_kind("Soccer practice — Jordan") == "sports"
     assert infer_activity_kind("School pickup — Jordan") == "school"
     assert infer_activity_kind("Catch up on work email") == "work"

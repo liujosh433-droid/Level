@@ -1,8 +1,8 @@
 "use client";
 
-import { FormEvent, Suspense, useEffect, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import Link from "next/link";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
 import {
   AuthError,
@@ -15,14 +15,8 @@ import {
 } from "@/lib/api";
 import styles from "./session.module.css";
 
-const DEMO_PROMPT =
-  "I think I should apply for the promotion. Everyone says I'd be great at it. " +
-  "And maybe switch Maya to the dual-language school at the same time — her friend is going.";
-
 function SessionPageInner() {
-  const searchParams = useSearchParams();
   const router = useRouter();
-  const isDemo = searchParams.get("demo") === "1";
 
   const [userId, setUserId] = useState("");
   const [decisionId, setDecisionId] = useState<string | null>(null);
@@ -33,23 +27,18 @@ function SessionPageInner() {
   const [profile, setProfile] = useState<Profile | null>(null);
 
   useEffect(() => {
-    void ensureSession()
-      .then((me) => setUserId(me.user_id))
-      .catch(() => router.replace("/welcome"));
+    void (async () => {
+      try {
+        const me = await ensureSession();
+        setUserId(me.user_id);
+        void fetchProfile()
+          .then(setProfile)
+          .catch(() => setProfile(null));
+      } catch {
+        router.replace("/welcome");
+      }
+    })();
   }, [router]);
-
-  useEffect(() => {
-    if (isDemo) {
-      setDraft(DEMO_PROMPT);
-    }
-  }, [isDemo]);
-
-  useEffect(() => {
-    if (!userId) return;
-    void fetchProfile()
-      .then(setProfile)
-      .catch(() => setProfile(null));
-  }, [userId, turns.length]);
 
   async function ensureDecision(): Promise<string> {
     if (decisionId) return decisionId;
@@ -68,6 +57,9 @@ function SessionPageInner() {
       const turn = await takeTurn(id, draft.trim());
       setTurns((prev) => [...prev, turn]);
       setDraft("");
+      void fetchProfile()
+        .then(setProfile)
+        .catch(() => undefined);
     } catch (err) {
       if (err instanceof AuthError) {
         router.replace("/welcome");
@@ -146,7 +138,7 @@ function SessionPageInner() {
             disabled={busy || !userId}
           />
           <button type="submit" disabled={busy || !draft.trim() || !userId}>
-            {busy ? "Listening…" : "Ask Level"}
+            {busy ? "Thinking…" : "Ask Level"}
           </button>
         </form>
       </section>
@@ -155,9 +147,5 @@ function SessionPageInner() {
 }
 
 export default function SessionPage() {
-  return (
-    <Suspense fallback={<AppShell><p className={styles.meta}>Loading…</p></AppShell>}>
-      <SessionPageInner />
-    </Suspense>
-  );
+  return <SessionPageInner />;
 }

@@ -1,4 +1,8 @@
-"""Local-mode demo Memory Bank seed so Ask Level works out of the box."""
+"""Local-mode opt-in Memory Bank seed for pitch rehearsals.
+
+Enable with ``LEVEL_SEED_DEMO=1``. Never runs on cloud. Does not seed guest
+OAuth users — only the explicit ``demo-parent`` id used by ``make demo-judge``.
+"""
 
 from __future__ import annotations
 
@@ -12,8 +16,6 @@ from level_core.schemas.signal import Fact, FactType
 
 _logger = get_logger(__name__)
 
-# Hand-authored facts from the demo narrative — skip the Normalizer LLM at
-# startup so boot stays fast and deterministic.
 _DEMO_FACTS: list[tuple[FactType, str]] = [
     (
         FactType.VALUE_STATEMENT,
@@ -49,7 +51,7 @@ async def seed_local_demo(
     settings: Settings,
     user_id: str = "demo-parent",
 ) -> int:
-    """Idempotently seed demo facts + manifesto for local UI demos."""
+    """Idempotently seed demo facts + manifesto when explicitly requested."""
     if not settings.is_local:
         return 0
 
@@ -58,7 +60,6 @@ async def seed_local_demo(
         _logger.info("local_demo_already_seeded", user_id=user_id)
         return 0
 
-    # Persist raw signals for provenance / UI inspection.
     for signal in demo_caregiver_signals(user_id=user_id):
         await memory.signals.upsert(signal)
 

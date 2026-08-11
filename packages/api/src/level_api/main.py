@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 
@@ -40,7 +41,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:  # noqa: ARG001
 
     if settings.is_cloud:
         settings.assert_cloud_ready()
-    else:
+    elif os.getenv("LEVEL_SEED_DEMO", "").lower() in {"1", "true", "yes"}:
+        # Opt-in only — never auto-seed Maya/demo facts into a real local user.
         await seed_local_demo(
             memory=cached_memory(),
             embedder=build_embedding_client(settings),
@@ -60,12 +62,17 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     instrument_app(app)
+    settings = cached_settings()
+    origins = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ]
+    web = (settings.web_app_url or "").rstrip("/")
+    if web and web not in origins:
+        origins.append(web)
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[
-            "http://localhost:3000",
-            "http://127.0.0.1:3000",
-        ],
+        allow_origins=origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

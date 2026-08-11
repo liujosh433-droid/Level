@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from urllib.parse import quote
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response
@@ -71,7 +72,10 @@ def _token_can_write_calendar(scopes: list[str] | None) -> bool:
 
 async def _me_payload(user_id: str) -> MeResponse:
     store = get_token_store()
-    user = await store.get_user(user_id)
+    user, token = await asyncio.gather(
+        store.get_user(user_id),
+        store.get_google_token(user_id),
+    )
     if user is None:
         raise HTTPException(status_code=401, detail="Session user not found — log in again.")
     # Upgrade leftover "Caregiver" / guest labels once we have an email.
@@ -85,7 +89,6 @@ async def _me_payload(user_id: str) -> MeResponse:
     if pretty and pretty != user.display_name:
         user = user.model_copy(update={"display_name": pretty})
         await store.upsert_user(user)
-    token = await store.get_google_token(user_id)
     connected = token is not None and bool(token.refresh_token or token.access_token)
     return MeResponse(
         user_id=user.user_id,
@@ -160,8 +163,9 @@ async def google_callback(
     link_user_id = parsed.link_user_id if parsed else None
 
     try:
-        creds = exchange_code(code, state, settings)
-        info = fetch_userinfo(creds)
+        # Sync OAuth HTTP — keep off the event loop.
+        creds = await asyncio.to_thread(exchange_code, code, state, settings)
+        info = await asyncio.to_thread(fetch_userinfo, creds)
     except Exception as exc:  # noqa: BLE001
         _logger.exception("oauth_callback_failed")
         raise HTTPException(status_code=400, detail=f"OAuth failed: {exc}") from exc

@@ -20,6 +20,7 @@ swapped in as the execution path later.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -123,12 +124,14 @@ class Conductor:
             return await self._degrade(turn, reason=f"retriever: {exc.validation_error}")
 
         # Load the facts we retrieved so we can pass rich context to Challenger.
-        facts = await self.memory.facts.get_many(
-            user_id=input_.user_id, fact_ids=evidence.fact_ids
-        )
-        bias_profile = await self.memory.manifestos.get_bias_profile(user_id=input_.user_id)
-        prior_turns = await self.memory.decisions.list_turns(
-            user_id=input_.user_id, decision_id=input_.decision_id
+        facts, bias_profile, prior_turns = await asyncio.gather(
+            self.memory.facts.get_many(
+                user_id=input_.user_id, fact_ids=evidence.fact_ids
+            ),
+            self.memory.manifestos.get_bias_profile(user_id=input_.user_id),
+            self.memory.decisions.list_turns(
+                user_id=input_.user_id, decision_id=input_.decision_id
+            ),
         )
 
         # 3. Challenge — retry once with stricter repair prompt on invalid output

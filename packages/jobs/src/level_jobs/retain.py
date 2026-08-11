@@ -27,10 +27,13 @@ async def main() -> int:
     settings = get_settings()
     memory = build_memory(settings)
     policy = _policy_from_env()
-    user_ids_env = os.getenv("LEVEL_JOB_USER_IDS", "demo-parent")
+    user_ids_env = os.getenv("LEVEL_JOB_USER_IDS", "")
     user_ids = [u.strip() for u in user_ids_env.split(",") if u.strip()]
     if not user_ids:
-        _logger.info("retention_no_users")
+        _logger.info(
+            "retention_no_users",
+            note="Set LEVEL_JOB_USER_IDS as a comma-separated list.",
+        )
         return 0
 
     total_pruned = 0

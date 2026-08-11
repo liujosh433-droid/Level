@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from collections import Counter
 from collections.abc import AsyncIterator
@@ -14,6 +15,11 @@ from googleapiclient.discovery import build
 from level_core.auth.google_oauth import credentials_from_token
 from level_core.schemas.signal import Signal, SignalSource
 from level_core.schemas.user import OAuthToken
+
+
+def _calendar_service(token: OAuthToken) -> Any:
+    creds = credentials_from_token(token)
+    return build("calendar", "v3", credentials=creds, cache_discovery=False)
 
 # Titles that appear this many times in the window are treated as a repeating
 # habit / reminder — skip them entirely (we want exceptions, not the grind).
@@ -201,15 +207,14 @@ class CalendarPull:
     window_end: datetime | None = None
 
 
-async def pull_calendar(
+def _pull_calendar_sync(
     token: OAuthToken,
     *,
     user_id: str,
-    max_events: int = 25,
+    max_events: int,
 ) -> CalendarPull:
-    """Fetch filtered calendar events for ingest / priority inference."""
-    creds = credentials_from_token(token)
-    service = build("calendar", "v3", credentials=creds, cache_discovery=False)
+    """Blocking Google list + filter (run via ``asyncio.to_thread``)."""
+    service = _calendar_service(token)
     now = datetime.now(tz=timezone.utc)
     window_start, window_end = calendar_window(now)
     raw = _list_primary_events(
@@ -233,6 +238,18 @@ async def pull_calendar(
     )
 
 
+async def pull_calendar(
+    token: OAuthToken,
+    *,
+    user_id: str,
+    max_events: int = 25,
+) -> CalendarPull:
+    """Fetch filtered calendar events for ingest / priority inference."""
+    return await asyncio.to_thread(
+        _pull_calendar_sync, token, user_id=user_id, max_events=max_events
+    )
+
+
 async def fetch_calendar_signals(
     token: OAuthToken,
     *,
@@ -244,15 +261,13 @@ async def fetch_calendar_signals(
         yield signal
 
 
-async def list_primary_events_window(
+def _list_primary_events_window_sync(
     token: OAuthToken,
     *,
     time_min: datetime,
     time_max: datetime,
 ) -> list[dict[str, Any]]:
-    """List primary-calendar events in ``[time_min, time_max]`` (expanded instances)."""
-    creds = credentials_from_token(token)
-    service = build("calendar", "v3", credentials=creds, cache_discovery=False)
+    service = _calendar_service(token)
     return _list_primary_events(
         service,
         time_min=time_min.astimezone(timezone.utc).isoformat(),
@@ -260,21 +275,34 @@ async def list_primary_events_window(
     )
 
 
-async def create_calendar_event(
+async def list_primary_events_window(
+    token: OAuthToken,
+    *,
+    time_min: datetime,
+    time_max: datetime,
+) -> list[dict[str, Any]]:
+    """List primary-calendar events in ``[time_min, time_max]`` (expanded instances)."""
+    return await asyncio.to_thread(
+        _list_primary_events_window_sync,
+        token,
+        time_min=time_min,
+        time_max=time_max,
+    )
+
+
+def _create_calendar_event_sync(
     token: OAuthToken,
     *,
     summary: str,
     start: datetime,
     end: datetime,
-    timezone_name: str = "America/Los_Angeles",
-    description: str = "",
-    by_days: list[str] | None = None,
+    timezone_name: str,
+    description: str,
+    by_days: list[str] | None,
 ) -> dict[str, Any]:
-    """Insert a primary-calendar event; optional weekly RRULE via ``by_days`` (MO,TU,…)."""
     from zoneinfo import ZoneInfo
 
-    creds = credentials_from_token(token)
-    service = build("calendar", "v3", credentials=creds, cache_discovery=False)
+    service = _calendar_service(token)
     tz = ZoneInfo(timezone_name)
     start_wall = start.astimezone(tz)
     end_wall = end.astimezone(tz)
@@ -293,10 +321,29 @@ async def create_calendar_event(
     if by_days:
         days = ",".join(by_days)
         body["recurrence"] = [f"RRULE:FREQ=WEEKLY;BYDAY={days}"]
-    return (
-        service.events()
-        .insert(calendarId="primary", body=body)
-        .execute()
+    return service.events().insert(calendarId="primary", body=body).execute()
+
+
+async def create_calendar_event(
+    token: OAuthToken,
+    *,
+    summary: str,
+    start: datetime,
+    end: datetime,
+    timezone_name: str = "America/Los_Angeles",
+    description: str = "",
+    by_days: list[str] | None = None,
+) -> dict[str, Any]:
+    """Insert a primary-calendar event; optional weekly RRULE via ``by_days`` (MO,TU,…)."""
+    return await asyncio.to_thread(
+        _create_calendar_event_sync,
+        token,
+        summary=summary,
+        start=start,
+        end=end,
+        timezone_name=timezone_name,
+        description=description,
+        by_days=by_days,
     )
 
 
@@ -388,21 +435,16 @@ def _list_events_page(
     return service.events().list(**kwargs).execute()
 
 
-async def pull_calendar_incremental(
+def _pull_calendar_incremental_sync(
     token: OAuthToken,
     *,
-    sync_token: str | None = None,
-    days_back: int = 14,
-    days_forward: int = 28,
+    sync_token: str | None,
+    days_back: int,
+    days_forward: int,
 ) -> IncrementalCalendarPull:
-    """List primary events; with ``sync_token`` returns only deltas.
-
-    Does not touch Memory Bank / LLM — agenda freshness only.
-    """
     from googleapiclient.errors import HttpError
 
-    creds = credentials_from_token(token)
-    service = build("calendar", "v3", credentials=creds, cache_discovery=False)
+    service = _calendar_service(token)
     window_start, window_end = calendar_window(
         days_back=days_back, days_forward=days_forward
     )
@@ -443,17 +485,35 @@ async def pull_calendar_incremental(
     )
 
 
-async def watch_primary_calendar(
+async def pull_calendar_incremental(
+    token: OAuthToken,
+    *,
+    sync_token: str | None = None,
+    days_back: int = 14,
+    days_forward: int = 28,
+) -> IncrementalCalendarPull:
+    """List primary events; with ``sync_token`` returns only deltas.
+
+    Does not touch Memory Bank / LLM — agenda freshness only.
+    """
+    return await asyncio.to_thread(
+        _pull_calendar_incremental_sync,
+        token,
+        sync_token=sync_token,
+        days_back=days_back,
+        days_forward=days_forward,
+    )
+
+
+def _watch_primary_calendar_sync(
     token: OAuthToken,
     *,
     channel_id: str,
     address: str,
     channel_token: str,
-    ttl_seconds: int = 6 * 24 * 3600,
+    ttl_seconds: int,
 ) -> dict[str, Any]:
-    """Register a Google Calendar push channel for primary events."""
-    creds = credentials_from_token(token)
-    service = build("calendar", "v3", credentials=creds, cache_discovery=False)
+    service = _calendar_service(token)
     expiration_ms = int(
         (datetime.now(tz=timezone.utc) + timedelta(seconds=ttl_seconds)).timestamp()
         * 1000
@@ -468,19 +528,53 @@ async def watch_primary_calendar(
     return service.events().watch(calendarId="primary", body=body).execute()
 
 
+async def watch_primary_calendar(
+    token: OAuthToken,
+    *,
+    channel_id: str,
+    address: str,
+    channel_token: str,
+    ttl_seconds: int = 6 * 24 * 3600,
+) -> dict[str, Any]:
+    """Register a Google Calendar push channel for primary events."""
+    return await asyncio.to_thread(
+        _watch_primary_calendar_sync,
+        token,
+        channel_id=channel_id,
+        address=address,
+        channel_token=channel_token,
+        ttl_seconds=ttl_seconds,
+    )
+
+
+def _stop_calendar_channel_sync(
+    token: OAuthToken,
+    *,
+    channel_id: str,
+    resource_id: str,
+) -> None:
+    service = _calendar_service(token)
+    try:
+        service.channels().stop(
+            body={"id": channel_id, "resourceId": resource_id}
+        ).execute()
+    except Exception:  # noqa: BLE001
+        # Channel may already be gone — ignore.
+        return
+
+
 async def stop_calendar_channel(
     token: OAuthToken,
     *,
     channel_id: str,
     resource_id: str,
 ) -> None:
-    creds = credentials_from_token(token)
-    service = build("calendar", "v3", credentials=creds, cache_discovery=False)
-    try:
-        service.channels().stop(body={"id": channel_id, "resourceId": resource_id}).execute()
-    except Exception:  # noqa: BLE001
-        # Channel may already be gone — ignore.
-        return
+    await asyncio.to_thread(
+        _stop_calendar_channel_sync,
+        token,
+        channel_id=channel_id,
+        resource_id=resource_id,
+    )
 
 
 __all__ = [

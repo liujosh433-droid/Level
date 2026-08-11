@@ -170,6 +170,68 @@
   margin-top: 0.45rem;
 }
 
+.waiting {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  margin: 0.75rem 0 0.25rem;
+  padding: 0.75rem 0.95rem;
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--surface) 88%, var(--signal) 12%);
+  border: 1px solid color-mix(in srgb, var(--line) 70%, var(--signal) 30%);
+}
+
+.waitingDots {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+  flex-shrink: 0;
+}
+
+.waitingDots i {
+  width: 0.4rem;
+  height: 0.4rem;
+  border-radius: 50%;
+  background: var(--signal-deep);
+  opacity: 0.35;
+  animation: waitingPulse 1.2s ease-in-out infinite;
+}
+
+.waitingDots i:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.waitingDots i:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+.waitingText {
+  margin: 0;
+  color: var(--foam);
+  font-size: 0.95rem;
+  line-height: 1.35;
+  font-weight: 500;
+}
+
+@keyframes waitingPulse {
+  0%,
+  100% {
+    opacity: 0.28;
+    transform: translateY(0);
+  }
+  40% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .waitingDots i {
+    animation: none;
+    opacity: 0.7;
+  }
+}
+
 @media (min-width: 768px) {
   .dock {
     bottom: 1rem;

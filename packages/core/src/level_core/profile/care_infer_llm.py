@@ -25,6 +25,7 @@ from level_core.schemas.care import (
     CareProfile,
     CareRoleId,
     CareRoleState,
+    clean_conflict_summaries,
 )
 from level_core.schemas.profile import BulletStatus
 from level_core.schemas.signal import Fact, FactType
@@ -40,11 +41,29 @@ _PERSON_ROLES = frozenset(
     }
 )
 
-
 class CarePersonAssign(BaseModel):
+    """One human in the care graph — never one row per nickname."""
+
     name: str = ""
     role: str = "child_care"
     evidence: str = ""
+    also_known_as: list[str] = Field(
+        default_factory=list,
+        description="Nicknames / kinship labels for the same human (Papa, Dad).",
+    )
+    relationship: str = Field(
+        default="",
+        description=(
+            "How this person relates to the caregiver — short phrase from context "
+            "(e.g. parent, child, co-parent, spouse, sibling). Empty if unclear."
+        ),
+    )
+
+
+class CarePeopleConsolidate(BaseModel):
+    """AI wrapper: collapse nickname duplicates into canonical people."""
+
+    people: list[CarePersonAssign] = Field(default_factory=list)
 
 
 class CareEventAssign(BaseModel):
@@ -199,7 +218,15 @@ _SYSTEM_CARE = (
     "naively and do not invent categories from title words alone when memory "
     "clarifies intent.\n"
     "- Each named person belongs to at most ONE role.\n"
-    "- Mom/Dad/Mother/Father/Grandma/Grandpa are elder_care, never child_care.\n"
+    "- ONE human = ONE people[] entry. Prefer a given name when known "
+    "(Robert not Papa/Dad). Put nicknames in also_known_as. "
+    "Never list Papa, Dad, and Robert as three elder_care people if they are "
+    "the same aging parent — that is one person.\n"
+    "- Same for kids: Nova and \"N\" are one child if context says so.\n"
+    "- For each person, set relationship: a short phrase for how they relate to "
+    "the caregiver (parent, child, co-parent, spouse, sibling, etc.) inferred "
+    "from calendar + memory — not a fixed vocabulary; leave empty if unclear.\n"
+    "- Mom/Dad/Mother/Father/Grandma/Grandpa/Papa refer to elders, never child_care.\n"
     "- Titles like \"Pharmacy pickup — Mom's meds\" or \"dinner drop-off for Mom\" "
     "are elder_care events.\n"
     "- Only include partner_coparent if there is real evidence of a co-parent/"
@@ -207,7 +234,11 @@ _SYSTEM_CARE = (
     "- Salience 0..1 reflects how load-bearing the role is.\n"
     "- weekly_load_hours is a rough estimate.\n"
     "- facts: short first-person statements suitable for Memory Bank.\n"
-    "- conflicts: real care collisions (work vs pickup, night class vs care, etc.). "
+    "- conflicts: only when two real loads compete. One plain sentence each, naming "
+    "the calendar titles or people (short quotes ok) and what crowds what out. "
+    "Bad: 'School run collision day indicates a conflict with other obligations.' "
+    "Good: '“School run” and a late work block sit the same afternoon — pickup is at risk.' "
+    "Never use internal jargon (collision day, obligations, tension, Level is watching). "
     "Never label classes/courses as self_recovery in a conflict."
 )
 
@@ -220,14 +251,17 @@ async def infer_care_holistic(
     previous: CareProfile | None = None,
     model_id: str | None = None,
 ) -> CareHolisticInfer | None:
-    """One structured call: full Care Profile + event categories + facts."""
-    titles = _unique_titles(events)
-    if not titles and not (fact_snippets or []):
+    """One structured call: full Care Profile + event categories + facts.
+
+    Retries with fewer titles when Gemini truncates / returns broken JSON —
+    busy calendars were overflowing the output budget and leaving Care Profile empty.
+    """
+    all_titles = _unique_titles(events, limit=48)
+    if not all_titles and not (fact_snippets or []):
         return None
     settings = get_settings()
     model = model_id or settings.fast_model
-    facts_block = "\n".join(f"- {s}" for s in (fact_snippets or [])[:16]) or "(none)"
-    titles_block = "\n".join(f"- {t}" for t in titles) or "(no calendar titles)"
+    facts_block = "\n".join(f"- {s}" for s in (fact_snippets or [])[:12]) or "(none)"
     prev_block = "(none)"
     if previous and previous.roles:
         lines = []
@@ -236,53 +270,75 @@ async def infer_care_holistic(
             peeps = f" people={','.join(r.people)}" if r.people else ""
             lines.append(f"- {r.role_id.value} status={st} salience={r.salience:.2f}{peeps}")
         prev_block = "\n".join(lines)
-    prompt = (
-        "Infer this caregiver's Care Profile from the data below.\n"
-        "Classify from the combination of calendar titles AND memory snippets — "
-        "memory can resolve ambiguous titles.\n"
-        "Return JSON with:\n"
-        "- roles: list of {role_id, salience, weekly_load_hours, people[], evidence, present}\n"
-        "  Include a role only when present=true and there is real evidence.\n"
-        "- people: named people with role in {child_care, elder_care, partner_coparent} "
-        "and short evidence (must agree with roles.people).\n"
-        "- events: classify EACH calendar title into "
-        "{child_care, elder_care, paid_work, self_recovery, household_logistics, "
-        "partner_coparent, other}; use the exact title string.\n"
-        "  Examples: Meeting/Call/Sync/1:1 → paid_work; Night class → other "
-        "(or paid_work if memory/career context); Therapy → self_recovery.\n"
-        "- conflicts: short strings of colliding loads "
-        "(name the real loads — night class is not self_recovery).\n"
-        "- facts: 1-6 first-person Memory Bank statements.\n\n"
-        f"Calendar titles:\n{titles_block}\n\n"
-        f"Memory snippets:\n{facts_block}\n\n"
-        f"Previous care roles (honor Rejected — do not revive):\n{prev_block}\n"
-    )
-    try:
-        resp = await gemini.generate(
-            GenerationRequest(
-                model_id=model,
-                prompt=prompt,
-                system_instruction=_SYSTEM_CARE,
-                response_schema=CareHolisticInfer.model_json_schema(),
-                temperature=0.1,
-                max_output_tokens=2200,
-                metadata={"task": "care_profile_infer"},
-            )
+
+    # Shrink title count on parse/unavailable failures (MAX_TOKENS truncates JSON).
+    for title_cap in (24, 14, 8):
+        titles = all_titles[:title_cap]
+        titles_block = "\n".join(f"- {t}" for t in titles) or "(no calendar titles)"
+        event_cap = min(len(titles), 18)
+        prompt = (
+            "Infer this caregiver's Care Profile from the data below.\n"
+            "Classify from the combination of calendar titles AND memory snippets — "
+            "memory can resolve ambiguous titles.\n"
+            "Return JSON with:\n"
+            "- roles: list of {role_id, salience, weekly_load_hours, people[], evidence, present}\n"
+            "  Include a role only when present=true and there is real evidence.\n"
+            "- people: ONE entry per human with role in "
+            "{child_care, elder_care, partner_coparent}, short evidence, "
+            "also_known_as for nicknames, and relationship (how they relate to the "
+            "caregiver — e.g. parent, child, co-parent). Prefer given names "
+            "(Robert, Nova, Theo). roles.people must use those same canonical "
+            "names only — no duplicate nickname rows.\n"
+            f"- events: classify at most {event_cap} distinctive titles from the list into "
+            "{child_care, elder_care, paid_work, self_recovery, household_logistics, "
+            "partner_coparent, other}; copy the exact title string. Prefer named people "
+            "and ambiguous titles (Meeting, Pickup, Dr.) over near-duplicates.\n"
+            "  Examples: Meeting/Call/Sync/1:1 → paid_work; Night class → other "
+            "(or paid_work if memory/career context); Therapy → self_recovery.\n"
+            "- conflicts: at most 3 plain sentences. Each must cite real titles or "
+            "people from the data and say what crowds what out. Skip vague "
+            "'indicates a conflict / other obligations' lines. "
+            "Night class is not self_recovery.\n"
+            "- facts: 1-4 first-person life statements (who you care for, constraints). "
+            "Never list or quote calendar titles / meeting names in facts.\n"
+            "Keep the JSON compact — short evidence strings.\n\n"
+            f"Calendar titles:\n{titles_block}\n\n"
+            f"Memory snippets:\n{facts_block}\n\n"
+            f"Previous care roles (honor Rejected — do not revive):\n{prev_block}\n"
         )
-    except ModelUnavailable:
-        _logger.info("care_holistic_unavailable")
-        return None
-    except Exception:  # noqa: BLE001
-        _logger.exception("care_holistic_failed")
-        return None
-    text = (resp.text or "").strip()
-    if not text:
-        return None
-    try:
-        return CareHolisticInfer.model_validate(json.loads(text))
-    except Exception:  # noqa: BLE001
-        _logger.warning("care_holistic_parse_failed", preview=text[:160])
-        return None
+        try:
+            resp = await gemini.generate(
+                GenerationRequest(
+                    model_id=model,
+                    prompt=prompt,
+                    system_instruction=_SYSTEM_CARE,
+                    response_schema=CareHolisticInfer.model_json_schema(),
+                    temperature=0.1,
+                    max_output_tokens=4096,
+                    metadata={"task": "care_profile_infer", "title_cap": title_cap},
+                )
+            )
+        except ModelUnavailable:
+            _logger.info("care_holistic_unavailable", title_cap=title_cap)
+            continue
+        except Exception:  # noqa: BLE001
+            _logger.exception("care_holistic_failed", title_cap=title_cap)
+            continue
+        text = (resp.text or "").strip()
+        if not text:
+            continue
+        try:
+            parsed = CareHolisticInfer.model_validate(json.loads(text))
+        except Exception:  # noqa: BLE001
+            _logger.warning(
+                "care_holistic_parse_failed",
+                title_cap=title_cap,
+                preview=text[:160],
+            )
+            continue
+        if parsed.roles or parsed.people or parsed.events:
+            return parsed
+    return None
 
 
 def _merge_role_feedback(
@@ -313,6 +369,28 @@ def _merge_role_feedback(
     return inferred
 
 
+def _alias_to_canonical(inferred: CareHolisticInfer) -> dict[str, str]:
+    """Map every nickname → canonical display name from people[].also_known_as."""
+    mapping: dict[str, str] = {}
+    for person in inferred.people:
+        canon = _display_name(person.name)
+        if not canon:
+            continue
+        mapping[canon.lower()] = canon
+        for alias in person.also_known_as or []:
+            a = _display_name(alias)
+            if a:
+                mapping[a.lower()] = canon
+    return mapping
+
+
+def _canonical_person_name(raw: str, alias_map: dict[str, str]) -> str:
+    name = _display_name(raw)
+    if not name:
+        return ""
+    return alias_map.get(name.lower(), name)
+
+
 def care_profile_from_holistic(
     *,
     user_id: str,
@@ -321,7 +399,8 @@ def care_profile_from_holistic(
     event_titles: list[str] | None = None,
 ) -> tuple[CareProfile, list[Fact]]:
     """Build CareProfile + Facts from a holistic AI result."""
-    # People map (exclusive).
+    alias_map = _alias_to_canonical(inferred)
+    # People map (exclusive) — people[] is authoritative; one canonical label each.
     people_by_role: dict[CareRoleId, list[str]] = {
         CareRoleId.CHILD_CARE: [],
         CareRoleId.ELDER_CARE: [],
@@ -333,7 +412,7 @@ def care_profile_from_holistic(
         key=lambda p: (0 if "elder" in (p.role or "") else 1, p.name.lower()),
     )
     for person in ordered:
-        name = _display_name(person.name)
+        name = _canonical_person_name(person.name, alias_map)
         if not name or len(name) > 40:
             continue
         key = name.lower()
@@ -343,6 +422,10 @@ def care_profile_from_holistic(
         if role is None:
             continue
         claimed.add(key)
+        for alias in person.also_known_as or []:
+            a = _display_name(alias)
+            if a:
+                claimed.add(a.lower())
         people_by_role[role].append(name)
 
     # Role states from roles[] (preferred) else from people presence.
@@ -370,9 +453,37 @@ def care_profile_from_holistic(
     roles: list[CareRoleState] = []
     facts: list[Fact] = []
     for rid, spec in role_specs.items():
-        names = list(dict.fromkeys([*spec.people, *people_by_role.get(rid, [])]))
-        names = [_display_name(n) for n in names if n]
-        names = [n for n in names if n and (n.lower() not in claimed or n.lower() in {x.lower() for x in people_by_role.get(rid, [])})]
+        raw_names = [*spec.people, *people_by_role.get(rid, [])]
+        names = [
+            _canonical_person_name(n, alias_map)
+            for n in raw_names
+            if n
+        ]
+        names = list(dict.fromkeys([n for n in names if n]))
+        # Prefer people[] list for this role when present (already de-duped).
+        if people_by_role.get(rid):
+            names = list(
+                dict.fromkeys(
+                    [
+                        *people_by_role[rid],
+                        *[
+                            n
+                            for n in names
+                            if n.lower() in {x.lower() for x in people_by_role[rid]}
+                            or n.lower() not in claimed
+                        ],
+                    ]
+                )
+            )
+        names = [
+            n
+            for n in names
+            if n
+            and (
+                n.lower() not in claimed
+                or n.lower() in {x.lower() for x in people_by_role.get(rid, [])}
+            )
+        ]
         # Enforce exclusivity on this role's people.
         clean_people: list[str] = []
         for n in names:
@@ -389,27 +500,8 @@ def care_profile_from_holistic(
         evidence = (spec.evidence or "").strip()[:200]
         if not evidence and clean_people:
             evidence = f"{CARE_ROLE_LABELS[rid]} with {', '.join(clean_people)}"
-        if evidence:
-            facts.append(
-                Fact(
-                    user_id=user_id,
-                    type=FactType.RELATIONSHIP
-                    if rid
-                    in {
-                        CareRoleId.CHILD_CARE,
-                        CareRoleId.ELDER_CARE,
-                        CareRoleId.PARTNER_COPARENT,
-                    }
-                    else FactType.COMMITMENT,
-                    statement=evidence[:300]
-                    if evidence.lower().startswith("i ")
-                    else f"I hold {evidence[:280]}",
-                    salience=sal,
-                    confidence=0.82,
-                    source_signal_ids=[],
-                    written_by="care_infer@v2",
-                )
-            )
+        # Role evidence stays on CareRoleState for the graph — never mint
+        # "I hold <calendar inventory>" Memory facts (those leaked into Today tips).
         role = CareRoleState(
             role_id=rid,
             label=CARE_ROLE_LABELS[rid],
@@ -417,7 +509,7 @@ def care_profile_from_holistic(
             weekly_load_hours=hours,
             evidence_summaries=[evidence] if evidence else [],
             people=clean_people[:4],
-            source_fact_ids=[facts[-1].fact_id] if facts else [],
+            source_fact_ids=[],
         )
         roles.append(_merge_role_feedback(role, previous))
 
@@ -450,8 +542,8 @@ def care_profile_from_holistic(
             continue
         hints[_norm_title(title)] = role.value
 
-    # Extra facts from model.
-    for stmt in inferred.facts[:6]:
+    # Only the model's explicit first-person life facts — not role/calendar dumps.
+    for stmt in inferred.facts[:4]:
         text = (stmt or "").strip()
         if len(text) < 12:
             continue
@@ -465,11 +557,20 @@ def care_profile_from_holistic(
                 salience=0.7,
                 confidence=0.8,
                 source_signal_ids=[],
-                written_by="care_infer@v2",
+                written_by="care_infer_fact@v2",
             )
         )
 
     version = (previous.version + 1) if previous else 1
+    person_rels: dict[str, str] = {}
+    if previous and previous.person_relationships:
+        person_rels.update(previous.person_relationships)
+    for person in inferred.people:
+        name = _canonical_person_name(person.name, alias_map)
+        rel = " ".join((person.relationship or "").strip().split())
+        if name and rel:
+            person_rels[name] = rel[:48]
+
     # Guard: empty AI output must not erase Keep/Not-me roles already on file.
     if not roles and previous and previous.roles:
         profile = previous.model_copy(
@@ -480,21 +581,28 @@ def care_profile_from_holistic(
                     **previous.calendar_role_by_summary,
                     **hints,
                 },
-                "conflict_summaries": [
-                    c.strip()[:200] for c in inferred.conflicts if c.strip()
-                ][:4]
-                or previous.conflict_summaries,
+                "conflict_summaries": clean_conflict_summaries(inferred.conflicts)
+                or clean_conflict_summaries(previous.conflict_summaries),
+                "person_relationships": person_rels or previous.person_relationships,
             }
         )
         return reconcile_exclusive_people(profile), facts
+
+    live_names = {p.lower() for r in roles for p in r.people}
+    if live_names:
+        person_rels = {
+            k: v for k, v in person_rels.items() if k.lower() in live_names
+        }
 
     profile = CareProfile(
         user_id=user_id,
         roles=roles,
         version=version,
         updated_at=datetime.now(tz=timezone.utc),
-        conflict_summaries=[c.strip()[:200] for c in inferred.conflicts if c.strip()][:4],
+        conflict_summaries=clean_conflict_summaries(inferred.conflicts),
         calendar_role_by_summary=hints,
+        helpers=list(previous.helpers) if previous else [],
+        person_relationships=person_rels,
     )
     return reconcile_exclusive_people(profile), facts
 
@@ -564,6 +672,156 @@ def reconcile_exclusive_people(profile: CareProfile) -> CareProfile:
     )
 
 
+def _person_labels_need_consolidate(inferred: CareHolisticInfer) -> bool:
+    """True when a role lists multiple person labels (likely nickname duplicates)."""
+    by_role: dict[str, set[str]] = {}
+    for person in inferred.people:
+        role = (person.role or "").strip().lower()
+        name = _display_name(person.name)
+        if not role or not name:
+            continue
+        by_role.setdefault(role, set()).add(name.lower())
+        for alias in person.also_known_as or []:
+            a = _display_name(alias)
+            if a:
+                by_role[role].add(a.lower())
+    for raw in inferred.roles:
+        role = (raw.role_id or "").strip().lower()
+        for n in raw.people or []:
+            name = _display_name(n)
+            if role and name:
+                by_role.setdefault(role, set()).add(name.lower())
+    return any(len(names) >= 2 for names in by_role.values())
+
+
+async def consolidate_care_people_ai(
+    gemini: GeminiClient,
+    *,
+    inferred: CareHolisticInfer,
+    event_titles: list[str],
+    previous: CareProfile | None = None,
+    model_id: str | None = None,
+) -> CareHolisticInfer:
+    """Specialized AI wrapper: one human → one canonical name (+ also_known_as).
+
+    Runs when holistic output still has multiple labels on the same role
+    (e.g. Papa / Dad / Robert for one elder).
+    """
+    if not _person_labels_need_consolidate(inferred):
+        return inferred
+
+    settings = get_settings()
+    model = model_id or settings.fast_model
+    labels: list[str] = []
+    for person in inferred.people:
+        name = _display_name(person.name)
+        if name:
+            labels.append(f"{name} → {person.role}")
+        for alias in person.also_known_as or []:
+            a = _display_name(alias)
+            if a:
+                labels.append(f"{a} (alias of {name}) → {person.role}")
+    for raw in inferred.roles:
+        for n in raw.people or []:
+            name = _display_name(n)
+            if name:
+                labels.append(f"{name} → {raw.role_id}")
+    prev_people = []
+    if previous:
+        for r in previous.roles:
+            if r.status is BulletStatus.REJECTED:
+                continue
+            for p in r.people:
+                prev_people.append(f"{p} ({r.role_id.value})")
+    titles_block = "\n".join(f"- {t}" for t in event_titles[:28]) or "(none)"
+    labels_block = "\n".join(f"- {x}" for x in dict.fromkeys(labels)) or "(none)"
+    prev_block = "\n".join(f"- {x}" for x in prev_people[:12]) or "(none)"
+    prompt = (
+        "Consolidate care recipients into ONE entry per human being.\n"
+        "Calendar titles use nicknames and legal names for the same people "
+        "(e.g. Papa, Dad, Robert Chen → one elder named Robert; also_known_as "
+        "Papa, Dad).\n"
+        "Return people: [{name, role, evidence, also_known_as[], relationship}].\n"
+        "Rules: prefer a given name when known; kinship words alone (Dad, Papa, "
+        "Mom) only if no given name appears; never emit three rows for one human; "
+        "role in {child_care, elder_care, partner_coparent}; "
+        "relationship = short phrase for how they relate to the caregiver "
+        "(parent, child, co-parent, …) from context.\n\n"
+        f"Labels from a prior pass:\n{labels_block}\n\n"
+        f"Calendar titles:\n{titles_block}\n\n"
+        f"Previous Care Profile people (prefer stable names):\n{prev_block}\n"
+    )
+    try:
+        resp = await gemini.generate(
+            GenerationRequest(
+                model_id=model,
+                prompt=prompt,
+                system_instruction=(
+                    "You merge duplicate person labels for a caregiver Care Profile. "
+                    "Output JSON only. One human = one people entry."
+                ),
+                response_schema=CarePeopleConsolidate.model_json_schema(),
+                temperature=0.0,
+                max_output_tokens=900,
+                metadata={"task": "care_people_consolidate"},
+            )
+        )
+    except ModelUnavailable:
+        _logger.info("care_people_consolidate_unavailable")
+        return inferred
+    except Exception:  # noqa: BLE001
+        _logger.exception("care_people_consolidate_failed")
+        return inferred
+    text = (resp.text or "").strip()
+    if not text:
+        return inferred
+    try:
+        consolidated = CarePeopleConsolidate.model_validate(json.loads(text))
+    except Exception:  # noqa: BLE001
+        _logger.warning("care_people_consolidate_parse_failed", preview=text[:160])
+        return inferred
+    if not consolidated.people:
+        return inferred
+
+    # Rewrite roles.people to canonical names from the consolidate pass.
+    alias_map: dict[str, str] = {}
+    for person in consolidated.people:
+        canon = _display_name(person.name)
+        if not canon:
+            continue
+        alias_map[canon.lower()] = canon
+        for alias in person.also_known_as or []:
+            a = _display_name(alias)
+            if a:
+                alias_map[a.lower()] = canon
+    new_roles: list[CareRoleInfer] = []
+    for raw in inferred.roles:
+        mapped = [
+            alias_map.get(_display_name(n).lower(), _display_name(n))
+            for n in (raw.people or [])
+            if _display_name(n)
+        ]
+        # For person roles, prefer consolidate list for that role.
+        rid = _parse_role(raw.role_id, allowed=_PERSON_ROLES)
+        if rid is not None:
+            mapped = [
+                _display_name(p.name)
+                for p in consolidated.people
+                if _parse_role(p.role, allowed=_PERSON_ROLES) is rid
+                and _display_name(p.name)
+            ]
+        mapped = list(dict.fromkeys([m for m in mapped if m]))
+        new_roles.append(raw.model_copy(update={"people": mapped}))
+    _logger.info(
+        "care_people_consolidated",
+        before=len(labels),
+        after=len(consolidated.people),
+    )
+    return inferred.model_copy(
+        update={"people": consolidated.people, "roles": new_roles}
+    )
+
+
 async def infer_care_profile_ai(
     *,
     user_id: str,
@@ -583,6 +841,12 @@ async def infer_care_profile_ai(
     )
     if inferred is None:
         return None
+    inferred = await consolidate_care_people_ai(
+        client,
+        inferred=inferred,
+        event_titles=titles,
+        previous=previous,
+    )
     return care_profile_from_holistic(
         user_id=user_id,
         inferred=inferred,
@@ -655,8 +919,10 @@ async def apply_note_to_care_profile_ai(
         "Mom/Dad kinship is elder_care, never child_care. "
         "IMPORTANT: occasional friends/neighbors who help drive, babysit, or pick up "
         "are helpers — NOT child_care people and NOT partner_coparent. "
-        "Put them in helpers with helps=[child name]. "
-        "Care recipients (Jordan, Mom) go in people. "
+        "Only add helpers[] when the note clearly names a helper; never invent "
+        "anonymous Friend rows or placeholder care-recipient names. "
+        "Put named helpers in helpers with helps=[child/elder name from the note or profile]. "
+        "Care recipients go in people. "
         "Each care-recipient person one role. Reply warmly in 1–2 short complete "
         "sentences (never trail off), no quotation marks wrapping the reply."
     )
@@ -666,12 +932,14 @@ async def apply_note_to_care_profile_ai(
         "- reject_roles: role ids to mark Rejected "
         "(child_care|elder_care|paid_work|self_recovery|household_logistics|partner_coparent)\n"
         "- accept_roles: role ids to strengthen / Accept\n"
-        "- people: [{name, role, evidence}] care recipients only "
+        "- people: [{name, role, evidence, relationship}] care recipients only "
+        "(relationship = short phrase: parent, child, co-parent, …) "
         "(child_care|elder_care|partner_coparent)\n"
         "- helpers: [{name, helps[], hint, helps_role}] for friends/neighbors who "
         "occasionally help — helps lists who they help (e.g. [\"Jordan\"])\n"
         "- evidence: optional short note\n"
-        "- conflicts: optional new conflict strings\n\n"
+        "- conflicts: optional plain sentences citing real titles/people and "
+        "what crowds what out (no jargon like 'collision day' / 'obligations')\n\n"
         f"Current roles:\n{chr(10).join(current) or '(empty)'}\n"
         f"Current helpers: {', '.join(h.name for h in profile.helpers) or '(none)'}\n\n"
         f"User note:\n{text}\n"
@@ -839,7 +1107,7 @@ async def apply_note_to_care_profile_ai(
         if cleaned != role.people:
             by_id[role.role_id] = role.model_copy(update={"people": cleaned})
 
-    # Merge helpers (friends who help Jordan, etc.).
+    # Merge helpers only when Gemini named them — never invent Friend/Jordan rows.
     helpers_by_name = {h.name.lower(): h for h in profile.helpers}
     for raw_h in update.helpers:
         name = _display_name(raw_h.name)
@@ -851,6 +1119,9 @@ async def apply_note_to_care_profile_ai(
             child = by_id.get(CareRoleId.CHILD_CARE)
             if child and child.people:
                 helps = list(child.people[:2])
+        if not helps:
+            # No recipient to attach — skip rather than invent a placeholder.
+            continue
         hint = (raw_h.hint or "Occasionally helps with care").strip()[:160]
         helps_role = (raw_h.helps_role or "child_care").strip() or "child_care"
         helpers_by_name[name.lower()] = CareHelper(
@@ -859,47 +1130,22 @@ async def apply_note_to_care_profile_ai(
             hint=hint,
             helps_role=helps_role,
         )
-    # Note implies a friend helper but model omitted helpers[].
-    if not update.helpers and re.search(
-        r"\b(friend|neighbor).{0,80}\b(help|drive|carpool|pickup|practice)\b"
-        r"|\b(help|drive|carpool).{0,80}\b(friend|neighbor)\b",
-        text,
-        re.I,
-    ):
-        child = by_id.get(CareRoleId.CHILD_CARE)
-        helps = list((child.people if child else [])[:2])
-        for token in re.findall(r"\b([A-Z][a-z]{2,})\b", note):
-            if _is_likely_name(token) and token.lower() not in {
-                "friend",
-                "neighbor",
-                "occasionally",
-            }:
-                # Prefer explicit care-recipient names already on child_care.
-                if child and any(token.lower() == p.lower() for p in child.people):
-                    helps = [token]
-                    break
-                if token.lower() not in helpers_by_name and not helps:
-                    helps = [token]
-        helpers_by_name.setdefault(
-            "friend",
-            CareHelper(
-                name="Friend",
-                helps=helps[:2] or ["Jordan"],
-                hint="Occasionally helps with child care",
-                helps_role="child_care",
-            ),
-        )
 
-    conflicts = list(profile.conflict_summaries)
-    for c in update.conflicts:
-        c = c.strip()
-        if c and c not in conflicts:
-            conflicts.insert(0, c[:200])
+    conflicts = clean_conflict_summaries(
+        list(update.conflicts) + list(profile.conflict_summaries)
+    )
+    person_rels = dict(profile.person_relationships)
+    for person in update.people:
+        name = _display_name(person.name)
+        rel = " ".join((person.relationship or "").strip().split())
+        if name and rel and name.lower() not in helper_names:
+            person_rels[name] = rel[:48]
     care = profile.model_copy(
         update={
             "roles": list(by_id.values()),
             "helpers": list(helpers_by_name.values())[:6],
-            "conflict_summaries": conflicts[:4],
+            "conflict_summaries": conflicts,
+            "person_relationships": person_rels,
             "version": profile.version + 1,
             "updated_at": datetime.now(tz=timezone.utc),
         }
@@ -919,24 +1165,6 @@ async def apply_note_to_care_profile_ai(
     if len(reply) < 8:
         reply = "Got it — I updated your care roles from what you told me."
     return care, reply
-
-
-def _is_likely_name(token: str) -> bool:
-    t = (token or "").strip()
-    if len(t) < 2 or len(t) > 24:
-        return False
-    return t[0].isupper() and t[1:].islower() and t.lower() not in {
-        "friend",
-        "practice",
-        "school",
-        "soccer",
-        "pickup",
-        "drive",
-        "help",
-        "helps",
-        "neighbor",
-        "occasionally",
-    }
 
 
 async def classify_week_event_roles_ai(
@@ -1035,6 +1263,7 @@ __all__ = [
     "CareHelperAssign",
     "CareHolisticInfer",
     "CareNoteUpdate",
+    "CarePeopleConsolidate",
     "CarePersonAssign",
     "CareRoleInfer",
     "WeekEventClassifyOut",
@@ -1042,6 +1271,7 @@ __all__ = [
     "apply_note_to_care_profile_ai",
     "care_profile_from_holistic",
     "classify_week_event_roles_ai",
+    "consolidate_care_people_ai",
     "enrich_care_profile_holistic",
     "infer_care_holistic",
     "infer_care_profile_ai",

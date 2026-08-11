@@ -1,5 +1,20 @@
 "use client";
 
+import { useMemo } from "react";
+import {
+  Background,
+  Controls,
+  MarkerType,
+  ReactFlow,
+  type Edge,
+  type Node,
+  type NodeProps,
+  Handle,
+  Position,
+} from "@xyflow/react";
+import dagre from "@dagrejs/dagre";
+import "@xyflow/react/dist/style.css";
+
 import type { CareGraph, CareGraphNode } from "@/lib/api";
 import styles from "./CareLoadGraph.module.css";
 
@@ -14,16 +29,15 @@ const FALLBACK: Record<string, string> = {
   domain: "#8aa4b0",
 };
 
-function polar(cx: number, cy: number, r: number, angleRad: number) {
-  return {
-    x: cx + r * Math.cos(angleRad),
-    y: cy + r * Math.sin(angleRad),
-  };
-}
-
-function nodeColor(n: CareGraphNode): string {
-  return n.color || FALLBACK[n.kind] || FALLBACK.domain;
-}
+type CareNodeData = {
+  label: string;
+  kind: string;
+  color: string;
+  shape: "star" | "circle";
+  relationship?: string | null;
+  event_count?: number;
+  hint?: string | null;
+};
 
 function hexToRgba(hex: string, alpha: number): string {
   const h = hex.replace("#", "");
@@ -34,179 +48,226 @@ function hexToRgba(hex: string, alpha: number): string {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
-/** Shorten a directed segment so arrowheads sit on the node rim, not the center. */
-function edgeEndpoints(
-  ax: number,
-  ay: number,
-  bx: number,
-  by: number,
-  startPad: number,
-  endPad: number,
-): { x1: number; y1: number; x2: number; y2: number } {
-  const dx = bx - ax;
-  const dy = by - ay;
-  const len = Math.hypot(dx, dy) || 1;
-  const ux = dx / len;
-  const uy = dy / len;
+function starPath(cx: number, cy: number, outerR: number, innerR: number): string {
+  const points: string[] = [];
+  for (let i = 0; i < 10; i++) {
+    const r = i % 2 === 0 ? outerR : innerR;
+    const angle = -Math.PI / 2 + (i * Math.PI) / 5;
+    points.push(`${cx + r * Math.cos(angle)},${cy + r * Math.sin(angle)}`);
+  }
+  return `M ${points.join(" L ")} Z`;
+}
+
+function CarePersonNode({ data }: NodeProps<Node<CareNodeData>>) {
+  const d = data;
+  const color = d.color || FALLBACK.domain;
+  const rel = (d.relationship || "").trim();
+  const title = rel ? `${d.label} (${rel})` : d.label;
+
+  return (
+    <div className={styles.rfNode} title={title}>
+      <Handle type="target" position={Position.Top} className={styles.handle} />
+      <svg width={84} height={84} viewBox="0 0 84 84" aria-hidden>
+        {d.shape === "star" ? (
+          <path
+            d={starPath(42, 42, 34, 14)}
+            fill={hexToRgba(color, 0.32)}
+            stroke={color}
+            strokeWidth={2.5}
+          />
+        ) : (
+          <circle
+            cx={42}
+            cy={42}
+            r={32}
+            fill={hexToRgba(color, 0.28)}
+            stroke={color}
+            strokeWidth={2.5}
+          />
+        )}
+      </svg>
+      <div className={styles.rfLabel}>
+        <span className={styles.rfName}>{d.label}</span>
+        {rel ? <span className={styles.rfRel}>{rel}</span> : null}
+      </div>
+      <Handle type="source" position={Position.Bottom} className={styles.handle} />
+    </div>
+  );
+}
+
+const nodeTypes = { carePerson: CarePersonNode };
+
+function toFlowNode(n: CareGraphNode, shape: "star" | "circle"): Node {
   return {
-    x1: ax + ux * startPad,
-    y1: ay + uy * startPad,
-    x2: bx - ux * endPad,
-    y2: by - uy * endPad,
+    id: n.id,
+    type: "carePerson",
+    position: { x: 0, y: 0 },
+    data: {
+      label: n.label,
+      kind: n.kind,
+      color: n.color || FALLBACK[n.kind] || FALLBACK.domain,
+      shape,
+      relationship: n.relationship,
+      event_count: n.event_count,
+      hint: n.hint,
+    } satisfies CareNodeData,
+    sourcePosition: Position.Bottom,
+    targetPosition: Position.Top,
   };
 }
 
-function posFor(
-  id: string,
-  centerId: string,
-  nodes: CareGraphNode[],
-  cx: number,
-  cy: number,
-  radius: number,
-): { x: number; y: number } {
-  if (id === centerId) return { x: cx, y: cy };
-  const idx = nodes.findIndex((n) => n.id === id);
-  if (idx < 0) return { x: cx, y: cy };
-  const n = Math.max(nodes.length, 1);
-  const angle = -Math.PI / 2 + (idx / n) * 2 * Math.PI;
-  return polar(cx, cy, radius, angle);
+function layoutWithDagre(nodes: Node[], edges: Edge[]): Node[] {
+  const g = new dagre.graphlib.Graph();
+  g.setDefaultEdgeLabel(() => ({}));
+  g.setGraph({
+    rankdir: "TB",
+    nodesep: 40,
+    ranksep: 56,
+    marginx: 8,
+    marginy: 4,
+  });
+
+  const width = 140;
+  const height = 128;
+  for (const n of nodes) {
+    g.setNode(n.id, { width, height });
+  }
+  for (const e of edges) {
+    g.setEdge(e.source, e.target);
+  }
+  dagre.layout(g);
+
+  return nodes.map((n) => {
+    const pos = g.node(n.id);
+    return {
+      ...n,
+      position: {
+        x: (pos?.x ?? 0) - width / 2,
+        y: (pos?.y ?? 0) - height / 2,
+      },
+    };
+  });
+}
+
+function buildFlowElements(graph: CareGraph): { nodes: Node[]; edges: Edge[] } {
+  const roots =
+    graph.roots && graph.roots.length > 0 ? graph.roots : [graph.center];
+  const rootIds = new Set(roots.map((r) => r.id));
+  // Dependents only in nodes; older payloads may still nest stars in nodes.
+  const satellites = graph.nodes.filter((n) => !rootIds.has(n.id));
+
+  const nodes: Node[] = [
+    ...roots.map((r) =>
+      toFlowNode(r, (r.shape || "star").toLowerCase() === "circle" ? "circle" : "star"),
+    ),
+    ...satellites.map((n) =>
+      toFlowNode(n, (n.shape || "circle").toLowerCase() === "star" ? "star" : "circle"),
+    ),
+  ];
+
+  const edges: Edge[] = graph.edges.map((e, i) => {
+    const dashed = e.relation === "can_help";
+    const color = e.color || FALLBACK.domain;
+    return {
+      id: `${e.from_id}-${e.to_id}-${e.relation}-${i}`,
+      source: e.from_id,
+      target: e.to_id,
+      label: e.relation === "can_help" ? "helps" : undefined,
+      style: {
+        stroke: color,
+        strokeWidth: dashed ? 1.75 : 2.25,
+        strokeDasharray: dashed ? "6 4" : undefined,
+      },
+      markerEnd: {
+        type: MarkerType.ArrowClosed,
+        color,
+        width: 16,
+        height: 16,
+      },
+      animated: false,
+    };
+  });
+
+  return { nodes: layoutWithDagre(nodes, edges), edges };
 }
 
 export function CareLoadGraph({
   graph,
+  building = false,
 }: {
   graph: CareGraph | null | undefined;
+  building?: boolean;
 }) {
-  if (!graph || graph.nodes.length === 0) {
+  const empty =
+    !graph ||
+    ((!graph.roots || graph.roots.length === 0) &&
+      graph.nodes.length === 0 &&
+      !graph.center);
+
+  const { nodes, edges } = useMemo(() => {
+    if (!graph || empty) return { nodes: [] as Node[], edges: [] as Edge[] };
+    // Need at least center or some nodes
+    if (!graph.center && graph.nodes.length === 0) {
+      return { nodes: [] as Node[], edges: [] as Edge[] };
+    }
+    return buildFlowElements(graph);
+  }, [graph, empty]);
+
+  if (!graph || nodes.length === 0) {
     return (
       <section className={styles.wrap} aria-label="Care responsibilities">
         <h2 className={styles.title}>Care load</h2>
         <p className={styles.empty}>
-          Connect calendar or tell Level who you care for — names appear when titles,
-          past chats, or a note give them away.
+          {building
+            ? "Reading your calendar to map who you care for — this usually takes a few seconds. Refresh if it stays empty."
+            : "Connect calendar or tell Level who you care for — names appear when titles, past chats, or a note give them away."}
         </p>
       </section>
     );
   }
 
-  const w = 420;
-  const h = 380;
-  const cx = w / 2;
-  const cy = h / 2 - 6;
-  const radius = 128;
-  const centerR = 34;
-  const nodeR = 30;
-  const center = graph.center;
-  const nodes = graph.nodes;
   const categories = graph.categories ?? [];
-  const helpers = nodes.filter((n) => n.kind === "helper" && n.hint);
-
-  // Unique marker ids per edge color so arrowheads match the stroke.
-  const markerColors = Array.from(
-    new Set(graph.edges.map((e) => e.color || FALLBACK.domain)),
-  );
+  const helperHints = (graph.roots ?? [])
+    .concat(graph.nodes)
+    .filter((n) => n.kind === "helper" && n.hint);
 
   return (
     <section className={styles.wrap} aria-label="Care responsibilities">
       <h2 className={styles.title}>Care load</h2>
       <p className={styles.lead}>
-        Calendar events grouped into care roles — arrows show what you’re holding and who
-        can share the load.
+        Each star is a caregiver. Circles are people or loads in their care — Level
+        labels relationships from your calendar and notes.
       </p>
-      <svg
-        className={styles.svg}
-        viewBox={`0 0 ${w} ${h}`}
-        role="img"
-        aria-label="Directed responsibilities graph colored by care role"
-      >
-        <defs>
-          {markerColors.map((color) => {
-            const id = `arrow-${color.replace("#", "")}`;
-            return (
-              <marker
-                key={id}
-                id={id}
-                viewBox="0 0 12 12"
-                refX="10"
-                refY="6"
-                markerWidth="8"
-                markerHeight="8"
-                orient="auto"
-                markerUnits="userSpaceOnUse"
-              >
-                <path d="M 0 1 L 10 6 L 0 11 z" fill={color} />
-              </marker>
-            );
-          })}
-        </defs>
 
-        {graph.edges.map((e) => {
-          const a = posFor(e.from_id, center.id, nodes, cx, cy, radius);
-          const b = posFor(e.to_id, center.id, nodes, cx, cy, radius);
-          const startPad = e.from_id === center.id ? centerR : nodeR;
-          const endPad = e.to_id === center.id ? centerR : nodeR;
-          const { x1, y1, x2, y2 } = edgeEndpoints(a.x, a.y, b.x, b.y, startPad, endPad);
-          const color = e.color || FALLBACK.domain;
-          const markerId = `arrow-${color.replace("#", "")}`;
-          const dashed = e.relation === "can_help";
-          return (
-            <line
-              key={`${e.from_id}-${e.to_id}-${e.relation}`}
-              x1={x1}
-              y1={y1}
-              x2={x2}
-              y2={y2}
-              stroke={color}
-              strokeWidth={dashed ? 2 : 2.4}
-              strokeOpacity={0.9}
-              strokeDasharray={dashed ? "6 5" : undefined}
-              markerEnd={`url(#${markerId})`}
-            />
-          );
-        })}
+      <div className={styles.flowShell}>
+        <ReactFlow
+          nodes={nodes}
+          edges={edges}
+          nodeTypes={nodeTypes}
+          fitView
+          fitViewOptions={{ padding: 0.14, maxZoom: 1.25, minZoom: 0.65 }}
+          nodesDraggable
+          nodesConnectable={false}
+          elementsSelectable={false}
+          panOnDrag
+          zoomOnScroll={false}
+          preventScrolling={false}
+          proOptions={{ hideAttribution: true }}
+          minZoom={0.6}
+          maxZoom={1.4}
+          defaultEdgeOptions={{
+            style: { stroke: "rgba(168, 188, 198, 0.55)", strokeWidth: 2 },
+          }}
+        >
+          <Background gap={20} size={0.7} color="rgba(138, 164, 176, 0.1)" />
+          <Controls showInteractive={false} position="bottom-right" />
+        </ReactFlow>
+      </div>
 
-        <g>
-          <circle
-            cx={cx}
-            cy={cy}
-            r={centerR}
-            fill={hexToRgba(center.color || FALLBACK.you, 0.35)}
-            stroke={center.color || FALLBACK.you}
-            strokeWidth={2.5}
-          />
-          <text x={cx} y={cy + 5} textAnchor="middle" className={styles.nodeLabel}>
-            {center.label}
-          </text>
-        </g>
-
-        {nodes.map((n, idx) => {
-          const angle = -Math.PI / 2 + (idx / Math.max(nodes.length, 1)) * 2 * Math.PI;
-          const { x, y } = polar(cx, cy, radius, angle);
-          const color = nodeColor(n);
-          const label =
-            n.label.length > 12 ? `${n.label.slice(0, 11)}…` : n.label;
-          return (
-            <g key={n.id}>
-              <circle
-                cx={x}
-                cy={y}
-                r={nodeR}
-                fill={hexToRgba(color, 0.28)}
-                stroke={color}
-                strokeWidth={2.25}
-              />
-              <text x={x} y={y + (n.event_count ? 0 : 5)} textAnchor="middle" className={styles.nodeLabel}>
-                {label}
-              </text>
-              {n.event_count ? (
-                <text x={x} y={y + 14} textAnchor="middle" className={styles.nodeMeta}>
-                  {n.event_count} evt{n.event_count === 1 ? "" : "s"}
-                </text>
-              ) : null}
-            </g>
-          );
-        })}
-      </svg>
+      <p className={styles.shapeKey} aria-hidden="true">
+        <span className={styles.shapeStar}>★</span> caregiver root{" "}
+        <span className={styles.shapeCircle}>●</span> dependent / load
+      </p>
 
       {categories.length > 0 ? (
         <ul className={styles.legend} aria-label="Care role colors from calendar">
@@ -224,9 +285,9 @@ export function CareLoadGraph({
         </ul>
       ) : null}
 
-      {helpers.length > 0 ? (
+      {helperHints.length > 0 ? (
         <ul className={styles.hints}>
-          {helpers.map((h) => (
+          {helperHints.map((h) => (
             <li key={h.id}>
               <strong>{h.label}</strong>
               {h.hint ? ` — ${h.hint}` : ""}

@@ -262,7 +262,8 @@ function ProfileInner() {
 
         {profile?.conflict_summaries && profile.conflict_summaries.length > 0 ? (
           <p className={styles.conflictLine}>
-            Tension Level is watching: {profile.conflict_summaries[0]}
+            <span className={styles.conflictLabel}>Heads up</span>
+            {profile.conflict_summaries[0]}
           </p>
         ) : null}
 

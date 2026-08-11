@@ -161,11 +161,14 @@ def test_build_care_graph_star_with_helper() -> None:
     assert graph is not None
     assert graph.center.label == "You"
     assert graph.center.color == "#3DB8A0"
+    root_labels = {n.label for n in graph.roots}
     labels = {n.label for n in graph.nodes}
+    assert "You" in root_labels
+    assert "Alex" in root_labels  # co-parent is a caregiver root
     assert "Jordan" in labels
     assert "Mom" in labels
     assert "Work" in labels
-    assert "Alex" in labels
+    assert "Alex" not in labels  # not a dependent satellite
     jordan = next(n for n in graph.nodes if n.label == "Jordan")
     assert jordan.color == "#5B8EC9"
     assert jordan.event_count == 2  # soccer + pickup
@@ -177,7 +180,7 @@ def test_build_care_graph_star_with_helper() -> None:
     relations = {(e.from_id, e.to_id, e.relation) for e in graph.edges}
     assert any(r == "holds" for _, _, r in relations)
     assert any(r == "can_help" for _, _, r in relations)
-    helper = next(n for n in graph.nodes if n.kind == "helper")
+    helper = next(n for n in graph.roots if n.kind == "helper")
     assert helper.hint and "share" in helper.hint.lower()
     assert graph.categories
     assert any(c.role_id == "child_care" and c.event_count >= 2 for c in graph.categories)
@@ -293,6 +296,81 @@ def test_reconcile_exclusive_people_mom_stays_elder() -> None:
     mom_nodes = [n for n in graph.nodes if n.label == "Mom"]
     assert len(mom_nodes) == 1
     assert mom_nodes[0].kind == "elder"
+
+
+def test_holistic_collapses_papa_dad_robert_aliases() -> None:
+    """Calendar may say Papa / Dad / Robert — Care Profile keeps one elder."""
+    from level_core.profile.care_infer_llm import (
+        CareHolisticInfer,
+        CarePersonAssign,
+        CareRoleInfer,
+        care_profile_from_holistic,
+    )
+
+    inferred = CareHolisticInfer(
+        roles=[
+            CareRoleInfer(
+                role_id="elder_care",
+                salience=0.9,
+                weekly_load_hours=10,
+                people=["Papa", "Dad", "Robert"],
+                evidence="Dialysis and day program",
+                present=True,
+            ),
+            CareRoleInfer(
+                role_id="child_care",
+                salience=0.85,
+                weekly_load_hours=14,
+                people=["Nova", "Theo"],
+                evidence="Preschool and elementary",
+                present=True,
+            ),
+        ],
+        people=[
+            CarePersonAssign(
+                name="Robert",
+                role="elder_care",
+                evidence="Nephrology + dialysis titles",
+                also_known_as=["Papa", "Dad", "Robert Chen"],
+                relationship="parent",
+            ),
+            CarePersonAssign(
+                name="Nova",
+                role="child_care",
+                evidence="BrightStart",
+                relationship="child",
+            ),
+            CarePersonAssign(
+                name="Theo",
+                role="child_care",
+                evidence="Westlake",
+                relationship="child",
+            ),
+        ],
+        events=[],
+        conflicts=[],
+        facts=[],
+    )
+    care, _ = care_profile_from_holistic(
+        user_id="u1", inferred=inferred, previous=None, event_titles=[]
+    )
+    elder = next(r for r in care.roles if r.role_id is CareRoleId.ELDER_CARE)
+    assert elder.people == ["Robert"]
+    assert "Papa" not in elder.people
+    assert "Dad" not in elder.people
+    assert care.person_relationships.get("Robert") == "parent"
+    assert care.person_relationships.get("Theo") == "child"
+    graph = build_care_graph(care, events=[])
+    assert graph is not None
+    assert graph.center.shape == "star"
+    assert any(r.id == "you" for r in graph.roots)
+    robert = next(n for n in graph.nodes if n.label == "Robert")
+    assert robert.shape == "circle"
+    assert robert.relationship == "parent"
+    theo = next(n for n in graph.nodes if n.label == "Theo")
+    assert theo.relationship == "child"
+    # Caregiver stars are roots — not mixed into dependent nodes.
+    assert all((n.shape or "circle") != "star" for n in graph.nodes)
 
 
 def test_apply_holistic_inference_exclusive_and_hints() -> None:

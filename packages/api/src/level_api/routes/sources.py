@@ -65,7 +65,7 @@ from level_core.profile.synthesize import (
     refresh_profile_and_manifesto,
 )
 from level_core.schemas.base import _now_utc
-from level_core.schemas.care import CareGraph, CareProfile
+from level_core.schemas.care import CareGraph, CareProfile, clean_conflict_summaries
 from level_core.schemas.profile import BulletStatus, ProfileSnapshot
 from level_core.schemas.signal import Fact, Signal, SignalSource
 
@@ -185,13 +185,12 @@ async def _bg_enrich_care(
     By default only runs when calendar role hints are missing. Pass force=True
     after new memory (day check-in) so ambiguous titles get reclassified from
     context rather than regex.
+
+    If Care Profile is missing entirely but the agenda has events, create it
+    via AI infer (same as first Google onboard) — do not no-op.
     """
     try:
         care = await memory.manifestos.get_care_profile(user_id=user_id)
-        if care is None:
-            return
-        if care.calendar_role_by_summary and not force:
-            return
         state = await sync_store.get(user_id)
         if state is None or not state.events:
             return
@@ -201,6 +200,22 @@ async def _bg_enrich_care(
             if e.summary
         ]
         if not events:
+            return
+
+        # Empty profile after a failed onboard — create from agenda, don't skip.
+        if care is None or not care.roles:
+            snap = await _infer_persist_care_profile(
+                memory, user_id, events, embed=False
+            )
+            _logger.info(
+                "care_inferred_background",
+                user_id=user_id,
+                bullets=len(snap.bullets) if snap else 0,
+                events=len(events),
+            )
+            return
+
+        if care.calendar_role_by_summary and not force:
             return
         facts = await memory.facts.list_for_user(user_id=user_id, limit=100)
         snippets = [
@@ -784,8 +799,8 @@ async def _build_profile_response(
         except Exception:  # noqa: BLE001
             agenda_events = []
 
-    # Synced calendar but empty Care Profile → seed immediately (fast, no Gemini)
-    # so the care graph isn't blank. AI upgrades run in the background.
+    # Synced calendar but empty Care Profile → optional regex seed (env-gated).
+    # Always queue AI infer/enrich in the background so a failed onboard recovers.
     if sync_store is not None and agenda_events and (care is None or not care.roles):
         try:
             care = await _seed_care_from_agenda_fast(
@@ -813,31 +828,38 @@ async def _build_profile_response(
         except Exception:  # noqa: BLE001
             _logger.exception("care_seed_failed", user_id=user_id)
 
-    # Never block page loads on Gemini. Holistic AI owns event-role classification;
-    # refresh in the background when hints are missing or the profile is stale.
+    # Never block page loads on Gemini. Create or refresh Care Profile off-path.
     if (
-        care is not None
-        and agenda_events
+        agenda_events
         and background_tasks is not None
         and sync_store is not None
     ):
-        updated = care.updated_at
-        if updated is not None and updated.tzinfo is None:
-            updated = updated.replace(tzinfo=timezone.utc)
-        age = (
-            (datetime.now(tz=timezone.utc) - updated).total_seconds()
-            if updated is not None
-            else 10_000
-        )
-        missing_hints = not care.calendar_role_by_summary
-        if missing_hints or age > 120:
+        if care is None or not care.roles:
             background_tasks.add_task(
                 _bg_enrich_care,
                 user_id,
                 memory,
                 sync_store,
-                force=not missing_hints,
+                force=True,
             )
+        else:
+            updated = care.updated_at
+            if updated is not None and updated.tzinfo is None:
+                updated = updated.replace(tzinfo=timezone.utc)
+            age = (
+                (datetime.now(tz=timezone.utc) - updated).total_seconds()
+                if updated is not None
+                else 10_000
+            )
+            missing_hints = not care.calendar_role_by_summary
+            if missing_hints or age > 120:
+                background_tasks.add_task(
+                    _bg_enrich_care,
+                    user_id,
+                    memory,
+                    sync_store,
+                    force=not missing_hints,
+                )
 
     care_graph = None
     if care is not None:
@@ -858,7 +880,9 @@ async def _build_profile_response(
         care_profile_version=care.version if care else None,
         care_updated_at=care_updated,
         care_role_count=len(care.roles) if care else 0,
-        conflict_summaries=list(care.conflict_summaries[:4]) if care else [],
+        conflict_summaries=clean_conflict_summaries(
+            care.conflict_summaries if care else None
+        ),
         care_graph=care_graph,
     )
 
@@ -1146,7 +1170,7 @@ async def profile_chat(
         care_profile_version=care.version,
         care_updated_at=care.updated_at.isoformat() if care.updated_at else None,
         care_role_count=len(care.roles),
-        conflict_summaries=list(care.conflict_summaries[:4]),
+        conflict_summaries=clean_conflict_summaries(care.conflict_summaries),
         care_graph=care_graph,
     )
     return ProfileChatResponse(reply=reply, facts_added=facts_added, profile=profile)

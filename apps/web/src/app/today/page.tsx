@@ -121,6 +121,23 @@ function TodayInner() {
       .catch(() => undefined);
   }
 
+  // Care graph builds in the background after Google connect — soft-poll a few times.
+  useEffect(() => {
+    if (!today?.google_connected) return;
+    if (today.care_graph && today.care_graph.nodes.length > 0) return;
+    let cancelled = false;
+    const delays = [2500, 6000, 12000];
+    const timers = delays.map((ms) =>
+      window.setTimeout(() => {
+        if (!cancelled) void refreshToday();
+      }, ms),
+    );
+    return () => {
+      cancelled = true;
+      for (const t of timers) window.clearTimeout(t);
+    };
+  }, [today?.google_connected, today?.care_graph?.nodes?.length]);
+
   function clearSpeakTimer() {
     if (speakTimerRef.current != null) {
       window.clearTimeout(speakTimerRef.current);
@@ -472,7 +489,13 @@ function TodayInner() {
                 </TellLevelPanel>
               </div>
               <div className={styles.graphBlock}>
-                <CareLoadGraph graph={today?.care_graph} />
+                <CareLoadGraph
+                  graph={today?.care_graph}
+                  building={Boolean(
+                    today?.google_connected &&
+                      (!today.care_graph || today.care_graph.nodes.length === 0),
+                  )}
+                />
               </div>
             </div>
           </>
@@ -493,7 +516,7 @@ function TodayInner() {
                 </h1>
                 {today.holding && today.holding.length > 0 ? (
                   <p className={styles.holdingLine}>
-                    <span className={styles.holdingLabel}>Today you&rsquo;re holding</span>
+                    <span className={styles.holdingLabel}>Today&rsquo;s care</span>
                     <span className={styles.holdingChips}>
                       {today.holding.map((h, i) => (
                         <span key={`${h.role_id}-${h.label}`}>
@@ -543,7 +566,6 @@ function TodayInner() {
               style={{ marginTop: "0.5rem" }}
               onClick={() => {
                 const ch = today.pending_challenges![0];
-                setDecisionId(ch.decision_id);
                 if (ch.question) {
                   setItems((prev) => [
                     {

@@ -8,6 +8,8 @@ id sanitization) — never invent care roles with regex.
 Wrappers that belong here / nearby:
 - Calendar free-slot grounding (``commitment_gate._ground_availability_reply``)
 - Week load role classify (``care_infer_llm.classify_week_event_roles_ai``)
+- People consolidate (``care_infer_llm.consolidate_care_people_ai``) —
+  Papa/Dad/Robert → one elder when holistic still emits nickname duplicates
 - Schema cleanup on model JSON (HH:MM shape, by_days vs local_date conflict)
 - Outbound id leak strip (``_sanitize_message``)
 - Guardrails (Model Armor / local safety patterns)

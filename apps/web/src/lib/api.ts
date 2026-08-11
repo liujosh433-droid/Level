@@ -70,6 +70,10 @@ export type CareGraphNode = {
   role_id?: string | null;
   color?: string;
   event_count?: number;
+  /** star = caregiver/helper; circle = dependent or domain load */
+  shape?: string;
+  /** AI-inferred relationship phrase (parent, child, …) */
+  relationship?: string | null;
 };
 
 export type CareGraphEdge = {
@@ -89,6 +93,8 @@ export type CareGraphCategory = {
 
 export type CareGraph = {
   center: CareGraphNode;
+  /** Caregiver roots (You + co-parents/helpers). Falls back to [center]. */
+  roots?: CareGraphNode[];
   nodes: CareGraphNode[];
   edges: CareGraphEdge[];
   categories?: CareGraphCategory[];

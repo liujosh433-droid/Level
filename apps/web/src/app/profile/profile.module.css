@@ -10,7 +10,7 @@
 .sub {
   color: var(--mist);
   margin: 0 0 1.15rem;
-  max-width: min(68ch, 100%);
+  max-width: 100%;
   line-height: 1.5;
 }
 
@@ -19,7 +19,7 @@
   padding: 1rem 0 1.05rem;
   border-top: 1px solid var(--line);
   border-bottom: 1px solid var(--line);
-  max-width: min(68ch, 100%);
+  max-width: 100%;
 }
 
 .aboutKicker {
@@ -48,7 +48,7 @@
 .meta {
   color: var(--mist);
   margin: 0 0 1.15rem;
-  max-width: 48ch;
+  max-width: 100%;
 }
 
 .versionLine {
@@ -66,7 +66,18 @@
   background: linear-gradient(90deg, rgba(224, 163, 90, 0.1), transparent 75%);
   border-radius: 0 var(--radius) var(--radius) 0;
   line-height: 1.45;
-  max-width: min(68ch, 100%);
+  max-width: 100%;
+  font-size: 0.98rem;
+}
+
+.conflictLabel {
+  display: block;
+  font-size: 0.78rem;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--warn, #e0a35a);
+  margin-bottom: 0.25rem;
 }
 
 .manifesto {

@@ -22,7 +22,6 @@ from level_api.dependencies import (
 from level_api.routes.sources import (
     _bg_enrich_care,
     _seed_care_from_agenda_fast,
-    ensure_profile_from_agenda,
 )
 from level_core.auth.tokens import TokenStore
 from level_core.calendar.activity_art import activity_color, infer_activity_kind
@@ -39,6 +38,7 @@ from level_core.models.base import GenerationRequest
 from level_core.models.factory import build_gemini_client
 from level_core.observability.logger import get_logger
 from level_core.profile.care_infer_llm import classify_week_event_roles_ai
+from level_core.schemas.care import clean_conflict_summaries
 from level_core.profile.synthesize import (
     build_holding_summary,
     build_week_role_load,
@@ -514,21 +514,14 @@ async def get_today(
             or not care.roles
             or not care.calendar_role_by_summary
         ):
-            if care is None or not care.roles:
-                background_tasks.add_task(
-                    ensure_profile_from_agenda,
-                    user_id=user_id,
-                    memory=memory,
-                    sync_store=sync_store,
-                )
-            else:
-                background_tasks.add_task(
-                    _bg_enrich_care,
-                    user_id,
-                    memory,
-                    sync_store,
-                    force=True,
-                )
+            # Missing care OR missing role hints — same bg path creates or enriches.
+            background_tasks.add_task(
+                _bg_enrich_care,
+                user_id,
+                memory,
+                sync_store,
+                force=True,
+            )
         # Opt-in regex seed only (LEVEL_ALLOW_HEURISTIC_CARE=1).
         if (care is None or not care.roles) and agenda_events:
             care = await _seed_care_from_agenda_fast(
@@ -568,7 +561,7 @@ async def get_today(
                 WeekRoleLoad.model_validate(row)
                 for row in build_week_role_load(care, agenda_events)
             ]
-            conflict_summaries = list(care.conflict_summaries[:3])
+            conflict_summaries = clean_conflict_summaries(care.conflict_summaries)[:3]
     except Exception:  # noqa: BLE001
         _logger.warning("care_graph_failed", user_id=user_id)
 

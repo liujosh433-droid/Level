@@ -7,6 +7,7 @@ and is the primary grounding for role-theft challenges.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from enum import Enum
 
@@ -14,6 +15,36 @@ from pydantic import Field
 
 from level_core.schemas.base import TraceableModel, _new_id, _now_utc
 from level_core.schemas.profile import BulletStatus
+
+# Drop meta / empty conflict blurbs that sound like system status, not evidence.
+_VAGUE_CONFLICT = re.compile(
+    r"(indicates a conflict|other obligations|level is watching|"
+    r"\bcollision day\b|watch for care collisions|tension level|"
+    r"conflict with other|potential conflict|may indicate)",
+    re.IGNORECASE,
+)
+_CONFLICT_PREFIX = re.compile(
+    r"^(?:tension|care collision|conflict|heads up)\s*[:—\-]\s*",
+    re.IGNORECASE,
+)
+
+
+def clean_conflict_summaries(items: list[str] | None) -> list[str]:
+    """Keep short, human conflict lines; drop jargon-only fluff."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in items or []:
+        s = _CONFLICT_PREFIX.sub("", " ".join((raw or "").strip().split()))
+        if len(s) < 16 or _VAGUE_CONFLICT.search(s):
+            continue
+        key = s.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(s[:200])
+        if len(out) >= 4:
+            break
+    return out
 
 
 class CareRoleId(str, Enum):
@@ -108,13 +139,18 @@ class CareProfile(TraceableModel):
     )
     # Occasional helpers (friends/neighbors) — edges point at care recipients, not You→holds.
     helpers: list[CareHelper] = Field(default_factory=list)
+    # AI-inferred how each named person relates to the caregiver (parent, child, …).
+    person_relationships: dict[str, str] = Field(
+        default_factory=dict,
+        description="Canonical person name → short relationship phrase from Care infer.",
+    )
 
 
 class CareGraphNode(TraceableModel):
     """One node in the Profile responsibilities graph."""
 
     id: str
-    label: str = Field(max_length=80)
+    label: str = Field(max_length=100)
     kind: str = Field(
         description="you | child | elder | work | recovery | logistics | helper | domain",
     )
@@ -125,6 +161,15 @@ class CareGraphNode(TraceableModel):
     )
     color: str = Field(default="#8aa4b0", max_length=16)
     event_count: int = Field(default=0, ge=0)
+    shape: str = Field(
+        default="circle",
+        description="star = caregiver / helper; circle = dependent or domain load",
+    )
+    relationship: str | None = Field(
+        default=None,
+        max_length=48,
+        description="AI relationship phrase for person nodes (parent, child, …).",
+    )
 
 
 class CareGraphEdge(TraceableModel):
@@ -147,9 +192,12 @@ class CareGraphCategory(TraceableModel):
 
 
 class CareGraph(TraceableModel):
-    """Star graph of responsibilities derived from a Care Profile + calendar."""
+    """Care responsibilities graph: caregiver roots + dependent / load nodes."""
 
     center: CareGraphNode
+    # Caregiver roots (You + co-parents/helpers). Includes center; UI lays these out first.
+    roots: list[CareGraphNode] = Field(default_factory=list)
+    # Dependents + domain loads (not caregiver roots).
     nodes: list[CareGraphNode] = Field(default_factory=list)
     edges: list[CareGraphEdge] = Field(default_factory=list)
     categories: list[CareGraphCategory] = Field(default_factory=list)
@@ -171,7 +219,7 @@ def care_profile_snippet(profile: CareProfile | None, *, max_chars: int = 800) -
     roles = active_care_roles(profile)
     if not roles:
         return ""
-    lines: list[str] = ["Care roles you hold (caregiver load):"]
+    lines: list[str] = ["Care roles I provide (caregiver load):"]
     for role in sorted(roles, key=lambda r: r.salience, reverse=True)[:6]:
         people = f" ({', '.join(role.people)})" if role.people else ""
         windows = ""
@@ -205,4 +253,5 @@ __all__ = [
     "ProtectedWindow",
     "active_care_roles",
     "care_profile_snippet",
+    "clean_conflict_summaries",
 ]

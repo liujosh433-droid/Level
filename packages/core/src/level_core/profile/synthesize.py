@@ -20,6 +20,7 @@ from level_core.schemas.care import (
     CareRoleState,
     ProtectedWindow,
     active_care_roles,
+    clean_conflict_summaries,
 )
 from level_core.schemas.profile import (
     BulletCategory,
@@ -178,7 +179,7 @@ def build_manifesto_from_care_profile(profile: CareProfile) -> tuple[str, list[s
     roles.sort(key=lambda r: r.salience, reverse=True)
     if not roles:
         return (
-            "Still learning which caregiver roles you hold when the week gets hard.",
+            "Still learning which caregiver roles I provide when the week gets hard.",
             [],
         )
     top = roles[:4]
@@ -189,7 +190,7 @@ def build_manifesto_from_care_profile(profile: CareProfile) -> tuple[str, list[s
         labels.append(f"{role.label}{people}")
         source_ids.extend(role.source_fact_ids[:2])
     lines = [
-        "As a caregiver, the roles you hold look like:",
+        "As a caregiver, my roles look like:",
         *[f"• {label}" for label in labels],
     ]
     if profile.conflict_summaries:
@@ -215,13 +216,13 @@ def build_manifesto_statement(facts: list[Fact]) -> tuple[str, list[str]]:
     priorities.sort(key=lambda f: f.salience, reverse=True)
     if not priorities:
         return (
-            "Still learning which caregiver roles you hold when the week gets hard.",
+            "Still learning which caregiver roles I provide when the week gets hard.",
             [],
         )
     top = priorities[:3]
     labels = [f.statement.rstrip(".") for f in top]
     lines = [
-        "As a caregiver, the roles you hold look like:",
+        "As a caregiver, my roles look like:",
         *[f"• {label}" for label in labels],
     ]
     return "\n".join(lines)[:4000], [f.fact_id for f in top]
@@ -1226,7 +1227,7 @@ def build_care_graph(
     profile: CareProfile | None,
     events: list[dict[str, str | None]] | None = None,
 ) -> CareGraph | None:
-    """Star graph: You → people/roles; colored by care role; sized by calendar counts."""
+    """Care graph: caregiver roots (You + helpers) → dependents / domain loads."""
     # Prefer AI people assignment already on the profile; still enforce exclusivity.
     if profile is not None:
         from level_core.profile.care_infer_llm import reconcile_exclusive_people
@@ -1266,12 +1267,25 @@ def build_care_graph(
     if not roles:
         return None
 
+    rel_map = dict(profile.person_relationships) if profile else {}
+
+    def _person_rel(name: str) -> str | None:
+        if not name:
+            return None
+        if name in rel_map and rel_map[name].strip():
+            return rel_map[name].strip()[:48]
+        for key, val in rel_map.items():
+            if key.lower() == name.lower() and val.strip():
+                return val.strip()[:48]
+        return None
+
     center = CareGraphNode(
         id="you",
         label="You",
         kind="you",
         color=CARE_YOU_COLOR,
         role_id=None,
+        shape="star",
     )
     nodes: list[CareGraphNode] = []
     edges: list[CareGraphEdge] = []
@@ -1308,14 +1322,17 @@ def build_care_graph(
             if role.people:
                 for person in role.people[:3]:
                     nid = f"child-{person.lower()}"
+                    pref = _person_rel(person)
                     _add(
                         CareGraphNode(
                             id=nid,
-                            label=person,
+                            label=person[:100],
                             kind="child",
                             role_id=role.role_id.value,
                             color=color,
                             event_count=count,
+                            shape="circle",
+                            relationship=pref,
                         ),
                         from_id="you",
                         relation="holds",
@@ -1332,6 +1349,7 @@ def build_care_graph(
                         role_id=role.role_id.value,
                         color=color,
                         event_count=count,
+                        shape="circle",
                     ),
                     from_id="you",
                     relation="holds",
@@ -1342,14 +1360,17 @@ def build_care_graph(
             labels = role.people[:2] or ["Elder care"]
             for person in labels:
                 nid = f"elder-{person.lower().replace(' ', '-')}"
+                pref = _person_rel(person) if role.people else None
                 _add(
                     CareGraphNode(
                         id=nid,
-                        label=person if role.people else role.label,
+                        label=(person if role.people else role.label)[:100],
                         kind="elder",
                         role_id=role.role_id.value,
                         color=color,
                         event_count=count,
+                        shape="circle",
+                        relationship=pref,
                     ),
                     from_id="you",
                     relation="holds",
@@ -1364,6 +1385,7 @@ def build_care_graph(
                     role_id=role.role_id.value,
                     color=color,
                     event_count=count,
+                    shape="circle",
                 ),
                 from_id="you",
                 relation="carries",
@@ -1378,6 +1400,7 @@ def build_care_graph(
                     role_id=role.role_id.value,
                     color=color,
                     event_count=count,
+                    shape="circle",
                 ),
                 from_id="you",
                 relation="holds",
@@ -1392,28 +1415,32 @@ def build_care_graph(
                     role_id=role.role_id.value,
                     color=color,
                     event_count=count,
+                    shape="circle",
                 ),
                 from_id="you",
                 relation="carries",
                 role_id=role.role_id,
             )
         elif role.role_id is CareRoleId.PARTNER_COPARENT:
-            label = role.people[0] if role.people else "Co-parent"
-            nid = f"helper-{label.lower().replace(' ', '-')}"
-            _add(
-                CareGraphNode(
-                    id=nid,
-                    label=label,
-                    kind="helper",
-                    hint="May share child-care load",
-                    role_id=role.role_id.value,
-                    color=color,
-                    event_count=count,
-                ),
-                from_id="you",
-                relation="coordinates",
-                role_id=role.role_id,
-            )
+            # Co-parent is their own caregiver root (not a satellite of You).
+            name = role.people[0] if role.people else "Co-parent"
+            pref = _person_rel(name) if role.people else None
+            nid = f"helper-{name.lower().replace(' ', '-')}"
+            if nid not in seen:
+                nodes.append(
+                    CareGraphNode(
+                        id=nid,
+                        label=name[:100],
+                        kind="helper",
+                        hint="May share child-care load",
+                        role_id=role.role_id.value,
+                        color=color,
+                        event_count=count,
+                        shape="star",
+                        relationship=pref,
+                    )
+                )
+                seen.add(nid)
             help_color = CARE_ROLE_COLORS[CareRoleId.CHILD_CARE]
             for cid in child_node_ids[:3]:
                 edges.append(
@@ -1426,7 +1453,7 @@ def build_care_graph(
                     )
                 )
 
-    # Occasional helpers (friends/neighbors): arrow points at who they help — not You→holds.
+    # Occasional helpers (friends/neighbors): own roots; arrows to who they help.
     if profile is not None:
         help_color = CARE_ROLE_COLORS[CareRoleId.CHILD_CARE]
         helper_color = CARE_ROLE_COLORS[CareRoleId.PARTNER_COPARENT]
@@ -1434,15 +1461,18 @@ def build_care_graph(
             label = (helper.name or "").strip() or "Friend"
             nid = f"helper-{label.lower().replace(' ', '-')}"
             if nid not in seen:
+                pref = _person_rel(label)
                 nodes.append(
                     CareGraphNode(
                         id=nid,
-                        label=label,
+                        label=label[:100],
                         kind="helper",
                         hint=helper.hint or "Occasionally helps with care",
                         role_id=None,
                         color=helper_color,
                         event_count=0,
+                        shape="star",
+                        relationship=pref,
                     )
                 )
                 seen.add(nid)
@@ -1500,9 +1530,16 @@ def build_care_graph(
                 )
             )
 
+    # Partition: caregiver stars are roots; circles hang under them in the UI.
+    caregiver_roots = [center] + [
+        n for n in nodes if (n.shape or "").lower() == "star"
+    ]
+    dependent_nodes = [n for n in nodes if (n.shape or "").lower() != "star"]
+
     return CareGraph(
         center=center,
-        nodes=nodes,
+        roots=caregiver_roots,
+        nodes=dependent_nodes,
         edges=unique_edges,
         categories=categories,
     )
@@ -1705,7 +1742,6 @@ def _infer_care_profile_heuristic_impl(
     elder_hits: Counter[str] = Counter()
     partner_hits: Counter[str] = Counter()
     work_hours: list[int] = []
-    late_work = 0
     health_n = 0
     sleep_n = 0
     logistics_n = 0
@@ -1750,8 +1786,6 @@ def _infer_care_profile_heuristic_impl(
             ):
                 if hour is not None:
                     work_hours.append(hour)
-                    if hour >= 16:
-                        late_work += 1
                 else:
                     work_hours.append(19)
         elif work_re.search(summary):
@@ -1759,8 +1793,6 @@ def _infer_care_profile_heuristic_impl(
                 work_hours.append(hour)
             elif hour is None:
                 work_hours.append(9)
-            if hour is not None and hour >= 16:
-                late_work += 1
         if health_re.search(summary) and not class_re.search(summary):
             health_n += 1
         if sleep_re.search(summary):
@@ -1941,17 +1973,6 @@ def _infer_care_profile_heuristic_impl(
         )
         roles.append(_merge_role_feedback(role, previous))
 
-    conflicts: list[str] = []
-    role_ids = {r.role_id for r in roles}
-    if CareRoleId.CHILD_CARE in role_ids and CareRoleId.PAID_WORK in role_ids and late_work >= 2:
-        conflicts.append(
-            "Work/Job is leaning into late blocks that can crowd out child care pickups."
-        )
-    if CareRoleId.CHILD_CARE in role_ids and CareRoleId.SELF_RECOVERY in role_ids and late_n >= 3:
-        conflicts.append(
-            "Late evenings pile onto child care — self & recovery is the first role to erode."
-        )
-
     # Deduplicate facts
     seen: set[str] = set()
     unique: list[Fact] = []
@@ -1968,7 +1989,7 @@ def _infer_care_profile_heuristic_impl(
         roles=roles,
         version=version,
         updated_at=datetime.now(tz=timezone.utc),
-        conflict_summaries=conflicts,
+        conflict_summaries=list(previous.conflict_summaries) if previous else [],
     )
     return profile, unique[:8]
 
@@ -2028,18 +2049,30 @@ def build_about_summary(
     roles = active_care_roles(care_profile) if care_profile else []
     role_bits: list[str] = []
     for role in sorted(roles, key=lambda r: r.salience, reverse=True)[:4]:
-        if role.people:
-            role_bits.append(f"{role.label.lower()} for {', '.join(role.people[:2])}")
+        people = ", ".join(role.people[:2]) if role.people else ""
+        if role.role_id is CareRoleId.CHILD_CARE and people:
+            role_bits.append(f"child care for {people}")
+        elif role.role_id is CareRoleId.ELDER_CARE and people:
+            role_bits.append(f"elder care for {people}")
+        elif role.role_id is CareRoleId.PARTNER_COPARENT and people:
+            role_bits.append(f"co-parenting with {people}")
+        elif role.role_id is CareRoleId.PAID_WORK:
+            role_bits.append("work")
+        elif role.role_id is CareRoleId.SELF_RECOVERY:
+            role_bits.append("my own recovery")
+        elif role.people:
+            role_bits.append(f"{role.label.lower()} for {people}")
         else:
             role_bits.append(role.label.lower())
     if role_bits:
+        # First person + "provide" — concrete care language, not "hold/carry".
         if len(role_bits) == 1:
-            sentences.append(f"You're holding {role_bits[0]}.")
+            sentences.append(f"I provide {role_bits[0]}.")
         elif len(role_bits) == 2:
-            sentences.append(f"You're holding {role_bits[0]} and {role_bits[1]}.")
+            sentences.append(f"I provide {role_bits[0]} and {role_bits[1]}.")
         else:
             sentences.append(
-                "You're holding "
+                "I provide "
                 + ", ".join(role_bits[:-1])
                 + f", and {role_bits[-1]}."
             )
@@ -2048,102 +2081,42 @@ def build_about_summary(
     if helpers:
         names = [h.name for h in helpers[:3] if h.name]
         if len(names) == 1:
-            sentences.append(f"{names[0]} sometimes helps with care load.")
+            sentences.append(f"{names[0]} sometimes helps me with care.")
         elif names:
-            sentences.append(f"{', '.join(names)} sometimes help with care load.")
+            sentences.append(f"{', '.join(names)} sometimes help me with care.")
 
-    # Only surface personality / style / interests when facts explicitly support them.
-    style_hits: list[str] = []
-    interest_hits: list[str] = []
-    personality_hits: list[str] = []
+    # Project AI conflict copy + short memory facts as-written — no keyword personality maps.
+    conflicts = clean_conflict_summaries(
+        care_profile.conflict_summaries if care_profile else None
+    )
+    if conflicts:
+        conflict = conflicts[0]
+        if len(conflict) <= 160:
+            sentences.append(
+                conflict if conflict.endswith((".", "!", "?")) else f"{conflict}."
+            )
+
+    fact_bits: list[str] = []
     for fact in facts:
-        stmt = (fact.statement or "").strip()
-        if len(stmt) < 12:
+        if fact.type not in {
+            FactType.PREFERENCE,
+            FactType.CONSTRAINT,
+            FactType.VALUE_STATEMENT,
+            FactType.CONCERN,
+        }:
             continue
-        low = stmt.lower()
-        # Communication / answer style
-        if any(
-            k in low
-            for k in (
-                "concise",
-                "short answer",
-                "brief",
-                "spoken",
-                "while driving",
-                "in the car",
-                "audio",
-                "no lecture",
-                "don't lecture",
-                "direct answer",
-                "prefers concise",
-                "prefer concise",
-                "prefer short",
-                "prefers short",
-            )
-        ):
-            if "spoken" in low or "car" in low or "audio" in low or "driving" in low:
-                style_hits.append("short spoken updates")
-            elif "lecture" in low:
-                style_hits.append("concrete tradeoffs over lectures")
-            else:
-                style_hits.append("concise answers")
-        # Interests (require like/enjoy/interest wording — don't invent from calendar alone)
-        if fact.type is FactType.PREFERENCE or any(
-            k in low for k in (" likes ", " like ", "enjoys", "interest", "into cooking", "loves ")
-        ):
-            if any(k in low for k in ("cook", "cooking", "meal")):
-                interest_hits.append("cooking")
-            if any(k in low for k in ("walk", "hiking", "run")):
-                interest_hits.append("walks")
-            if any(k in low for k in ("soccer",)):
-                interest_hits.append("soccer")
-        # Personality / temperament — only explicit language
-        if any(
-            k in low
-            for k in (
-                "anxious",
-                "overwhelmed",
-                "practical",
-                "direct",
-                "guilt",
-                "over-accommodate",
-                "overaccommodate",
-            )
-        ):
-            if "anxious" in low or "overwhelm" in low:
-                personality_hits.append("gets stretched when calendars collide")
-            if "practical" in low or "direct" in low:
-                personality_hits.append("practical and direct")
-            if "over-accommodate" in low or "overaccommodate" in low or "accommodate" in low:
-                personality_hits.append("tends to accommodate work before protecting family time")
-
-    def _uniq(items: list[str], *, limit: int = 2) -> list[str]:
-        out: list[str] = []
-        seen: set[str] = set()
-        for item in items:
-            key = item.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append(item)
-            if len(out) >= limit:
-                break
-        return out
-
-    styles = _uniq(style_hits)
-    if styles:
-        sentences.append(f"Prefers {styles[0]}" + (f" and {styles[1]}" if len(styles) > 1 else "") + ".")
-
-    interests = _uniq(interest_hits)
-    if interests:
-        if len(interests) == 1:
-            sentences.append(f"Outside the grind: {interests[0]}.")
-        else:
-            sentences.append(f"Outside the grind: {' and '.join(interests)}.")
-
-    traits = _uniq(personality_hits, limit=2)
-    if traits:
-        sentences.append(traits[0].capitalize() + (f"; {traits[1]}" if len(traits) > 1 else "") + ".")
+        if fact.confidence < 0.6:
+            continue
+        if _is_analytics_statement(fact.statement):
+            continue
+        stmt = " ".join((fact.statement or "").split()).strip().rstrip(".")
+        if not (24 <= len(stmt) <= 110):
+            continue
+        fact_bits.append(stmt)
+        if len(fact_bits) >= 2:
+            break
+    for bit in fact_bits:
+        sentences.append(bit if bit.endswith(("!", "?")) else f"{bit}.")
 
     if not sentences:
         return None

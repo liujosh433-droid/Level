@@ -30,8 +30,8 @@
 @media (min-width: 900px) {
   .workspace {
     display: grid;
-    grid-template-columns: minmax(0, 1.5fr) minmax(20rem, 1fr);
-    gap: 1.75rem 2.5rem;
+    grid-template-columns: minmax(0, 3fr) minmax(18rem, 2fr);
+    gap: 1.75rem 2rem;
     align-items: start;
   }
 

@@ -29,27 +29,126 @@
   line-height: 1.45;
 }
 
-.svg {
-  display: block;
+.flowShell {
   width: 100%;
-  max-width: none;
-  min-height: 16rem;
-  height: auto;
-  margin: 0 auto;
+  height: clamp(15rem, 38vh, 20rem);
+  min-height: 15rem;
+  border-radius: 0;
+  overflow: hidden;
+  background: transparent;
+  border: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
-.nodeLabel {
-  font-size: 11px;
-  font-weight: 650;
+.flowShell :global(.react-flow) {
+  background: transparent !important;
+}
+
+.flowShell :global(.react-flow__renderer),
+.flowShell :global(.react-flow__viewport),
+.flowShell :global(.react-flow__pane) {
+  background: transparent !important;
+}
+
+.flowShell :global(.react-flow__node) {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  padding: 0 !important;
+  border-radius: 0 !important;
+}
+
+.flowShell :global(.react-flow__node.selected),
+.flowShell :global(.react-flow__node:focus),
+.flowShell :global(.react-flow__node:focus-visible) {
+  box-shadow: none !important;
+  outline: none !important;
+}
+
+.flowShell :global(.react-flow__edge-path) {
+  stroke-width: 2;
+}
+
+.flowShell :global(.react-flow__attribution) {
+  display: none;
+}
+
+.flowShell :global(.react-flow__controls) {
+  box-shadow: none;
+  border: 1px solid rgba(138, 164, 176, 0.28);
+  border-radius: 8px;
+  overflow: hidden;
+  background: transparent;
+}
+
+.flowShell :global(.react-flow__controls-button) {
+  background: rgba(12, 24, 28, 0.55);
+  border-bottom-color: rgba(138, 164, 176, 0.2);
   fill: var(--foam);
-  pointer-events: none;
+  width: 1.65rem;
+  height: 1.65rem;
 }
 
-.nodeMeta {
-  font-size: 9px;
+.rfNode {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 128px;
+  cursor: grab;
+  background: transparent;
+  box-shadow: none;
+}
+
+.rfLabel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.12rem;
+  margin-top: 0.1rem;
+  text-align: center;
+  max-width: 7.5rem;
+}
+
+.rfName {
+  font-family: var(--font-display);
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--foam);
+  line-height: 1.15;
+  word-break: break-word;
+}
+
+.rfRel {
+  font-size: 0.85rem;
   font-weight: 500;
-  fill: var(--mist);
-  pointer-events: none;
+  color: var(--mist);
+  line-height: 1.15;
+  word-break: break-word;
+}
+
+.handle {
+  width: 6px !important;
+  height: 6px !important;
+  min-width: 6px !important;
+  min-height: 6px !important;
+  background: transparent !important;
+  border: none !important;
+  opacity: 0;
+}
+
+.shapeKey {
+  margin: 0.4rem 0 0;
+  color: var(--mist);
+  font-size: 0.78rem;
+  letter-spacing: 0.01em;
+}
+
+.shapeStar,
+.shapeCircle {
+  color: var(--foam);
+  margin: 0 0.15rem 0 0.35rem;
 }
 
 .legend {
@@ -86,11 +185,11 @@
   margin: 0.65rem 0 0;
   padding: 0;
   color: var(--mist);
-  font-size: 0.85rem;
+  font-size: 0.82rem;
   line-height: 1.4;
 }
 
-.hints li {
+.hints li + li {
   margin-top: 0.25rem;
 }
 

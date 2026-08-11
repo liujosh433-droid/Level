@@ -1,4 +1,4 @@
-"""Today reminders must be day-of + profile-grounded — not calendar analytics."""
+"""Today reminders come from event cues — not invented profile/fact copy."""
 
 from __future__ import annotations
 
@@ -73,7 +73,8 @@ def test_cue_for_soccer_becomes_reminder() -> None:
     assert "repeatedly" not in recs[0].lower()
 
 
-def test_profile_note_matching_today_event() -> None:
+def test_profile_note_alone_does_not_become_reminder() -> None:
+    """Matching notes used to invent Remember: tips — cues own day tips now."""
     recs = build_recommendations(
         today_events=[
             {
@@ -87,9 +88,7 @@ def test_profile_note_matching_today_event() -> None:
         ),
         facts=[],
     )
-    assert len(recs) == 1
-    assert "shoes" in recs[0].lower()
-    assert "soccer" in recs[0].lower() or "Remember" in recs[0]
+    assert recs == []
 
 
 def test_unrelated_profile_note_ignored() -> None:
@@ -107,7 +106,7 @@ def test_unrelated_profile_note_ignored() -> None:
     assert recs == []
 
 
-def test_matching_fact_becomes_reminder() -> None:
+def test_matching_fact_alone_does_not_become_reminder() -> None:
     fact = Fact(
         fact_id="f1",
         user_id="u1",
@@ -126,5 +125,70 @@ def test_matching_fact_becomes_reminder() -> None:
         snapshot=None,
         facts=[fact],
     )
+    assert recs == []
+
+
+def test_care_role_inventory_never_becomes_reminder() -> None:
+    """Care graph evidence / role bullets are not day tips."""
+    role_snap = ProfileSnapshot(
+        user_id="u1",
+        bullets=[
+            ProfileBullet(
+                bullet_id="r1",
+                category=BulletCategory.ROLE,
+                text="Child care with Theo, Nova",
+                status=BulletStatus.ACCEPTED,
+                care_role_id="child_care",
+            )
+        ],
+        needs_review=False,
+    )
+    dump = Fact(
+        fact_id="f_dump",
+        user_id="u1",
+        type=FactType.COMMITMENT,
+        statement=(
+            "I hold Numerous work-related entries including "
+            "'Interview panel', 'Standup', 'sync w/ CareOps'"
+        ),
+        confidence=0.9,
+        written_by="care_infer@v2",
+    )
+    recs = build_recommendations(
+        today_events=[
+            {
+                "summary": "Standup",
+                "start": "2026-08-10T09:00:00-07:00",
+                "cues": [],
+            },
+            {
+                "summary": "Theo dentist (cleaning)",
+                "start": "2026-08-10T15:30:00-07:00",
+                "cues": [],
+            },
+        ],
+        snapshot=role_snap,
+        facts=[dump],
+    )
+    assert recs == []
+
+
+def test_reminder_not_ellipsis_truncated() -> None:
+    long_cue = (
+        "Bring Theo's retainer case and the insurance card for the dentist visit "
+        "after school pickup — do not leave them in the car."
+    )
+    recs = build_recommendations(
+        today_events=[
+            {
+                "summary": "Theo dentist (cleaning)",
+                "start": "2026-08-10T15:30:00-07:00",
+                "cues": [long_cue],
+            }
+        ],
+        snapshot=None,
+        facts=[],
+    )
     assert len(recs) == 1
-    assert "inhaler" in recs[0].lower()
+    assert "…" not in recs[0]
+    assert "insurance card" in recs[0].lower()

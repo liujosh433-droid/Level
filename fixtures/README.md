@@ -16,7 +16,25 @@ Google Calendar **does not keep per-event colors** from a single `.ics` import. 
 
 `sample_busy_parent.ics` is the all-in-one file (same events, with `CATEGORIES` tags) if you prefer a single calendar.
 
-### Import (color-coded)
+## Sample busy caregiver — Casey (alt persona)
+
+File: **`sample_busy_caregiver_casey.ics`** (single import).
+
+Persona: **Casey** — sandwich caregiver. Kids **Nova** (preschool) + **Theo** (elementary), aging dad **Robert / Papa** (dialysis + day program), co-parent **Morgan**, job at **Northwind Health** (care coordination / social work).
+
+Dates: ~Aug 4 – Sep 4, 2026 (Pacific) — covers “today” around mid-Aug for fresh-account testing.
+
+Titles are intentionally messy (abbreviations, vague “Meeting” / “Pickup”, ALL-CAPS holds, work vs personal lookalikes) so you can see how Care Profile + week load classify without the clean Maya/Jordan wording.
+
+### Import (Casey)
+
+1. Google Calendar → Settings → **Import & export**
+2. Import `sample_busy_caregiver_casey.ics` → new calendar e.g. `Level — Casey sample`
+3. New Level account → Connect Google → Bring in my week
+
+Tip: Don’t import both Maya and Casey onto the same Google account if you want a clean A/B — use a fresh calendar or a second Google user.
+
+### Import (Maya — color-coded)
 
 1. Open [Google Calendar](https://calendar.google.com) → Settings → **Import & export**
 2. Import `sample_busy_parent_kid.ics` → create/use a calendar named e.g. `Level — Kid`

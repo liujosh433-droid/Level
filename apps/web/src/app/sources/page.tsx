@@ -1,16 +1,16 @@
 "use client";
 
 import Image from "next/image";
-import { FormEvent, Suspense, useEffect, useRef, useState } from "react";
+import { FormEvent, Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
 import { AuthError, ensureSession, fetchGoogleSyncStatus, fetchMe, getApiBase } from "@/lib/api";
 import styles from "./sources.module.css";
 
 const CHATGPT_STEPS = [
-  "Open ChatGPT and tap your profile picture.",
-  "Go to Settings → Data controls → Export data.",
-  "Open the email, download the file, then choose it here.",
+  "In ChatGPT, open Settings → Personalization → Memory (or ask: “What do you remember about me?”).",
+  "Copy the memory summary — especially family, work, and caregiving bits.",
+  "Paste it below. Level keeps what’s relevant to your care roles.",
 ] as const;
 
 const SYNC_BEATS = [
@@ -46,8 +46,7 @@ function SourcesInner() {
   const [syncElapsed, setSyncElapsed] = useState(0);
   const [syncProgress, setSyncProgress] = useState(10);
   const [syncLabel, setSyncLabel] = useState(SYNC_BEATS[0].label);
-  const [exportName, setExportName] = useState<string | null>(null);
-  const exportInputRef = useRef<HTMLInputElement | null>(null);
+  const [memoryPaste, setMemoryPaste] = useState("");
 
   useEffect(() => {
     const fromOAuth = params.get("connected") === "1";
@@ -162,24 +161,37 @@ function SourcesInner() {
 
   async function onChatGPT(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
+    const text = memoryPaste.trim();
+    if (text.length < 20) {
+      setStatus("Paste a longer ChatGPT Memory summary first.");
+      return;
+    }
     setBusy(true);
     setStatus(null);
     try {
       await ensureSession();
-      const input = e.currentTarget.elements.namedItem("export") as HTMLInputElement;
-      const file = input?.files?.[0];
-      if (!file) return;
-      const body = new FormData();
-      body.set("file", file);
-      body.set("max_messages", "40");
       const res = await fetch(`${getApiBase()}/v1/sources/chatgpt`, {
         method: "POST",
-        body,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
         credentials: "include",
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
-      setStatus(data.detail || "ChatGPT export added.");
+      const raw = await res.text();
+      let data: { detail?: string } = {};
+      try {
+        data = raw ? JSON.parse(raw) : {};
+      } catch {
+        throw new Error(raw.trim() || `Request failed (${res.status})`);
+      }
+      if (!res.ok) {
+        const detail = data.detail;
+        throw new Error(
+          typeof detail === "string" ? detail : detail ? JSON.stringify(detail) : raw || `Request failed (${res.status})`,
+        );
+      }
+      setStatus((data as { detail?: string }).detail || "ChatGPT Memory added.");
+      setMemoryPaste("");
+      setShowHowto(false);
     } catch (err) {
       setStatus(err instanceof Error ? err.message : String(err));
     } finally {
@@ -189,7 +201,7 @@ function SourcesInner() {
 
   if (!ready) {
     return (
-      <AppShell userId={userId || undefined} wide>
+      <AppShell userId={userId || undefined} dashboard>
         <div className={styles.wrap}>
           <section className={`${styles.panel} ${styles.syncPanel}`}>
             <div className={styles.syncCard}>
@@ -205,7 +217,7 @@ function SourcesInner() {
   }
 
   return (
-    <AppShell userId={userId || undefined} wide>
+    <AppShell userId={userId || undefined} dashboard>
       <div className={styles.wrap}>
         {phase === "connect" && (
           <section className={`${styles.panel} ${styles.enter}`} key="connect">
@@ -297,19 +309,18 @@ function SourcesInner() {
             <div className={styles.addonList}>
               <div className={styles.addon}>
                 <div>
-                  <h2>ChatGPT</h2>
-                  <p>Past hard-choice chats, if you’ve used them.</p>
+                  <h2>ChatGPT Memory</h2>
+                  <p>Paste what ChatGPT already knows about your life.</p>
                 </div>
                 <button
                   type="button"
                   className={styles.ghost}
                   onClick={() => {
                     setShowHowto((v) => !v);
-                    setExportName(null);
-                    if (exportInputRef.current) exportInputRef.current.value = "";
+                    setMemoryPaste("");
                   }}
                 >
-                  {showHowto ? "Hide" : "Add export"}
+                  {showHowto ? "Hide" : "Paste memory"}
                 </button>
               </div>
             </div>
@@ -325,37 +336,32 @@ function SourcesInner() {
                   ))}
                 </ol>
                 <form onSubmit={onChatGPT} className={styles.upload}>
-                  <input
-                    ref={exportInputRef}
-                    id="chatgpt-export"
-                    name="export"
-                    type="file"
-                    className={styles.fileInput}
-                    accept=".zip,.json,application/zip,application/json"
+                  <label className={styles.pasteLabel} htmlFor="chatgpt-memory">
+                    Memory summary
+                  </label>
+                  <textarea
+                    id="chatgpt-memory"
+                    name="memory"
+                    className={styles.pasteArea}
+                    rows={8}
+                    value={memoryPaste}
+                    onChange={(e) => setMemoryPaste(e.target.value)}
+                    placeholder="Paste your ChatGPT Memory summary here…"
                     required
-                    onChange={(e) => {
-                      const file = e.target.files?.[0];
-                      setExportName(file ? file.name : null);
-                    }}
+                    minLength={20}
+                    maxLength={24000}
                   />
                   <div className={styles.uploadRow}>
                     <button
-                      type="button"
-                      className={styles.filePick}
-                      onClick={() => exportInputRef.current?.click()}
-                    >
-                      {exportName ? "Change file" : "Choose file"}
-                    </button>
-                    <button
                       type="submit"
                       className={styles.uploadBtn}
-                      disabled={busy || !exportName}
+                      disabled={busy || memoryPaste.trim().length < 20}
                     >
-                      {busy ? "Uploading…" : "Upload"}
+                      {busy ? "Reading…" : "Add to Level"}
                     </button>
                   </div>
                   <p className={styles.fileName}>
-                    {exportName ? exportName : "Pick the .zip or .json from your export email"}
+                    Level extracts care-relevant facts only — not your whole chat history.
                   </p>
                 </form>
               </div>
@@ -393,7 +399,7 @@ export default function SourcesPage() {
   return (
     <Suspense
       fallback={
-        <AppShell wide>
+        <AppShell dashboard>
           <p className={styles.line}>Loading…</p>
         </AppShell>
       }

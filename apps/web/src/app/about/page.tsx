@@ -63,18 +63,19 @@ function AboutInner() {
 
           <h1 className={styles.title}>What Level can do</h1>
           <p className={styles.lead}>
-            Level is your decision partner for a crowded life. It learns what you protect, helps you
-            prepare for the day, and weighs hard calls against your{" "}
-            <span className={styles.accent}>real priorities</span> — not generic advice.
+            Level doesn’t help caregivers find more hours — and it won’t preach balance or
+            self-care. It keeps your <span className={styles.accent}>care roles</span> alive and
+            asks, at decision time, what saying yes would crowd out — so you choose with eyes open, not
+            more guilt.
           </p>
 
           <section className={styles.section}>
-            <h2>Learns your priorities</h2>
+            <h2>Learns your care roles</h2>
             <p>
-              Connect your calendar (and optionally past ChatGPT conversations). Level doesn’t just
-              list events — it <span className={styles.accent}>interprets</span> what they say you
-              care about: family time, protected work hours, visits with Mom, sleep and recovery, and
-              more.
+              Connect your calendar (and optionally paste ChatGPT Memory). Level doesn’t just
+              list events — it builds a Care Profile: child care, elder care, paid work, household
+              logistics, self &amp; recovery, and co-parent when present — with sticky windows like
+              pickup.
             </p>
           </section>
 
@@ -83,8 +84,8 @@ function AboutInner() {
             <p>
               When you tap <span className={styles.ui}>Keep</span> or{" "}
               <span className={styles.ui}>Not me</span>, or add something in{" "}
-              <span className={styles.ui}>Tell Level more</span>, Level reshapes what it treats as
-              true. Over time it learns what helps you thrive.
+              <span className={styles.ui}>Tell Level more</span>, Level reshapes which roles it
+              holds. No one-size “good parent” script.
             </p>
           </section>
 
@@ -98,17 +99,16 @@ function AboutInner() {
           </section>
 
           <section className={styles.section}>
-            <h2>Books time — and pushes back</h2>
+            <h2>Challenges care collisions — and pushes back</h2>
             <p>
-              Ask Level to put something on your calendar and it can propose slots that fit. If a new
-              ask <span className={styles.accent}>conflicts</span> with what you’ve taught it
-              matters, it will say so instead of quietly saying yes.
+              Ask Level about a hard yes, or ask it to put something on your calendar. If the ask
+              would <span className={styles.accent}>crowd out a care role</span> you marked Keep,
+              Level names the squeeze instead of quietly agreeing.
             </p>
             <p className={styles.example}>
               <strong>Example:</strong> You ask to stack a late Thursday networking dinner. Level
-              sees Jordan’s soccer that evening and your priority to protect{" "}
-              <span className={styles.accent}>family weeknights</span> — and offers other times, or
-              asks if you’re sure, rather than double-booking on autopilot.
+              sees you marked Jordan’s pickup as Keep — child care — and asks how that yes doesn’t
+              cut into that window, or offers other times. You still decide; Level won’t lecture.
             </p>
           </section>
 
@@ -129,7 +129,7 @@ function AboutInner() {
                   Back to Today
                 </Link>
                 <Link href="/profile" className={styles.ghost}>
-                  Review priorities
+                  About me
                 </Link>
               </>
             ) : (

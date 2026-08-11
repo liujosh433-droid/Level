@@ -114,8 +114,25 @@ class TestConductorHallucinationBlocked:
         await memory.decisions.create(decision)
 
         # Retriever skips the LLM when there are no facts/manifesto, so the
-        # script is: framer → challenger (hallucinated citation). Guardrail
-        # should then BLOCK the turn before the user sees it.
+        # script is: framer → challenger (hallucinated) → repair challenger
+        # (still hallucinated). Guardrail blocks after the retry is exhausted.
+        bad_challenge = ScriptedResponse(
+            json_payload={
+                "questions": [
+                    {
+                        "question": "You said X — what changed?",
+                        "citations": [
+                            {
+                                "fact_id": "ghost-fact-id",
+                                "quote": "invented",
+                                "relevance": 0.9,
+                            }
+                        ],
+                        "challenge_type": "assumption",
+                    }
+                ]
+            }
+        )
         gemini = FakeGeminiClient.scripted(
             [
                 ScriptedResponse(
@@ -128,23 +145,8 @@ class TestConductorHallucinationBlocked:
                         "reversibility": "hard_to_reverse",
                     }
                 ),
-                ScriptedResponse(
-                    json_payload={
-                        "questions": [
-                            {
-                                "question": "You said X — what changed?",
-                                "citations": [
-                                    {
-                                        "fact_id": "ghost-fact-id",
-                                        "quote": "invented",
-                                        "relevance": 0.9,
-                                    }
-                                ],
-                                "challenge_type": "assumption",
-                            }
-                        ]
-                    }
-                ),
+                bad_challenge,
+                bad_challenge,
             ]
         )
 

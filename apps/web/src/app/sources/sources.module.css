@@ -1,5 +1,5 @@
 .wrap {
-  width: min(100%, 36rem);
+  width: 100%;
   margin: 0 auto;
   padding-top: 0.25rem;
 }
@@ -16,7 +16,7 @@
   color: var(--mist);
   font-size: 1.05rem;
   line-height: 1.45;
-  max-width: 34ch;
+  max-width: 48ch;
 }
 
 .check {
@@ -31,7 +31,7 @@
   background: var(--surface);
   cursor: pointer;
   width: 100%;
-  max-width: 28rem;
+  max-width: none;
 }
 
 .check input {
@@ -81,7 +81,7 @@
 
 .syncPanel {
   width: 100%;
-  max-width: 28rem;
+  max-width: none;
 }
 
 .syncCard {
@@ -189,7 +189,7 @@
   color: var(--mist);
   font-size: 1.05rem;
   line-height: 1.4;
-  max-width: 30ch;
+  max-width: min(56ch, 100%);
 }
 
 .primary,
@@ -267,7 +267,7 @@
   flex-direction: column;
   gap: 0.75rem;
   width: 100%;
-  max-width: 28rem;
+  max-width: none;
   margin: 0.15rem 0 0.35rem;
   padding: 0.9rem 0.95rem;
   border-radius: var(--radius-lg);
@@ -315,12 +315,18 @@
 }
 
 .addonList {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: 1fr;
   gap: 0.75rem;
   width: 100%;
-  max-width: 28rem;
+  max-width: none;
   margin: 0.35rem 0 0.5rem;
+}
+
+@media (min-width: 720px) {
+  .addonList {
+    grid-template-columns: 1fr 1fr;
+  }
 }
 
 .addon {
@@ -358,7 +364,7 @@
 
 .howtoWrap {
   width: 100%;
-  max-width: 28rem;
+  max-width: none;
   margin: 0.15rem 0 0.35rem;
   padding: 0.95rem;
   display: grid;
@@ -405,6 +411,37 @@
   color: var(--foam);
   font-size: 0.95rem;
   line-height: 1.4;
+}
+
+.pasteLabel {
+  margin: 0;
+  font-size: 0.82rem;
+  font-weight: 650;
+  color: var(--foam);
+}
+
+.pasteArea {
+  width: 100%;
+  min-height: 10rem;
+  resize: vertical;
+  padding: 0.75rem 0.85rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--line-strong);
+  background: var(--field);
+  color: var(--foam);
+  font-size: 0.95rem;
+  line-height: 1.45;
+  font-family: inherit;
+}
+
+.pasteArea:focus {
+  outline: 2px solid color-mix(in srgb, var(--signal) 45%, transparent);
+  outline-offset: 1px;
+  border-color: var(--signal);
+}
+
+.pasteArea::placeholder {
+  color: color-mix(in srgb, var(--mist) 75%, transparent);
 }
 
 .upload {
@@ -505,6 +542,7 @@
 @media (min-width: 720px) {
   .wrap {
     width: min(100%, 40rem);
+    margin-inline: auto;
   }
 
   .howto {

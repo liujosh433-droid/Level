@@ -78,6 +78,14 @@ class Decision(TraceableModel):
         default=None,
         description="If resolved, which of the frame's options the user picked.",
     )
+    origin: str | None = Field(
+        default=None,
+        description="How the decision was opened: user | async_role_theft.",
+    )
+    trigger_label: str | None = Field(
+        default=None,
+        description="Human-readable collision / trigger for unsolicited challenges.",
+    )
 
 
 __all__ = ["Decision", "DecisionFrame", "DecisionStatus"]

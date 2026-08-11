@@ -98,6 +98,33 @@ async def refresh_agenda_cache(
     return state
 
 
+async def inject_event_into_agenda_cache(
+    *,
+    user_id: str,
+    sync_store: CalendarSyncStore,
+    google_event: dict[str, Any],
+) -> None:
+    """Patch a just-created Google event into the agenda cache so Today updates immediately."""
+    cached = _raw_to_cached(google_event)
+    if cached is None:
+        return
+    state = await sync_store.get(user_id) or CalendarSyncState(user_id=user_id)
+    events = dict(state.events)
+    events[cached.id] = cached
+    state = state.model_copy(
+        update={
+            "events": events,
+            "agenda_updated_at": _now_utc(),
+        }
+    )
+    await sync_store.upsert(state)
+    _logger.info(
+        "agenda_event_injected",
+        user_id=user_id,
+        event_id=cached.id,
+        summary=cached.summary,
+    )
+
 async def ensure_calendar_watch(
     *,
     user_id: str,
@@ -206,5 +233,6 @@ async def day_events_cached_or_live(
 __all__ = [
     "day_events_cached_or_live",
     "ensure_calendar_watch",
+    "inject_event_into_agenda_cache",
     "refresh_agenda_cache",
 ]

@@ -10,14 +10,63 @@
 .sub {
   color: var(--mist);
   margin: 0 0 1.15rem;
-  max-width: min(62ch, 100%);
+  max-width: min(68ch, 100%);
   line-height: 1.5;
+}
+
+.aboutSummary {
+  margin: 0 0 1.35rem;
+  padding: 1rem 0 1.05rem;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  max-width: min(68ch, 100%);
+}
+
+.aboutKicker {
+  margin: 0 0 0.35rem;
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-weight: 700;
+  color: var(--signal);
+}
+
+.aboutBody {
+  margin: 0;
+  color: var(--foam);
+  font-size: 1.05rem;
+  line-height: 1.55;
+}
+
+.sectionTitle {
+  font-family: var(--font-display);
+  font-size: clamp(1.15rem, 2.8vw, 1.35rem);
+  font-weight: 550;
+  margin: 0.35rem 0 0.75rem;
 }
 
 .meta {
   color: var(--mist);
   margin: 0 0 1.15rem;
   max-width: 48ch;
+}
+
+.versionLine {
+  color: var(--mist);
+  font-size: 0.92rem;
+  margin: -0.55rem 0 1rem;
+  letter-spacing: 0.01em;
+}
+
+.conflictLine {
+  margin: 0 0 1.15rem;
+  padding: 0.7rem 0 0.7rem 0.85rem;
+  border-left: 3px solid var(--warn, #e0a35a);
+  color: var(--foam);
+  background: linear-gradient(90deg, rgba(224, 163, 90, 0.1), transparent 75%);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  line-height: 1.45;
+  max-width: min(68ch, 100%);
 }
 
 .manifesto {
@@ -169,6 +218,32 @@
   color: var(--signal);
   margin-top: 1rem;
   font-weight: 500;
+}
+
+.railStack {
+  display: flex;
+  flex-direction: column;
+  gap: 1.75rem;
+  width: 100%;
+  min-width: 0;
+}
+
+.chatBlock {
+  flex: 0 0 auto;
+  position: relative;
+  z-index: 1;
+  isolation: isolate;
+}
+
+.graphBlock {
+  flex: 0 0 auto;
+  position: relative;
+  z-index: 0;
+  width: 100%;
+  margin-top: 0.35rem;
+  padding-top: 1.35rem;
+  border-top: 1px solid var(--line);
+  clear: both;
 }
 
 @media (min-width: 768px) {

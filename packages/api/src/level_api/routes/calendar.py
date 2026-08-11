@@ -8,16 +8,26 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from level_api.auth_deps import require_user
-from level_api.dependencies import get_memory, get_proposal_store, get_token_store
+from level_api.dependencies import (
+    get_calendar_sync_store,
+    get_memory,
+    get_proposal_store,
+    get_token_store,
+)
 from level_core.auth.tokens import TokenStore
+from level_core.calendar.agenda_sync import inject_event_into_agenda_cache, refresh_agenda_cache
 from level_core.calendar.commitment_gate import apply_draft_to_window, propose_from_text
 from level_core.calendar.proposals import ProposalStore
+from level_core.calendar.sync_state import CalendarSyncStore
 from level_core.config import get_settings
 from level_core.ingest.google_live import create_calendar_event
 from level_core.memory.base import MemoryBank
 from level_core.models.factory import build_gemini_client
+from level_core.observability.logger import get_logger
 from level_core.schemas.commitment import CommitmentProposal, ProposalStatus
 from level_core.schemas.signal import Fact, FactType, Signal, SignalSource
+
+_logger = get_logger(__name__)
 
 router = APIRouter(prefix="/v1/calendar", tags=["calendar"])
 
@@ -51,6 +61,7 @@ async def propose_commitment(
     memory: MemoryBank = Depends(get_memory),
     tokens: TokenStore = Depends(get_token_store),
     store: ProposalStore = Depends(get_proposal_store),
+    sync_store: CalendarSyncStore = Depends(get_calendar_sync_store),
 ) -> ProposeResponse:
     token = await tokens.get_google_token(user_id)
     if token is None:
@@ -66,6 +77,7 @@ async def propose_commitment(
             store=store,
             gemini=gemini,
             settings=settings,
+            sync_store=sync_store,
         )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"Schedule check failed: {exc}") from exc
@@ -85,6 +97,7 @@ async def confirm_proposal(
     memory: MemoryBank = Depends(get_memory),
     tokens: TokenStore = Depends(get_token_store),
     store: ProposalStore = Depends(get_proposal_store),
+    sync_store: CalendarSyncStore = Depends(get_calendar_sync_store),
 ) -> ConfirmResponse:
     payload = payload or ConfirmRequest()
     proposal = await store.get(proposal_id)
@@ -128,6 +141,58 @@ async def confirm_proposal(
     proposal.resolved_at = datetime.now(tz=timezone.utc)
     proposal.touch()
     await store.save(proposal)
+
+    # Today reads a fresh agenda cache and will skip live Google pulls — so we must
+    # patch the cache here. Prefer a synthetic event from the window we just wrote
+    # (reliable); fall back to Google's payload shape if needed.
+    tz_name = proposal.draft.timezone or "America/Los_Angeles"
+    from zoneinfo import ZoneInfo
+
+    wall_tz = ZoneInfo(tz_name)
+    synthetic = {
+        "id": event_id or f"level:{proposal.proposal_id}",
+        "summary": (proposal.draft.title or "Event").strip() or "Event",
+        "status": "confirmed",
+        "start": {
+            "dateTime": start.astimezone(wall_tz).isoformat(timespec="seconds"),
+            "timeZone": tz_name,
+        },
+        "end": {
+            "dateTime": end.astimezone(wall_tz).isoformat(timespec="seconds"),
+            "timeZone": tz_name,
+        },
+    }
+    try:
+        await inject_event_into_agenda_cache(
+            user_id=user_id,
+            sync_store=sync_store,
+            google_event=synthetic,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning(
+            "agenda_inject_failed",
+            user_id=user_id,
+            event_id=event_id,
+            error=str(exc),
+        )
+        try:
+            await inject_event_into_agenda_cache(
+                user_id=user_id,
+                sync_store=sync_store,
+                google_event=created if isinstance(created, dict) else synthetic,
+            )
+        except Exception as exc2:  # noqa: BLE001
+            _logger.warning(
+                "agenda_inject_fallback_failed",
+                user_id=user_id,
+                error=str(exc2),
+            )
+
+    # Pull Google deltas so the cache matches Calendar (and recovers if inject missed).
+    try:
+        await refresh_agenda_cache(user_id=user_id, token=token, sync_store=sync_store)
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning("agenda_refresh_after_confirm_failed", user_id=user_id, error=str(exc))
 
     try:
         fact = Fact(

@@ -1,10 +1,10 @@
-"""Persist pending calendar commitment proposals (local JSON / memory)."""
+"""Persist pending calendar commitment proposals (local JSON / Firestore)."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from level_core.config import Settings, get_settings
 from level_core.schemas.commitment import CommitmentProposal
@@ -66,6 +66,64 @@ class LocalFileProposalStore(InMemoryProposalStore):
         self._save()
 
 
+class FirestoreProposalStore:
+    """Cloud proposals: users/{uid}/proposals/{id} + top-level index for get-by-id."""
+
+    def __init__(self, settings: Settings | None = None) -> None:
+        self._settings = settings or get_settings()
+        self._client: Any = None
+
+    def _db(self) -> Any:
+        if self._client is None:
+            from google.cloud.firestore_v1 import AsyncClient
+
+            self._client = AsyncClient(
+                project=self._settings.gcp_project,
+                database=self._settings.firestore_database,
+            )
+        return self._client
+
+    async def save(self, proposal: CommitmentProposal) -> None:
+        db = self._db()
+        payload = proposal.model_dump(mode="json")
+        await (
+            db.collection("users")
+            .document(proposal.user_id)
+            .collection("proposals")
+            .document(proposal.proposal_id)
+            .set(payload, merge=True)
+        )
+        await db.collection("commitment_proposals").document(proposal.proposal_id).set(
+            payload,
+            merge=True,
+        )
+
+    async def get(self, proposal_id: str) -> CommitmentProposal | None:
+        snap = await self._db().collection("commitment_proposals").document(proposal_id).get()
+        if not snap.exists:
+            return None
+        return CommitmentProposal.model_validate(snap.to_dict() or {}, strict=False)
+
+    async def list_for_user(self, user_id: str, *, limit: int = 20) -> list[CommitmentProposal]:
+        query = (
+            self._db()
+            .collection("users")
+            .document(user_id)
+            .collection("proposals")
+            .limit(max(1, min(limit, 50)))
+        )
+        rows: list[CommitmentProposal] = []
+        async for snap in query.stream():
+            try:
+                rows.append(
+                    CommitmentProposal.model_validate(snap.to_dict() or {}, strict=False)
+                )
+            except Exception:  # noqa: BLE001
+                continue
+        rows.sort(key=lambda p: p.created_at, reverse=True)
+        return rows[:limit]
+
+
 _STORE: ProposalStore | None = None
 
 
@@ -75,12 +133,19 @@ def build_proposal_store(settings: Settings | None = None) -> ProposalStore:
         return _STORE
     settings = settings or get_settings()
     if settings.is_local:
-        path = Path.cwd() / ".level" / "commitment_proposals.json"
+        # Absolute path under repo so cwd / reload workers share one file.
+        repo_root = Path(__file__).resolve().parents[5]
+        path = repo_root / ".level" / "commitment_proposals.json"
         _STORE = LocalFileProposalStore(path)
     else:
-        # Cloud: memory for hackathon MVP (Firestore later).
-        _STORE = InMemoryProposalStore()
+        _STORE = FirestoreProposalStore(settings=settings)
     return _STORE
 
 
-__all__ = ["InMemoryProposalStore", "LocalFileProposalStore", "ProposalStore", "build_proposal_store"]
+__all__ = [
+    "FirestoreProposalStore",
+    "InMemoryProposalStore",
+    "LocalFileProposalStore",
+    "ProposalStore",
+    "build_proposal_store",
+]

@@ -15,11 +15,11 @@
 }
 
 .wide {
-  --shell-max: 48rem;
+  --shell-max: 72rem;
 }
 
 .dashboard {
-  --shell-max: 72rem;
+  --shell-max: 96rem;
 }
 
 .body {

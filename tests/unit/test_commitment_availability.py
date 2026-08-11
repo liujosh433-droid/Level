@@ -26,6 +26,9 @@ def test_looks_like_schedule_ask_detects_add_and_availability() -> None:
         "Diane wants to get dinner at 6:30pm today.. do I have time?"
     )
     assert looks_like_schedule_ask("when else am I free tonight?")
+    assert looks_like_schedule_ask(
+        "Need to fit in grandparents visit on weekend, when is the best time"
+    )
     assert not looks_like_schedule_ask("Should I switch schools for Jordan?")
 
 
@@ -36,6 +39,62 @@ def test_heuristic_title_and_sanitize() -> None:
     assert "[bullet:" not in _sanitize_message(
         "Follow your email [bullet:df5277d55d1d4a738a80321d3a] tonight."
     )
+
+
+def test_model_weekend_by_days_drive_windows_not_today() -> None:
+    """AI output with by_days=SA/SU must search weekend — never pin to Tuesday."""
+    from level_core.calendar.commitment_gate import (
+        _ParsedIntent,
+        _draft_from_parsed,
+        _normalize_parsed,
+    )
+    from level_core.calendar.availability import draft_window, occurrence_windows
+
+    # Shape the model is instructed to return for a weekend availability ask.
+    parsed = _normalize_parsed(
+        _ParsedIntent(
+            is_schedule_ask=True,
+            kind="availability",
+            title="Grandparents visit",
+            local_date="2026-08-11",  # mistaken weekday pin
+            local_time="14:00",
+            duration_minutes=120,
+            by_days=["SA", "SU"],
+        ),
+        today="2026-08-11",
+        source_text="Need to fit in grandparents visit on weekend, when is the best time",
+    )
+    assert parsed.local_date is None  # dropped — conflicts with SA/SU
+    assert parsed.by_days == ["SA", "SU"]
+    draft = _draft_from_parsed(parsed)
+    now = datetime(2026, 8, 11, 18, 0, tzinfo=timezone.utc)  # Tuesday
+    start, _ = draft_window(draft, now=now)
+    local = start.astimezone(ZoneInfo("America/Los_Angeles"))
+    assert local.weekday() >= 5
+    windows = occurrence_windows(draft, now=now, weeks=1)
+    assert len(windows) >= 2
+    assert all(
+        w[0].astimezone(ZoneInfo("America/Los_Angeles")).weekday() >= 5 for w in windows
+    )
+
+
+def test_normalize_does_not_force_availability_onto_today() -> None:
+    from level_core.calendar.commitment_gate import _ParsedIntent, _normalize_parsed
+
+    parsed = _normalize_parsed(
+        _ParsedIntent(
+            is_schedule_ask=True,
+            kind="availability",
+            title="Grandparents visit",
+            local_date=None,
+            local_time="14:00",
+            by_days=["SA", "SU"],
+        ),
+        today="2026-08-11",
+        source_text="weekend grandparents visit",
+    )
+    assert parsed.local_date is None
+    assert parsed.by_days == ["SA", "SU"]
 
 
 def test_all_day_blocks_evening_in_local_tz() -> None:

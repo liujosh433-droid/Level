@@ -57,6 +57,7 @@ _DEFAULT_TOOLS_BY_AGENT: Final[dict[str, tuple[ToolPolicy, ...]]] = {
         ToolPolicy("vector_search", rate_limit_per_minute=60),
         ToolPolicy("get_facts", rate_limit_per_minute=60),
         ToolPolicy("get_manifesto", rate_limit_per_minute=10),
+        ToolPolicy("get_care_profile", rate_limit_per_minute=30),
     ),
     "challenger": (
         ToolPolicy("get_facts", rate_limit_per_minute=60),

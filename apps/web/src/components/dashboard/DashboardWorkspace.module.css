@@ -11,7 +11,7 @@
 .rail {
   display: flex;
   flex-direction: column;
-  gap: 1.1rem;
+  gap: 1.35rem;
   min-width: 0;
 }
 
@@ -27,19 +27,15 @@
   margin: 0 0 0.55rem;
 }
 
-@media (min-width: 960px) {
+@media (min-width: 900px) {
   .workspace {
     display: grid;
-    grid-template-columns: minmax(0, 1.35fr) minmax(17.5rem, 0.9fr);
-    gap: 1.75rem 2rem;
+    grid-template-columns: minmax(0, 1.5fr) minmax(20rem, 1fr);
+    gap: 1.75rem 2.5rem;
     align-items: start;
   }
 
   .rail {
-    position: sticky;
-    top: var(--app-header-offset);
-    max-height: calc(100dvh - var(--app-header-offset) - 1rem);
-    overflow: auto;
     padding-bottom: 0.5rem;
   }
 

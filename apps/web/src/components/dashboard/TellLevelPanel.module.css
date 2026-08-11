@@ -4,6 +4,9 @@
   display: flex;
   flex-direction: column;
   min-height: 0;
+  flex: 0 0 auto;
+  position: relative;
+  z-index: 1;
 }
 
 .head {
@@ -38,6 +41,19 @@
   background: var(--chrome);
   border: 1px solid var(--line-strong);
   backdrop-filter: blur(12px);
+  box-shadow: 0 6px 20px rgba(22, 48, 56, 0.08);
+}
+
+/* Never sticky — used when other rail content sits below the composer. */
+.composer {
+  position: relative;
+  bottom: auto;
+  z-index: 0;
+  margin: 0;
+  padding: 0.85rem;
+  border-radius: var(--radius-lg);
+  background: var(--chrome);
+  border: 1px solid var(--line-strong);
   box-shadow: 0 6px 20px rgba(22, 48, 56, 0.08);
 }
 
@@ -129,8 +145,6 @@
   display: flex;
   flex-direction: column;
   gap: 0.15rem;
-  max-height: 14rem;
-  overflow: auto;
   margin: 0.85rem 0 0;
 }
 
@@ -168,9 +182,8 @@
   }
 }
 
-@media (min-width: 960px) {
+@media (min-width: 900px) {
   .panel {
-    /* Soft divider when stacked under Reminders (or other rail blocks). */
     border-top: 1px solid var(--line);
     padding-top: 1rem;
   }
@@ -178,10 +191,6 @@
   .panel:first-child {
     border-top: none;
     padding-top: 0;
-  }
-
-  .thread {
-    max-height: 16rem;
   }
 
   .dock {

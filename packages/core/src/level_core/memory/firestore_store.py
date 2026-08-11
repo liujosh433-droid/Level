@@ -24,6 +24,7 @@ from level_core.config import Settings, get_settings
 from level_core.errors import NotFound
 from level_core.observability.tracer import traced
 from level_core.schemas.bias import BiasEvent, BiasProfile, Manifesto
+from level_core.schemas.care import CareProfile
 from level_core.schemas.decision import Decision
 from level_core.schemas.profile import ProfileSnapshot
 from level_core.schemas.signal import Fact, Signal
@@ -48,6 +49,11 @@ def _to_dict(model: Any) -> dict[str, Any]:
     return model.model_dump(mode="json", exclude_none=True)
 
 
+def _from_dict(model_cls: type[Any], data: dict[str, Any] | None) -> Any:
+    """Parse Firestore JSON (ISO datetimes, enum strings) into LevelModels."""
+    return model_cls.model_validate(data or {}, strict=False)
+
+
 class FirestoreSignalRepository:
     def __init__(self, client: AsyncClient | None = None) -> None:
         self._client: AsyncClient = client or _client()
@@ -63,7 +69,7 @@ class FirestoreSignalRepository:
         snap = await ref.get()
         if not snap.exists:
             raise NotFound("signals", signal_id)
-        return Signal(**snap.to_dict())
+        return _from_dict(Signal, snap.to_dict())
 
     @traced("firestore.signal.list_by_source")
     async def list_by_source(
@@ -72,7 +78,7 @@ class FirestoreSignalRepository:
         col = _user_ref(self._client, user_id).collection("signals")
         query = col.where("source", "==", source)
         docs = query.stream()
-        return [Signal(**doc.to_dict()) async for doc in docs]
+        return [_from_dict(Signal, doc.to_dict()) async for doc in docs]
 
 
 class FirestoreFactRepository:
@@ -90,7 +96,7 @@ class FirestoreFactRepository:
         snap = await ref.get()
         if not snap.exists:
             raise NotFound("facts", fact_id)
-        return Fact(**snap.to_dict())
+        return _from_dict(Fact, snap.to_dict())
 
     @traced("firestore.fact.get_many")
     async def get_many(self, *, user_id: str, fact_ids: Iterable[str]) -> list[Fact]:
@@ -100,12 +106,23 @@ class FirestoreFactRepository:
             return []
         refs = [col.document(fid) for fid in ids]
         snaps = await self._client.get_all(refs)
-        return [Fact(**s.to_dict()) for s in snaps if s.exists]
+        return [_from_dict(Fact, s.to_dict()) for s in snaps if s.exists]
 
     @traced("firestore.fact.list_for_user")
     async def list_for_user(self, *, user_id: str, limit: int = 100) -> list[Fact]:
         col = _user_ref(self._client, user_id).collection("facts").limit(limit)
-        return [Fact(**doc.to_dict()) async for doc in col.stream()]
+        out: list[Fact] = []
+        async for doc in col.stream():
+            try:
+                out.append(_from_dict(Fact, doc.to_dict()))
+            except Exception:  # noqa: BLE001
+                continue
+        return out
+
+    @traced("firestore.fact.delete")
+    async def delete(self, *, user_id: str, fact_id: str) -> None:
+        ref = _user_ref(self._client, user_id).collection("facts").document(fact_id)
+        await ref.delete()
 
 
 class FirestoreDecisionRepository:
@@ -129,7 +146,7 @@ class FirestoreDecisionRepository:
         snap = await ref.get()
         if not snap.exists:
             raise NotFound("decisions", decision_id)
-        return Decision(**snap.to_dict())
+        return _from_dict(Decision, snap.to_dict())
 
     @traced("firestore.decision.update")
     async def update(self, decision: Decision) -> None:
@@ -155,7 +172,12 @@ class FirestoreDecisionRepository:
             .document(decision_id)
             .collection("turns")
         )
-        return [Turn(**doc.to_dict()) async for doc in col.stream()]
+        return [_from_dict(Turn, doc.to_dict()) async for doc in col.stream()]
+
+    @traced("firestore.decision.list_for_user")
+    async def list_for_user(self, *, user_id: str, limit: int = 50) -> list[Decision]:
+        col = _user_ref(self._client, user_id).collection("decisions").limit(limit)
+        return [_from_dict(Decision, doc.to_dict()) async for doc in col.stream()]
 
 
 class FirestoreTurnRepository:
@@ -176,7 +198,7 @@ class FirestoreTurnRepository:
         self, *, user_id: str, limit: int = 500
     ) -> list[BiasEvent]:
         col = _user_ref(self._client, user_id).collection("bias_events").limit(limit)
-        return [BiasEvent(**doc.to_dict()) async for doc in col.stream()]
+        return [_from_dict(BiasEvent, doc.to_dict()) async for doc in col.stream()]
 
 
 class FirestoreManifestoRepository:
@@ -189,7 +211,7 @@ class FirestoreManifestoRepository:
         snap = await ref.get()
         if not snap.exists:
             return None
-        return Manifesto(**snap.to_dict())
+        return _from_dict(Manifesto, snap.to_dict())
 
     @traced("firestore.manifesto.save")
     async def save_manifesto(self, manifesto: Manifesto) -> None:
@@ -212,7 +234,7 @@ class FirestoreManifestoRepository:
         snap = await ref.get()
         if not snap.exists:
             return None
-        return BiasProfile(**snap.to_dict())
+        return _from_dict(BiasProfile, snap.to_dict())
 
     @traced("firestore.bias_profile.save")
     async def save_bias_profile(self, profile: BiasProfile) -> None:
@@ -229,7 +251,7 @@ class FirestoreManifestoRepository:
         snap = await ref.get()
         if not snap.exists:
             return None
-        return ProfileSnapshot(**snap.to_dict())
+        return _from_dict(ProfileSnapshot, snap.to_dict())
 
     @traced("firestore.profile_snapshot.save")
     async def save_profile_snapshot(self, snapshot: ProfileSnapshot) -> None:
@@ -239,6 +261,23 @@ class FirestoreManifestoRepository:
             .document("profile_snapshot")
         )
         await ref.set(_to_dict(snapshot))
+
+    @traced("firestore.care_profile.get")
+    async def get_care_profile(self, *, user_id: str) -> CareProfile | None:
+        ref = _user_ref(self._client, user_id).collection("state").document("care_profile")
+        snap = await ref.get()
+        if not snap.exists:
+            return None
+        return _from_dict(CareProfile, snap.to_dict())
+
+    @traced("firestore.care_profile.save")
+    async def save_care_profile(self, profile: CareProfile) -> None:
+        ref = (
+            _user_ref(self._client, profile.user_id)
+            .collection("state")
+            .document("care_profile")
+        )
+        await ref.set(_to_dict(profile))
 
 
 __all__ = [

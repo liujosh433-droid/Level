@@ -73,15 +73,34 @@ class LocalFileCalendarSyncStore(InMemoryCalendarSyncStore):
     def __init__(self, path: Path) -> None:
         super().__init__()
         self._path = path
+        self._mtime: float | None = None
+        self._load()
+
+    def _file_mtime(self) -> float | None:
+        try:
+            return self._path.stat().st_mtime
+        except OSError:
+            return None
+
+    def _maybe_reload(self) -> None:
+        """Pick up writes from other processes (scripts / reloads) before serving."""
+        mtime = self._file_mtime()
+        if mtime is None:
+            return
+        if self._mtime is not None and mtime <= self._mtime:
+            return
         self._load()
 
     def _load(self) -> None:
         if not self._path.exists():
+            self._mtime = None
             return
         try:
             raw = json.loads(self._path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return
+        self._by_user.clear()
+        self._by_channel.clear()
         for row in raw.get("states") or []:
             try:
                 # LevelModel is strict=True; JSON ISO datetimes need strict=False.
@@ -91,6 +110,7 @@ class LocalFileCalendarSyncStore(InMemoryCalendarSyncStore):
             self._by_user[state.user_id] = state
             if state.channel_id:
                 self._by_channel[state.channel_id] = state.user_id
+        self._mtime = self._file_mtime()
 
     def _save(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -100,8 +120,18 @@ class LocalFileCalendarSyncStore(InMemoryCalendarSyncStore):
         tmp = self._path.with_suffix(".tmp")
         tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         tmp.replace(self._path)
+        self._mtime = self._file_mtime()
+
+    async def get(self, user_id: str) -> CalendarSyncState | None:
+        self._maybe_reload()
+        return await super().get(user_id)
+
+    async def get_by_channel_id(self, channel_id: str) -> CalendarSyncState | None:
+        self._maybe_reload()
+        return await super().get_by_channel_id(channel_id)
 
     async def upsert(self, state: CalendarSyncState) -> None:
+        self._maybe_reload()
         await super().upsert(state)
         self._save()
 
@@ -114,6 +144,69 @@ def _local_sync_path() -> Path:
     return Path(__file__).resolve().parents[5] / ".level" / "calendar_sync.json"
 
 
+class FirestoreCalendarSyncStore:
+    """Persist agenda cache + watch channel under users/{uid}/state/calendar_sync."""
+
+    def __init__(self, settings: Settings | None = None) -> None:
+        self._settings = settings or get_settings()
+        self._client: Any = None
+
+    def _db(self) -> Any:
+        if self._client is None:
+            from google.cloud.firestore_v1 import AsyncClient
+
+            self._client = AsyncClient(
+                project=self._settings.gcp_project,
+                database=self._settings.firestore_database,
+            )
+        return self._client
+
+    async def get(self, user_id: str) -> CalendarSyncState | None:
+        snap = await (
+            self._db()
+            .collection("users")
+            .document(user_id)
+            .collection("state")
+            .document("calendar_sync")
+            .get()
+        )
+        if not snap.exists:
+            return None
+        return CalendarSyncState.model_validate(snap.to_dict() or {}, strict=False)
+
+    async def upsert(self, state: CalendarSyncState) -> None:
+        state = state.model_copy(update={"updated_at": _now_utc()})
+        prev = await self.get(state.user_id)
+        db = self._db()
+        await (
+            db.collection("users")
+            .document(state.user_id)
+            .collection("state")
+            .document("calendar_sync")
+            .set(state.model_dump(mode="json"), merge=True)
+        )
+        # Maintain channel → user reverse index for Google push webhooks.
+        if prev and prev.channel_id and prev.channel_id != state.channel_id:
+            try:
+                await db.collection("calendar_channels").document(prev.channel_id).delete()
+            except Exception:  # noqa: BLE001
+                pass
+        if state.channel_id:
+            await db.collection("calendar_channels").document(state.channel_id).set(
+                {"user_id": state.user_id},
+                merge=True,
+            )
+
+    async def get_by_channel_id(self, channel_id: str) -> CalendarSyncState | None:
+        snap = await self._db().collection("calendar_channels").document(channel_id).get()
+        if not snap.exists:
+            return None
+        uid = (snap.to_dict() or {}).get("user_id")
+        if not uid:
+            return None
+        return await self.get(str(uid))
+
+
 def build_calendar_sync_store(settings: Settings | None = None) -> CalendarSyncStore:
     global _STORE
     if _STORE is not None:
@@ -122,7 +215,7 @@ def build_calendar_sync_store(settings: Settings | None = None) -> CalendarSyncS
     if settings.is_local:
         _STORE = LocalFileCalendarSyncStore(_local_sync_path())
     else:
-        _STORE = InMemoryCalendarSyncStore()
+        _STORE = FirestoreCalendarSyncStore(settings=settings)
     return _STORE
 
 
@@ -172,6 +265,7 @@ __all__ = [
     "CachedCalendarEvent",
     "CalendarSyncState",
     "CalendarSyncStore",
+    "FirestoreCalendarSyncStore",
     "build_calendar_sync_store",
     "events_for_local_day",
 ]

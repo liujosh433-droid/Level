@@ -54,6 +54,72 @@
   line-height: 1.15;
 }
 
+.holdingLine {
+  margin: 0.7rem 0 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.35rem 0.55rem;
+  animation: rise 0.45s ease-out both;
+}
+
+.holdingLabel {
+  font-size: 0.92rem;
+  color: var(--mist);
+  font-weight: 550;
+}
+
+.holdingChips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.15rem 0;
+}
+
+.holdingSep {
+  margin: 0 0.35rem;
+  color: var(--mist);
+  opacity: 0.7;
+}
+
+.holdingChip {
+  --hold-color: var(--signal);
+  color: var(--foam);
+  font-weight: 650;
+  font-size: 1.02rem;
+  border-bottom: 2px solid color-mix(in srgb, var(--hold-color) 75%, transparent);
+  padding-bottom: 0.05rem;
+}
+
+.tension {
+  margin: 0 0 1.15rem;
+  padding: 0.65rem 0 0.65rem 0.85rem;
+  border-left: 3px solid #c45c6a;
+  color: var(--foam);
+  font-size: 0.95rem;
+  line-height: 1.4;
+  background: linear-gradient(90deg, rgba(196, 92, 106, 0.1), transparent 75%);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  animation: rise 0.5s ease-out 0.05s both;
+}
+
+.tensionLabel {
+  display: block;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #d88994;
+  margin-bottom: 0.2rem;
+}
+
+.sectionLead {
+  margin: -0.25rem 0 0.85rem;
+  color: var(--mist);
+  font-size: 0.9rem;
+  line-height: 1.35;
+}
+
 .speak,
 .speakOn {
   flex-shrink: 0;
@@ -98,9 +164,16 @@
   border-radius: 0 var(--radius) var(--radius) 0;
 }
 
-.banner a {
+.banner a,
+.linkish {
   color: var(--signal);
   font-weight: 600;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
 }
 
 .block {
@@ -388,6 +461,19 @@
   margin-top: 0.4rem;
 }
 
+.admit {
+  margin: 0;
+  color: var(--foam);
+  line-height: 1.45;
+}
+
+.admitDetail {
+  margin: 0.45rem 0 0;
+  font-size: 0.85rem;
+  color: var(--mist);
+  word-break: break-word;
+}
+
 .proposalSummary {
   margin: 0 0 0.45rem !important;
   color: var(--signal);
@@ -430,6 +516,31 @@
   color: var(--mist);
   text-decoration: underline;
   text-underline-offset: 0.15em;
+}
+
+.railStack {
+  display: flex;
+  flex-direction: column;
+  gap: 1.75rem;
+  width: 100%;
+  min-width: 0;
+}
+
+.chatBlock {
+  flex: 0 0 auto;
+  position: relative;
+  z-index: 1;
+  isolation: isolate;
+}
+
+.graphBlock {
+  flex: 0 0 auto;
+  position: relative;
+  z-index: 0;
+  width: 100%;
+  margin-top: 0.35rem;
+  padding-top: 1.35rem;
+  border-top: 1px solid var(--line);
 }
 
 @media (min-width: 768px) {

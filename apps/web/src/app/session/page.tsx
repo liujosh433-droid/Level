@@ -82,7 +82,7 @@ function SessionPageInner() {
   const topBiases = (profile?.bias_scores ?? []).filter((s) => s.ema >= 0.2).slice(0, 5);
 
   return (
-    <AppShell userId={userId || undefined}>
+    <AppShell userId={userId || undefined} wide>
       <p className={styles.meta}>
         Prefer the Ask box on <Link href="/today">Today</Link>
         {decisionId ? ` · Decision ${decisionId.slice(0, 8)}…` : ""}

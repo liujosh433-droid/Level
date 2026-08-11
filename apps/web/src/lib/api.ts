@@ -52,17 +52,78 @@ export type ProfileBullet = {
   category: string;
   text: string;
   status: string;
+  care_role_id?: string | null;
+};
+
+export type PendingChallenge = {
+  decision_id: string;
+  trigger_label: string;
+  question?: string | null;
+  challenge_type?: string | null;
+};
+
+export type CareGraphNode = {
+  id: string;
+  label: string;
+  kind: string;
+  hint?: string | null;
+  role_id?: string | null;
+  color?: string;
+  event_count?: number;
+};
+
+export type CareGraphEdge = {
+  from_id: string;
+  to_id: string;
+  relation: string;
+  role_id?: string | null;
+  color?: string;
+};
+
+export type CareGraphCategory = {
+  role_id: string;
+  label: string;
+  color: string;
+  event_count: number;
+};
+
+export type CareGraph = {
+  center: CareGraphNode;
+  nodes: CareGraphNode[];
+  edges: CareGraphEdge[];
+  categories?: CareGraphCategory[];
+};
+
+export type HoldingChip = {
+  label: string;
+  role_id: string;
+  color: string;
+};
+
+export type WeekRoleLoad = {
+  role_id: string;
+  label: string;
+  color: string;
+  percent: number;
+  event_count?: number;
+  minutes?: number;
 };
 
 export type Profile = {
   user_id: string;
   fact_count: number;
   manifesto: string | null;
+  about_summary?: string | null;
   bias_scores: BiasScore[];
   session_count: number;
   needs_review?: boolean;
   bullets?: ProfileBullet[];
   contradictions?: { contradiction_id: string; summary: string; status: string }[];
+  care_profile_version?: number | null;
+  care_updated_at?: string | null;
+  care_role_count?: number;
+  conflict_summaries?: string[];
+  care_graph?: CareGraph | null;
 };
 
 export type Me = {
@@ -107,6 +168,11 @@ export type TodayView = {
   needs_review: boolean;
   fact_count: number;
   manifesto: string | null;
+  pending_challenges?: PendingChallenge[];
+  care_graph?: CareGraph | null;
+  holding?: HoldingChip[];
+  week_load?: WeekRoleLoad[];
+  conflict_summaries?: string[];
 };
 
 export type CommitmentProposal = {

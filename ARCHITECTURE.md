@@ -129,6 +129,83 @@ Local dev uses **FAISS in-process** with the identical interface (see `level_cor
 
 ---
 
+## Memory retention, context limits, and scale (judges)
+
+Level separates **what must stay accurate** (the Care Profile) from **what can age out** (raw signals, low-salience event facts, old turns). We designed for a hackathon budget first, with a clear upgrade path if we had more Cloud spend.
+
+### Principle: compact model, selective evidence
+
+Accuracy for caregivers does **not** require keeping every calendar event forever. It requires:
+
+1. A **living Care Profile** (roles, people, protected windows, Keep/Not me, conflict summaries).
+2. **Evidence that still grounds challenges** (facts cited recently, or tied to Keep’d roles).
+3. A **tight prompt** so Gemini never sees the full history (scarcity-friendly + cheaper).
+
+Raw volume is a cost/edge-case problem; profile fidelity is a product problem. We optimize for the latter.
+
+### What we do today (implemented)
+
+| Control | Behavior |
+|---|---|
+| Context window | Retriever: list ≤200 facts, pin ≤4 care + ≤4 durable, return ~8–10 ids; care snippet ≤800 chars; Challenger sees last ~4 turns |
+| Synthesized size | Care Profile ≤6 roles; snapshot ≤8 bullets; ≤3 challenge questions |
+| Ingest hygiene | Idempotent `external_id`; statement dedupe on care infer; large blobs via `storage_uri` |
+| Tenant isolation | Single Vector Search index + mandatory `user_id` restrict |
+| Profile accuracy under churn | Re-infer merges Keep/Not me (`_merge_role_feedback`) so syncs don’t wipe user corrections |
+| **Automated prune / TTL** | [`level_core.memory.retention`](./packages/core/src/level_core/memory/retention.py) + job `level-retain`: EVENT facts older than **90 days** pruned unless HOT; soft cap **150 facts/user** by eviction score; deletes fact docs + vectors. Env: `LEVEL_RETENTION_MAX_FACTS`, `LEVEL_RETENTION_EVENT_TTL_DAYS`. |
+
+```text
+HOT (never pruned)
+  Care Profile / Manifesto / Bias Profile aggregates (not fact rows)
+  Facts in CareRoleState.source_fact_ids for non-rejected roles (Keep’d pins)
+  Facts cited on turns within citation lookback (90d)
+
+WARM (soft-capped at max_facts_per_user)
+  Remaining durable + recent EVENT facts
+
+PRUNED (hackathon: hard delete fact + vector)
+  Stale EVENT facts past TTL, then lowest eviction_score until under cap
+```
+
+**Eviction score** (higher = keep), used when over the soft cap:
+
+```text
+score = 0.45*salience + 0.40*recency + 0.15*confidence - ephemeral_event_penalty
+# pinned / cited → sentinel high score (never selected)
+```
+
+**Never delete:** care-pinned facts, recently cited facts. Care Profile document is never TTL’d.
+
+**Edge cases**
+
+| Case | Policy |
+|---|---|
+| User Keep’d a role | Its `source_fact_ids` stay HOT across prunes |
+| Fact cited in a challenge | Protected for citation lookback window |
+| Over cap but all remaining are HOT | Stop pruning (prefer accuracy over hard quota) |
+| Calendar storm | Cap + TTL bound EVENT growth; agenda cache still drives “now” |
+| Cross-tenant | Vector delete/query always scoped by `user_id` |
+
+Tests: [`tests/unit/test_retention.py`](./tests/unit/test_retention.py).
+
+### Scale-up only (not implemented — needs more budget)
+
+| Spend more on… | What we gain |
+|---|---|
+| **Cloud Storage + BigQuery** | COLD *archive* instead of hard delete (restore Keep after prune) |
+| **Firestore** | Longer turn/bias_event history; manifesto version retention |
+| **Cloud Scheduler** | Nightly `level-retain` + 15m ingest/`async_challenge` without manual runs |
+| **Larger Vector Search** | Faster top-k at 10× users; optional hot/warm indexes |
+| **CMEK / crypto-shred** | Enterprise delete-on-request |
+
+Hackathon path hard-deletes pruned facts (cheapest correct behavior). More money upgrades prune → archive without changing Care Profile semantics.
+
+### Judge one-liner
+
+> We keep the Care Profile hot and small, bound every prompt to a role-pinned evidence set, and run automated TTL + soft-cap prune that never deletes Keep’d or recently cited evidence. More budget turns hard-delete into cold archive and schedules the job nightly — it doesn’t change the unit of accuracy.
+
+---
+
 ## Model layer
 
 | Role | Model | Rationale |

@@ -190,19 +190,36 @@ def find_free_slots_nearby(
     day_start_hour: int = 11,
     day_end_hour: int = 21,
     max_slots: int = 4,
+    preferred_weekdays: set[int] | None = None,
 ) -> list[FreeSlot]:
-    """Free slots on the anchor day, then following days if the day is packed."""
+    """Free slots on/after the anchor day.
+
+    When ``preferred_weekdays`` is set (0=Mon…6=Sun), only those weekdays are
+    searched — so a weekend ask does not suggest Tuesday alternatives.
+    """
     tz = ZoneInfo(timezone_name)
     local_anchor = anchor.astimezone(tz)
     collected: list[FreeSlot] = []
-    for offset in range(days):
+    # Scan enough calendar days to hit preferred weekdays (e.g. Fri → Sat/Sun).
+    scan_limit = max(days, 8) if preferred_weekdays else days
+    offset = 0
+    checked = 0
+    while checked < scan_limit and len(collected) < max_slots:
         day = (local_anchor + timedelta(days=offset)).replace(
             hour=0, minute=0, second=0, microsecond=0
         )
+        offset += 1
+        if preferred_weekdays is not None and day.weekday() not in preferred_weekdays:
+            continue
+        checked += 1
         start = day.replace(hour=day_start_hour)
         end = day.replace(hour=day_end_hour)
         # Prefer evening-ish when asking about dinner times.
-        if local_anchor.hour >= 16 and offset == 0:
+        if (
+            preferred_weekdays is None
+            and local_anchor.hour >= 16
+            and day.date() == local_anchor.date()
+        ):
             start = max(start, local_anchor.replace(second=0, microsecond=0))
         slots = find_free_slots(
             events,
@@ -213,8 +230,6 @@ def find_free_slots_nearby(
             max_slots=max_slots - len(collected),
         )
         collected.extend(slots)
-        if len(collected) >= max_slots:
-            break
     return collected[:max_slots]
 
 
@@ -272,11 +287,15 @@ def occurrence_windows(
     now: datetime | None = None,
     weeks: int = 2,
 ) -> list[tuple[datetime, datetime]]:
-    """Upcoming occurrence windows for conflict scanning (recurring or one-off)."""
+    """Upcoming occurrence windows for conflict scanning.
+
+    Expands ``by_days`` (e.g. weekend SA/SU) even when the draft is not a
+    recurring series — availability asks still need those preferred days.
+    """
     now = now or datetime.now(tz=timezone.utc)
     first_start, first_end = draft_window(draft, now=now)
     duration = first_end - first_start
-    if not draft.recurring or not draft.by_days:
+    if not draft.by_days:
         return [(first_start, first_end)]
 
     tz = ZoneInfo(draft.timezone)

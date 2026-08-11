@@ -28,11 +28,18 @@ from level_core.memory.base import MemoryBank
 from level_core.models.base import GenerationRequest
 from level_core.models.factory import build_gemini_client
 from level_core.observability.logger import get_logger
+from level_core.profile.synthesize import (
+    build_holding_summary,
+    build_week_role_load,
+    cached_care_graph,
+)
 from level_core.profile.today import (
     build_recommendations,
     build_tomorrow_preview,
     format_event_time,
 )
+from level_core.schemas.care import CareGraph
+from level_core.schemas.decision import DecisionStatus
 from level_core.schemas.signal import Fact, FactType, Signal, SignalSource
 from level_core.schemas.user import OAuthToken, format_person_name
 
@@ -61,6 +68,30 @@ class TomorrowPreview(BaseModel):
     events: list[TodayEvent] = Field(default_factory=list)
 
 
+class PendingChallenge(BaseModel):
+    """Unsolicited role-theft challenge from the Continuous Action job."""
+
+    decision_id: str
+    trigger_label: str
+    question: str | None = None
+    challenge_type: str | None = None
+
+
+class HoldingChip(BaseModel):
+    label: str
+    role_id: str
+    color: str
+
+
+class WeekRoleLoad(BaseModel):
+    role_id: str
+    label: str
+    color: str
+    percent: int
+    event_count: int = 0
+    minutes: int = 0
+
+
 class TodayResponse(BaseModel):
     user_id: str
     display_name: str | None = None
@@ -75,6 +106,11 @@ class TodayResponse(BaseModel):
     needs_review: bool = False
     fact_count: int = 0
     manifesto: str | None = None
+    pending_challenges: list[PendingChallenge] = Field(default_factory=list)
+    care_graph: CareGraph | None = None
+    holding: list[HoldingChip] = Field(default_factory=list)
+    week_load: list[WeekRoleLoad] = Field(default_factory=list)
+    conflict_summaries: list[str] = Field(default_factory=list)
 
 
 class DayCheckInRequest(BaseModel):
@@ -93,6 +129,10 @@ class _CheckInParse(BaseModel):
     keywords: list[str] = Field(default_factory=list)
     reminder: str = ""
     reply: str = ""
+    # Exact calendar titles from the provided agenda this note applies to.
+    matched_titles: list[str] = Field(default_factory=list)
+    # When the note is about job/work, set paid_work so we can tag those events.
+    care_role: str = ""
 
 
 class _TomorrowLLM(BaseModel):
@@ -133,7 +173,11 @@ def _to_today_event(raw: dict, user_cues: list) -> TodayEvent:
         start=raw.get("start"),
         end=raw.get("end"),
         all_day=bool(raw.get("all_day")),
-        when_label=format_event_time(raw.get("start"), all_day=bool(raw.get("all_day"))),
+        when_label=format_event_time(
+            raw.get("start"),
+            end_raw=raw.get("end"),
+            all_day=bool(raw.get("all_day")),
+        ),
         activity_kind=kind,
         color=activity_color(kind),
         cues=match_cues_for_summary(summary, user_cues),
@@ -300,6 +344,107 @@ async def get_today(
         events=tomorrow_events[:8],
     )
 
+    pending: list[PendingChallenge] = []
+    try:
+        decisions = await memory.decisions.list_for_user(user_id=user_id, limit=20)
+        for d in decisions:
+            if d.status is not DecisionStatus.OPEN:
+                continue
+            if d.origin != "async_role_theft":
+                continue
+            turns = await memory.decisions.list_turns(
+                user_id=user_id, decision_id=d.decision_id
+            )
+            q = None
+            ctype = None
+            for t in reversed(turns):
+                if t.challenger_questions:
+                    q = t.challenger_questions[0].question
+                    ctype = t.challenger_questions[0].challenge_type
+                    break
+            pending.append(
+                PendingChallenge(
+                    decision_id=d.decision_id,
+                    trigger_label=d.trigger_label or "Care collision on your calendar",
+                    question=q,
+                    challenge_type=ctype,
+                )
+            )
+            if len(pending) >= 3:
+                break
+    except Exception:  # noqa: BLE001
+        _logger.warning("pending_challenges_failed", user_id=user_id)
+
+    care_graph = None
+    holding: list[HoldingChip] = []
+    week_load: list[WeekRoleLoad] = []
+    conflict_summaries: list[str] = []
+    try:
+        care = await memory.manifestos.get_care_profile(user_id=user_id)
+        agenda_events: list[dict] = [
+            {
+                "summary": e.summary,
+                "start": e.start,
+                "end": e.end,
+                "all_day": e.all_day,
+            }
+            for e in events_out
+            if e.summary
+        ]
+        # Prefer full agenda cache for category counts when available.
+        try:
+            state = await sync_store.get(user_id)
+            if state and state.events:
+                agenda_events = [
+                    {
+                        "summary": ev.summary,
+                        "start": ev.start,
+                        "end": ev.end,
+                        "all_day": ev.all_day,
+                    }
+                    for ev in state.events.values()
+                    if ev.summary
+                ]
+        except Exception:  # noqa: BLE001
+            pass
+        # Never block Today on Gemini — enrich off the request path.
+        if care is not None and agenda_events and not care.calendar_role_by_summary:
+            from level_api.routes.sources import _bg_enrich_care_if_needed
+
+            background_tasks.add_task(
+                _bg_enrich_care_if_needed, user_id, memory, sync_store
+            )
+        if (care is None or not care.roles) and agenda_events:
+            from level_api.routes.sources import _seed_care_from_agenda_fast
+            from level_core.profile.synthesize import invalidate_care_graph_cache
+
+            care = await _seed_care_from_agenda_fast(
+                user_id=user_id,
+                memory=memory,
+                sync_store=sync_store,
+                events=agenda_events,
+            )
+            invalidate_care_graph_cache(user_id)
+            if care is not None and not care.calendar_role_by_summary:
+                from level_api.routes.sources import _bg_enrich_care_if_needed
+
+                background_tasks.add_task(
+                    _bg_enrich_care_if_needed, user_id, memory, sync_store
+                )
+        if care is not None:
+            care_graph, _, _ = cached_care_graph(care, agenda_events or None)
+            holding = [
+                HoldingChip.model_validate(row)
+                for row in build_holding_summary(care)
+            ]
+            week_load = [
+                WeekRoleLoad.model_validate(row)
+                for row in build_week_role_load(care, agenda_events)
+            ]
+            conflict_summaries = list(care.conflict_summaries[:3])
+    except Exception:  # noqa: BLE001
+        _logger.warning("care_graph_failed", user_id=user_id)
+
     return TodayResponse(
         user_id=user_id,
         display_name=display_name,
@@ -314,23 +459,66 @@ async def get_today(
         needs_review=bool(snapshot.needs_review) if snapshot else False,
         fact_count=len(facts),
         manifesto=manifesto.statement if manifesto else None,
+        pending_challenges=pending,
+        care_graph=care_graph,
+        holding=holding,
+        week_load=week_load,
+        conflict_summaries=conflict_summaries,
     )
 
 
 @router.post("/check-in", response_model=DayCheckInResponse)
 async def day_check_in(
     payload: DayCheckInRequest,
+    background_tasks: BackgroundTasks,
     user_id: str = Depends(require_user),
     memory: MemoryBank = Depends(get_memory),
     tokens: TokenStore = Depends(get_token_store),
     cue_store: EventCueStore = Depends(get_event_cue_store),
+    sync_store: CalendarSyncStore = Depends(get_calendar_sync_store),
 ) -> DayCheckInResponse:
     """Friendly day check-in → profile fact + optional event-linked reminder."""
+    import re
     import uuid
+
+    from level_api.routes.sources import _bg_enrich_care
+    from level_core.profile.synthesize import invalidate_care_graph_cache
+    from level_core.schemas.base import _now_utc
 
     settings = get_settings()
     gemini = build_gemini_client(settings)
     message = payload.message.strip()
+
+    # Today's titles help the model attach reminders to real calendar events.
+    agenda_titles: list[str] = []
+    token = await tokens.get_google_token(user_id)
+    try:
+        if token is not None:
+            raw_today = await day_events_cached_or_live(
+                user_id=user_id,
+                token=token,
+                sync_store=sync_store,
+                day_offset=0,
+            )
+            agenda_titles = [
+                (e.get("summary") or "").strip()
+                for e in raw_today
+                if (e.get("summary") or "").strip()
+            ][:20]
+        if not agenda_titles:
+            state = await sync_store.get(user_id)
+            if state and state.events:
+                from level_core.calendar.sync_state import events_for_local_day
+
+                agenda_titles = [
+                    e["summary"]
+                    for e in events_for_local_day(state, day_offset=0)
+                    if e.get("summary")
+                ][:20]
+    except Exception:  # noqa: BLE001
+        agenda_titles = []
+
+    titles_block = "\n".join(f"- {t}" for t in agenda_titles) or "(no titles available)"
     parsed = _CheckInParse(
         profile_note=message[:400],
         reply="Got it — I’ll remember that.",
@@ -341,18 +529,31 @@ async def day_check_in(
                 model_id=settings.fast_model,
                 system_instruction=(
                     "You help Level learn from a caregiver's day check-in. "
-                    "Extract a first-person profile_note (what is true about their life). "
-                    "If they mention something tied to a recurring activity "
-                    "(soccer, school, dinner, work, etc.), also extract lowercase keywords "
-                    "that would appear in a calendar title, and a short warm reminder "
-                    "shown on matching days (e.g. \"Don't forget Jordan's shoes today!\"). "
-                    "If nothing activity-specific, leave keywords/reminder empty. "
-                    "reply is 1 short warm sentence. JSON only."
+                    "Reason from the user's words + today's agenda together "
+                    "(do not rely on fixed keyword lists).\n"
+                    "Extract:\n"
+                    "- profile_note: first-person fact about their life.\n"
+                    "- keywords: lowercase tokens from agenda titles this note "
+                    "should attach to (copy words that appear in those titles).\n"
+                    "- matched_titles: exact agenda title strings this note applies "
+                    "to (copy from the agenda list; empty if none fit).\n"
+                    "- care_role: holistically choose paid_work, child_care, "
+                    "elder_care, self_recovery, household_logistics, "
+                    "partner_coparent, or empty. Use agenda + wording: e.g. "
+                    "forgetting a charger for work + a Meeting on the agenda → "
+                    "paid_work and match that Meeting. Classes/courses are not "
+                    "self_recovery.\n"
+                    "- reminder: short warm nudge shown on matching days.\n"
+                    "- reply: 1 short warm sentence (complete — do not trail off).\n"
+                    "JSON only."
                 ),
-                prompt=f"User said: {message}",
+                prompt=(
+                    f"User said: {message}\n\n"
+                    f"Today's agenda titles:\n{titles_block}\n"
+                ),
                 response_schema=_CheckInParse.model_json_schema(),
-                temperature=0.25,
-                max_output_tokens=280,
+                temperature=0.2,
+                max_output_tokens=320,
             )
         )
         parsed = _CheckInParse.model_validate(json.loads(resp.text))
@@ -382,7 +583,18 @@ async def day_check_in(
         await memory.signals.upsert(signal)
 
     cues_added = 0
-    keywords = [k.strip().lower() for k in parsed.keywords if k and k.strip()][:6]
+    keywords = [k.strip().lower() for k in parsed.keywords if k and k.strip()][:8]
+    # Fold AI-matched agenda titles into cue keywords so reminders stick to events.
+    for title in parsed.matched_titles:
+        t = (title or "").strip()
+        if not t:
+            continue
+        for token in re.findall(r"[a-z0-9']+", t.lower()):
+            if len(token) >= 3 and token not in keywords:
+                keywords.append(token)
+        if len(keywords) >= 8:
+            break
+    keywords = keywords[:8]
     reminder = (parsed.reminder or "").strip()[:220]
     if keywords and reminder:
         await cue_store.add(
@@ -395,16 +607,53 @@ async def day_check_in(
         )
         cues_added = 1
 
-    reply = (parsed.reply or "Got it — I’ll keep that in mind.").strip()[:400]
+    # Apply AI-chosen role tags immediately; holistic enrich reconciles the rest.
+    role_raw = (parsed.care_role or "").strip().lower()
+    titles_to_tag = [t.strip() for t in parsed.matched_titles if t and t.strip()]
+    if role_raw and titles_to_tag:
+        try:
+            care = await memory.manifestos.get_care_profile(user_id=user_id)
+            if care is not None:
+                hints = dict(care.calendar_role_by_summary)
+                for title in titles_to_tag:
+                    key = re.sub(r"\s+", " ", title.strip().lower())
+                    if key:
+                        hints[key] = role_raw
+                care = care.model_copy(
+                    update={
+                        "calendar_role_by_summary": hints,
+                        "version": int(care.version or 1) + 1,
+                        "updated_at": _now_utc(),
+                    }
+                )
+                invalidate_care_graph_cache(user_id)
+                await memory.manifestos.save_care_profile(care)
+        except Exception:  # noqa: BLE001
+            _logger.warning("checkin_care_tag_failed", user_id=user_id)
+
+    # Reclassify agenda off the request path — never block the chat reply on it.
+    if facts_added:
+        background_tasks.add_task(
+            _bg_enrich_care, user_id, memory, sync_store, force=True
+        )
+
+    fallback = "Got it — I’ll keep that in mind."
+    reply = (parsed.reply or fallback).strip()
+    # Models sometimes return Got it: " or a fully quoted sentence.
+    if len(reply) >= 2 and reply[0] in "\"'" and reply[-1] == reply[0]:
+        reply = reply[1:-1].strip()
+    if reply.endswith('"') and reply.count('"') % 2 == 1:
+        reply = reply[:-1].rstrip()
+    reply = reply.strip() or fallback
     if cues_added and keywords:
         reply = f"{reply} I’ll nudge you on {keywords[0]} days."
 
-    today = await get_today(user_id=user_id, memory=memory, tokens=tokens, cues=cue_store)
+    # Reply first — full Today rebuild was adding 1–2s after Gemini already ran.
     return DayCheckInResponse(
         reply=reply,
         facts_added=facts_added,
         cues_added=cues_added,
-        today=today,
+        today=None,
     )
 
 

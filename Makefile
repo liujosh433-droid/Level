@@ -67,6 +67,15 @@ job-async-challenge: ## Run the async challenge Cloud Run Job locally
 job-ingest: ## Run the ingest_all job locally (fixture demo signals)
 	LEVEL_INGEST_FIXTURES=1 LEVEL_JOB_USER_IDS=demo-parent $(UV) run python -m level_jobs.ingest_all
 
+.PHONY: job-retain
+job-retain: ## Run retention prune (TTL + soft cap)
+	LEVEL_JOB_USER_IDS=demo-parent $(UV) run python -m level_jobs.retain
+
+.PHONY: demo-judge
+demo-judge: ## Continuous Action proof: ingest → Care Profile → async challenge → retain
+	LEVEL_ENV=local LEVEL_INGEST_FIXTURES=1 LEVEL_JOB_USER_IDS=demo-parent \
+		$(UV) run python scripts/demo_continuous_action.py
+
 .PHONY: seed
 seed: ## Seed demo caregiver narrative into Memory Bank (calls Gemini)
 	$(UV) run python scripts/seed_demo_data.py

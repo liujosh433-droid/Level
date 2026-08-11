@@ -2,9 +2,10 @@
   min-height: 100dvh;
   display: grid;
   grid-template-rows: auto 1fr auto;
-  max-width: 44rem;
-  margin: 0 auto;
-  padding: 1.25rem clamp(1rem, 3vw, 1.75rem) 1.5rem;
+  max-width: none;
+  width: 100%;
+  margin: 0;
+  padding: 1.25rem 0 1.5rem;
   animation: rise 0.5s ease-out both;
 }
 

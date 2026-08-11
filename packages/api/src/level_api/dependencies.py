@@ -73,6 +73,7 @@ def cached_conductor() -> Conductor:
         embedder=build_embedding_client(settings),
         guardrail=OutboundGuardrail(settings=settings),
         settings=settings,
+        gateway=cached_gateway(),
     )
 
 

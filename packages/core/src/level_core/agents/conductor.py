@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 
 from level_core.agents import challenger as challenger_module
 from level_core.agents import framer as framer_module
+from level_core.agents import ingest_normalizer as ingest_module
 from level_core.agents import judge as judge_module
 from level_core.agents import retriever as retriever_module
 from level_core.agents.challenger import Challenger, ChallengerInput
@@ -32,10 +33,14 @@ from level_core.agents.framer import Framer, FramerInput
 from level_core.agents.judge import Judge, JudgeInput
 from level_core.agents.registry import AgentRegistry
 from level_core.agents.retriever import Retriever, RetrieverInput
+from level_core.bias.profile import BiasAggregator
 from level_core.config import Settings, get_settings
 from level_core.errors import GuardrailBlocked, InvalidAgentOutput
+from level_core.gateway.router import AgentGateway
+from level_core.gateway.tools import register_memory_tools
 from level_core.guardrails.outbound import OutboundGuardrail
 from level_core.memory.base import MemoryBank
+from level_core.models.base import EmbeddingClient, GeminiClient
 from level_core.observability.audit import AuditEventKind, write_audit_event
 from level_core.observability.logger import get_logger
 from level_core.observability.tracer import current_trace_id, traced
@@ -126,35 +131,71 @@ class Conductor:
             user_id=input_.user_id, decision_id=input_.decision_id
         )
 
-        # 3. Challenge.
-        try:
-            questions = await self.challenger.run(
-                ChallengerInput(
-                    frame=frame,
-                    retrieved_facts=facts,
-                    manifesto_snippet=evidence.manifesto_snippet,
-                    bias_profile=bias_profile,
-                    prior_turns=prior_turns,
-                    user_text=input_.user_text,
-                    coverage_note=evidence.coverage_note or "",
-                    contradiction_summaries=list(evidence.contradiction_summaries or []),
+        # 3. Challenge — retry once with stricter repair prompt on invalid output
+        # or hallucinated citations (failure-tolerant inter-agent routing).
+        challenge_input = ChallengerInput(
+            frame=frame,
+            retrieved_facts=facts,
+            manifesto_snippet=evidence.manifesto_snippet,
+            bias_profile=bias_profile,
+            prior_turns=prior_turns,
+            user_text=input_.user_text,
+            coverage_note=evidence.coverage_note or "",
+            contradiction_summaries=list(evidence.contradiction_summaries or []),
+            care_profile_snippet=evidence.care_profile_snippet,
+        )
+        questions: list[ChallengeQuestion] | None = None
+        last_challenge_error: str | None = None
+        for attempt in range(2):
+            try:
+                attempt_input = (
+                    challenge_input
+                    if attempt == 0
+                    else ChallengerInput(
+                        frame=challenge_input.frame,
+                        retrieved_facts=challenge_input.retrieved_facts,
+                        manifesto_snippet=challenge_input.manifesto_snippet,
+                        bias_profile=challenge_input.bias_profile,
+                        prior_turns=challenge_input.prior_turns,
+                        user_text=challenge_input.user_text,
+                        coverage_note=challenge_input.coverage_note,
+                        contradiction_summaries=challenge_input.contradiction_summaries,
+                        care_profile_snippet=challenge_input.care_profile_snippet,
+                        repair=True,
+                    )
                 )
-            )
-        except InvalidAgentOutput as exc:
-            return await self._degrade(turn, reason=f"challenger: {exc.validation_error}")
+                questions = await self.challenger.run(attempt_input)
+                self.guardrail.enforce(
+                    questions=questions,
+                    available_fact_ids={f.fact_id for f in facts},
+                    user_id=input_.user_id,
+                )
+                break
+            except InvalidAgentOutput as exc:
+                last_challenge_error = f"challenger: {exc.validation_error}"
+                _logger.warning(
+                    "challenger_invalid_output",
+                    attempt=attempt,
+                    reason=exc.validation_error,
+                )
+            except GuardrailBlocked as exc:
+                last_challenge_error = f"guardrail: {exc.reason}"
+                _logger.warning(
+                    "challenger_guardrail_blocked",
+                    attempt=attempt,
+                    reason=exc.reason,
+                )
+                if attempt == 1:
+                    return await self._degrade(
+                        turn,
+                        reason=last_challenge_error,
+                        status=TurnStatus.BLOCKED,
+                    )
 
-        # 4. Outbound guardrail — block hallucinated citations before user sees them.
-        try:
-            self.guardrail.enforce(
-                questions=questions,
-                available_fact_ids={f.fact_id for f in facts},
-                user_id=input_.user_id,
-            )
-        except GuardrailBlocked as exc:
+        if questions is None:
             return await self._degrade(
                 turn,
-                reason=f"guardrail: {exc.reason}",
-                status=TurnStatus.BLOCKED,
+                reason=last_challenge_error or "challenger: unknown failure",
             )
 
         # 5. Judge — score biases from this turn.
@@ -179,8 +220,6 @@ class Conductor:
             await self.memory.turns.append_bias_event(event)
 
         if bias_events:
-            from level_core.bias.profile import BiasAggregator
-
             update = BiasAggregator().update(profile=bias_profile, events=bias_events)
             await self.memory.manifestos.save_bias_profile(update.profile)
 
@@ -246,30 +285,31 @@ class Conductor:
 def build_conductor(
     *,
     memory: MemoryBank,
-    gemini: object,  # GeminiClient
-    embedder: object,  # EmbeddingClient
+    gemini: GeminiClient,
+    embedder: EmbeddingClient,
     guardrail: OutboundGuardrail | None = None,
     settings: Settings | None = None,
+    gateway: AgentGateway | None = None,
 ) -> Conductor:
     """Assemble a Conductor with the given dependencies."""
     settings = settings or get_settings()
     guardrail = guardrail or OutboundGuardrail(settings=settings)
-    from level_core.models.base import EmbeddingClient, GeminiClient  # runtime type refs
 
-    gemini_client: GeminiClient = gemini  # type: ignore[assignment]
-    embedding_client: EmbeddingClient = embedder  # type: ignore[assignment]
+    if gateway is not None:
+        register_memory_tools(gateway, memory, embedder=embedder)
 
-    framer = Framer(gemini=gemini_client, model_id=settings.reasoning_model)
+    framer = Framer(gemini=gemini, model_id=settings.reasoning_model)
     retriever = Retriever(
-        gemini=gemini_client,
-        embedder=embedding_client,
+        gemini=gemini,
+        embedder=embedder,
         vectors=memory.vectors,
         facts=memory.facts,
         manifestos=memory.manifestos,
         model_id=settings.fast_model,
+        gateway=gateway,
     )
-    challenger = Challenger(gemini=gemini_client, model_id=settings.reasoning_model)
-    judge = Judge(gemini=gemini_client, model_id=settings.fast_model)
+    challenger = Challenger(gemini=gemini, model_id=settings.reasoning_model)
+    judge = Judge(gemini=gemini, model_id=settings.fast_model)
 
     return Conductor(
         framer=framer,
@@ -292,8 +332,6 @@ async def register_all_agents(registry: AgentRegistry, settings: Settings) -> No
     await registry.register(retriever_module.build_version(settings))
     await registry.register(challenger_module.build_version(settings))
     await registry.register(judge_module.build_version(settings))
-    from level_core.agents import ingest_normalizer as ingest_module
-
     await registry.register(ingest_module.build_version(settings))
 
 

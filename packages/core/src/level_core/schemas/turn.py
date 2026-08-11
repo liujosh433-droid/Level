@@ -68,6 +68,14 @@ class RetrievedEvidence(TraceableModel):
         default_factory=list,
         description="Active tensions from the user's profile (commitment vs constraint, etc.).",
     )
+    care_profile_snippet: str | None = Field(
+        default=None,
+        description="Compact caregiver role-load block for Challenger grounding.",
+    )
+    care_role_fact_ids: list[str] = Field(
+        default_factory=list,
+        description="Fact ids pinned from the Care Profile (role evidence).",
+    )
 
 
 class ChallengeQuestion(TraceableModel):
@@ -83,7 +91,10 @@ class ChallengeQuestion(TraceableModel):
         description="Every claim about the user's past must cite at least one fact.",
     )
     challenge_type: str = Field(
-        description="One of: assumption, counterexample, value_alignment, time_horizon, reversibility, precedent, framing.",
+        description=(
+            "One of: role_theft, assumption, counterexample, value_alignment, "
+            "time_horizon, reversibility, precedent, framing."
+        ),
     )
 
 

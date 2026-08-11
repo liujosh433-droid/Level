@@ -1,9 +1,10 @@
 """Retriever — pulls the most relevant facts from the user's Memory Bank.
 
 Hybrid retrieval:
-  1. Always pin durable constraints / commitments / relationships / values
-  2. Fill remaining slots with vector search
-  3. Attach active contradiction summaries from the profile snapshot
+  1. Pin Care Profile role facts first (caregiver specialization)
+  2. Pin durable constraints / commitments / relationships / values
+  3. Fill remaining slots with vector search
+  4. Attach active contradiction summaries from the profile snapshot
 """
 
 from __future__ import annotations
@@ -14,11 +15,13 @@ from typing import TYPE_CHECKING
 from pydantic import Field
 
 from level_core.agents.base import AgentOutputModel, PROMPT_VERSION, parse_output, prompt_sha
+from level_core.gateway.router import AgentGateway
 from level_core.identity.auth import default_service_account_for
 from level_core.memory.base import FactRepository, ManifestoRepository, VectorHit, VectorStore
 from level_core.models.base import EmbeddingClient, GeminiClient, GenerationRequest
 from level_core.observability.tracer import traced
 from level_core.schemas.agent import AgentVersion
+from level_core.schemas.care import active_care_roles, care_profile_snippet
 from level_core.schemas.decision import DecisionFrame
 from level_core.schemas.profile import BulletStatus
 from level_core.schemas.signal import Fact, FactType
@@ -102,6 +105,24 @@ def _pin_durable_facts(facts: list[Fact], *, limit: int = 4) -> list[Fact]:
     return pinned[:limit]
 
 
+def _pin_care_role_facts(
+    facts: list[Fact],
+    role_fact_ids: list[str],
+    *,
+    limit: int = 4,
+) -> list[Fact]:
+    by_id = {f.fact_id: f for f in facts}
+    out: list[Fact] = []
+    for fid in role_fact_ids:
+        fact = by_id.get(fid)
+        if fact is None:
+            continue
+        out.append(fact)
+        if len(out) >= limit:
+            break
+    return out
+
+
 class Retriever:
     """Hybrid durable-pin + vector retrieval + LLM coverage annotation."""
 
@@ -114,6 +135,7 @@ class Retriever:
         facts: FactRepository,
         manifestos: ManifestoRepository,
         model_id: str,
+        gateway: AgentGateway | None = None,
     ) -> None:
         self._gemini = gemini
         self._embedder = embedder
@@ -121,12 +143,40 @@ class Retriever:
         self._facts = facts
         self._manifestos = manifestos
         self._model_id = model_id
+        self._gateway = gateway
+
+    async def _load_care_profile(self, user_id: str):
+        """Load Care Profile via Agent Gateway when wired (scoped tool access)."""
+        if self._gateway is not None:
+            return await self._gateway.invoke(
+                agent_name=NAME,
+                tool_name="get_care_profile",
+                user_id=user_id,
+            )
+        return await self._manifestos.get_care_profile(user_id=user_id)
 
     @traced("agent.retriever.run")
     async def run(self, input_: RetrieverInput) -> RetrievedEvidence:
         all_facts = await self._facts.list_for_user(user_id=input_.user_id, limit=200)
-        pinned = _pin_durable_facts(all_facts, limit=4)
+        care = await self._load_care_profile(input_.user_id)
+        care_roles = active_care_roles(care)
+        care_fact_ids: list[str] = []
+        for role in sorted(care_roles, key=lambda r: r.salience, reverse=True)[:4]:
+            care_fact_ids.extend(role.source_fact_ids[:2])
+        care_pinned = _pin_care_role_facts(all_facts, care_fact_ids, limit=4)
+        durable = _pin_durable_facts(all_facts, limit=4)
+        # Care roles first, then other durable pins.
+        pinned: list[Fact] = []
+        seen_pin: set[str] = set()
+        for f in care_pinned + durable:
+            if f.fact_id in seen_pin:
+                continue
+            seen_pin.add(f.fact_id)
+            pinned.append(f)
+            if len(pinned) >= 6:
+                break
         pinned_ids = [f.fact_id for f in pinned]
+        care_role_fact_ids = [f.fact_id for f in care_pinned]
 
         query_text = f"{input_.frame.subject}. Stakes: {input_.frame.stakes}. Options: " + ", ".join(
             input_.frame.options
@@ -161,9 +211,15 @@ class Retriever:
                     continue
                 contradiction_summaries.append(c.summary)
                 for fid in (c.fact_id_a, c.fact_id_b):
+                    if fid in {"none", ""}:
+                        continue
                     if fid not in seen:
                         seen.add(fid)
                         ordered_fact_ids.append(fid)
+        if care and care.conflict_summaries:
+            for s in care.conflict_summaries:
+                if s not in contradiction_summaries:
+                    contradiction_summaries.append(s)
 
         facts = await self._facts.get_many(user_id=input_.user_id, fact_ids=ordered_fact_ids)
         fact_id_set = {f.fact_id for f in facts}
@@ -174,13 +230,16 @@ class Retriever:
 
         manifesto = await self._manifestos.get_current_manifesto(user_id=input_.user_id)
         manifesto_snippet = manifesto.statement[:800] if manifesto else None
+        care_snip = care_profile_snippet(care) or None
 
-        if not ordered_fact_ids and manifesto_snippet is None:
+        if not ordered_fact_ids and manifesto_snippet is None and care_snip is None:
             return RetrievedEvidence(
                 fact_ids=[],
                 manifesto_snippet=None,
                 coverage_note="No prior signals or manifesto — Level has little context on this decision yet.",
                 contradiction_summaries=[],
+                care_profile_snippet=None,
+                care_role_fact_ids=[],
                 written_by=f"{NAME}@{VERSION}",
             )
 
@@ -218,6 +277,8 @@ class Retriever:
             manifesto_snippet=manifesto_snippet,
             coverage_note=parsed.coverage_note,
             contradiction_summaries=contradiction_summaries[:5],
+            care_profile_snippet=care_snip,
+            care_role_fact_ids=care_role_fact_ids,
             written_by=f"{NAME}@{VERSION}",
         )
 
@@ -232,7 +293,13 @@ def build_version(settings: Settings) -> AgentVersion:
         service_account=(
             None if settings.is_local else default_service_account_for(NAME, settings.gcp_project)
         ),
-        allowed_tools=["embed_query", "vector_search", "get_facts", "get_manifesto"],
+        allowed_tools=[
+            "embed_query",
+            "vector_search",
+            "get_facts",
+            "get_manifesto",
+            "get_care_profile",
+        ],
         description=DESCRIPTION,
     )
 

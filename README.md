@@ -1,8 +1,8 @@
 # Level
 
-**A warm-but-honest AI decision partner for busy caregivers.**
+**See what saying yes crowds out from the care roles you hold.**
 
-Level is a multi-agent system (Google ADK + Gemini 3.5) that continuously ingests messy personal signals — Google Calendar, voice memos, prior AI chat exports — into a persistent Memory Bank, then acts as the friend who isn't afraid to ask you the hard clarifying question. Instead of the reflexive agreement most AI defaults to, Level asks *what if you're wrong*, cites your own past evidence back at you, and tracks your cognitive biases session over session so you make decisions you can still defend a week later.
+Level is a multi-agent system (Google ADK + Gemini 3.5) for busy caregivers. It ingests messy calendar and chat signals, **mutates a Care Profile** (child care, elder care, paid work, self & recovery, household logistics, co-parent), and challenges **care collisions** — warmly, with citations — instead of helping you say yes faster. A background job opens unsolicited challenges when new events collide with sticky care windows.
 
 > Built for the [All Things Agentic Hackathon](https://allthingsagentichackathon.devpost.com/) — **Collaborative Partner** track.
 
@@ -22,28 +22,27 @@ Level is a multi-agent system (Google ADK + Gemini 3.5) that continuously ingest
 
 ## What Level does
 
-Most AI assistants are sycophants — they agree, encourage, and paper over uncertainty. Caregivers who are already stretched thin need the opposite: a partner who can hold the full context of their life, notice when they're rushing a decision, and ask the question a good friend would ask.
-
-Level ingests three kinds of messy signals and turns them into structured memory:
+General assistants optimize *your* time. Level models **competing care roles** under scarce degrees of freedom and asks what saying yes would crowd out.
 
 | Signal type | Source | What we extract |
 |---|---|---|
-| Calendar events | Google Calendar API | Time pressure, meeting cadence, life rhythm |
-| Voice memos | User upload → Gemini transcription | Emotional tone, unspoken preferences |
-| Prior AI chats | ChatGPT / Claude / Gemini export drops | What the user has already reasoned through |
+| Calendar events | Google Calendar API / fixtures | Care roles, protected windows (pickup), load |
+| Voice memos | Transcripts (fixtures / upload path) | Preferences, strain language |
+| Prior AI chats | ChatGPT export zip/JSON | Prior reasoning the user already did |
 
-When the user brings a decision — *"should I switch my son to the new school?"*, *"do I take the promotion?"* — Level runs a chain of specialized ADK agents:
+Knowledge loop mutates a **Care Profile**; users confirm with Keep / Not me. Session loop:
 
 ```
 Framer  →  Retriever  →  Challenger  →  Judge
   ↓          ↓             ↓             ↓
-restates   pulls        asks the      scores which
-the        cited        hard          cognitive biases
-decision   evidence     question      showed up in the
-                                      user's framing
+restates   pins care     role_theft    bias events
+decision   facts +       questions     on framing
+           Care Profile
 ```
 
-Each turn updates a **Bias Profile** — a persistent, evolving picture of the user's decision-making patterns. Over weeks, Level learns *how* you tend to be wrong so it can push back more precisely.
+**Continuous Action:** `level-async-challenge` finds collisions against confirmed windows and opens an unsolicited care-collision Decision visible on Today.
+
+**Retention:** `level-retain` prunes stale EVENT facts (90d TTL) and soft-caps facts/user at 150 — never deletes Keep’d care pins or recently cited evidence. GCS cold archive is a scale-up path (see `ARCHITECTURE.md`).
 
 ---
 
@@ -126,6 +125,9 @@ make web         # Next.js at http://localhost:3000
 
 # optional — seed the demo caregiver narrative (calls Gemini):
 make seed
+
+# judge-facing Continuous Action proof (ingest → Care Profile → async care collision → retain):
+make demo-judge
 ```
 
 By default `LEVEL_ENV=local` uses in-memory fakes for Firestore and Vector Search so you can build and test without any GCP setup. Set `LEVEL_ENV=cloud` and provide `gcloud auth application-default login` credentials to hit real services.

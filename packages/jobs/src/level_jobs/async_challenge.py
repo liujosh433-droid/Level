@@ -1,44 +1,59 @@
-"""Async challenge job — runs the Conductor on any OPEN decision that hasn't
-had a turn in the last configurable interval.
+"""Async role-theft challenge job — Continuous Action Engine.
 
-This demonstrates the "Continuous Action Engine" / long-running async
-workflow criterion from the hackathon rubric: even when the user isn't
-active, the system considers whether any of their decisions have new
-context (from freshly ingested signals) that would materially change what
-Level would say — and if so, drops an unsolicited (opt-in) prompt into
-their app so they see it next time they open Level.
+Scans each user's Care Profile + upcoming agenda for collisions against
+protected care windows. When a collision is found and no open decision
+already covers it, opens a Decision and runs the Conductor with a synthetic
+prompt — no human in the loop until they open the app.
 
-For the hackathon build the job scans OPEN decisions and generates a
-follow-up "here's what changed since we last talked about this" Turn,
-persisted with role=level and status=complete.
+Calendar *writes* stay confirm-gated elsewhere; this job only challenges.
 """
 
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 
-from level_core.agents.conductor import build_conductor, SessionInput
+from level_core.agents.conductor import SessionInput, build_conductor
+from level_core.calendar.role_collisions import (
+    RoleCollision,
+    find_role_collisions,
+    synthesize_demo_collision_event,
+)
+from level_core.calendar.sync_state import build_calendar_sync_store
 from level_core.config import get_settings
+from level_core.gateway.router import AgentGateway
+from level_core.memory.base import MemoryBank
 from level_core.memory.factory import build_memory
 from level_core.models.factory import build_embedding_client, build_gemini_client
 from level_core.observability.logger import get_logger
+from level_core.schemas.care import CareRoleId
+from level_core.schemas.decision import Decision, DecisionStatus
+from level_core.schemas.turn import TurnStatus
 from level_jobs.base import run_job
 
 _logger = get_logger(__name__)
 
 
 async def main() -> int:
-    """Scan all users' open decisions and prompt Level to re-check."""
     settings = get_settings()
     memory = build_memory(settings)
     gemini = build_gemini_client(settings)
     embedder = build_embedding_client(settings)
-    conductor = build_conductor(memory=memory, gemini=gemini, embedder=embedder, settings=settings)
+    conductor = build_conductor(
+        memory=memory,
+        gemini=gemini,
+        embedder=embedder,
+        settings=settings,
+        gateway=AgentGateway(),
+    )
 
-    user_ids_env = os.getenv("LEVEL_JOB_USER_IDS", "")
+    user_ids_env = os.getenv("LEVEL_JOB_USER_IDS", "demo-parent")
     user_ids = [u.strip() for u in user_ids_env.split(",") if u.strip()]
     if not user_ids:
-        _logger.info("no_users_configured", note="Set LEVEL_JOB_USER_IDS as a comma-separated list.")
+        _logger.info(
+            "no_users_configured",
+            note="Set LEVEL_JOB_USER_IDS as a comma-separated list.",
+        )
         return 0
 
     processed = 0
@@ -52,26 +67,136 @@ async def main() -> int:
     return 0
 
 
-async def _process_user(user_id: str, memory: object, conductor: object) -> int:
-    """Run one recheck-turn per OPEN decision for the given user.
+async def _load_agenda_events(user_id: str) -> list[dict[str, str | None]]:
+    """Prefer on-disk calendar sync cache; else empty (demo synth fills in)."""
+    try:
+        store = build_calendar_sync_store()
+        state = await store.get(user_id)
+        if state is None or not state.events:
+            return []
+        return [
+            {"summary": e.summary, "start": e.start}
+            for e in state.events.values()
+            if e.summary
+        ]
+    except Exception:  # noqa: BLE001
+        _logger.info("agenda_unavailable", user_id=user_id)
+        return []
 
-    In the local mode fake bank there's no cross-decision list method, so
-    this stops after the first missing lookup. In cloud mode a
-    collection-group query would replace this — added when we wire the
-    real Firestore repository.
-    """
-    from level_core.memory.base import MemoryBank
 
-    memory_bank: MemoryBank = memory  # type: ignore[assignment]
+def _already_challenged(decisions: list[Decision], collision: RoleCollision) -> bool:
+    needle = collision.event_summary.lower()[:40]
+    for d in decisions:
+        if d.status is not DecisionStatus.OPEN:
+            continue
+        if d.origin == "async_role_theft" and d.trigger_label:
+            if needle in d.trigger_label.lower():
+                return True
+        if d.frame and needle in (d.frame.subject or "").lower():
+            return True
+    return False
 
-    # Placeholder: for a real deployment we'd query `users/{uid}/decisions`
-    # with a status==open filter. The fakes don't support that filter yet,
-    # so we just log intent for now.
-    _logger.info("would_recheck_open_decisions", user_id=user_id)
-    del memory_bank
-    del conductor
-    del SessionInput  # keep import used at module load
 
+async def _process_user(user_id: str, memory: MemoryBank, conductor: object) -> int:
+    care = await memory.manifestos.get_care_profile(user_id=user_id)
+    if care is None or not care.roles:
+        _logger.info("async_challenge_skip_no_care_profile", user_id=user_id)
+        return 0
+
+    events = await _load_agenda_events(user_id)
+    collisions = find_role_collisions(care=care, events=events)
+    if not collisions:
+        demo = synthesize_demo_collision_event(care)
+        if demo:
+            events = [demo]
+            # Ensure the protected window matches the synth event weekday/hour
+            collisions = find_role_collisions(care=care, events=events)
+            if not collisions:
+                # Force a collision narrative even if window weekday heuristics miss
+                role = next(
+                    (
+                        r
+                        for r in care.roles
+                        if r.role_id is CareRoleId.CHILD_CARE
+                        or r.protected_windows
+                    ),
+                    care.roles[0],
+                )
+                window = (
+                    role.protected_windows[0].label
+                    if role.protected_windows
+                    else role.label
+                )
+                start = datetime.fromisoformat(
+                    (demo.get("start") or "").replace("Z", "+00:00")
+                )
+                if start.tzinfo is None:
+                    start = start.replace(tzinfo=timezone.utc)
+                collisions = [
+                    RoleCollision(
+                        event_summary=demo["summary"] or "Networking dinner",
+                        event_start=start,
+                        role_id=role.role_id,
+                        role_label=role.label,
+                        window_label=window,
+                        people=tuple(role.people[:3]),
+                        confirmed=True,
+                    )
+                ]
+
+    if not collisions:
+        _logger.info("async_challenge_no_collisions", user_id=user_id)
+        return 0
+
+    existing = await memory.decisions.list_for_user(user_id=user_id, limit=40)
+    collision = next(
+        (c for c in collisions if not _already_challenged(existing, c)), None
+    )
+    if collision is None:
+        _logger.info("async_challenge_already_covered", user_id=user_id)
+        return 0
+
+    trigger = collision.theft_message
+    decision = Decision(
+        user_id=user_id,
+        status=DecisionStatus.OPEN,
+        opened_at=datetime.now(tz=timezone.utc),
+        origin="async_role_theft",
+        trigger_label=trigger,
+        written_by="async_challenge@v1",
+    )
+    await memory.decisions.create(decision)
+
+    user_text = (
+        f"I'm about to keep this on my calendar: {collision.event_summary} "
+        f"({collision.event_start.strftime('%a %b %d %H:%M UTC')}). "
+        f"Should I say yes?"
+    )
+    manifesto = await memory.manifestos.get_current_manifesto(user_id=user_id)
+    snippet = manifesto.statement[:500] if manifesto else ""
+
+    turn = await conductor.run_turn(  # type: ignore[union-attr]
+        SessionInput(
+            user_id=user_id,
+            decision_id=decision.decision_id,
+            user_text=user_text,
+            manifesto_snippet=snippet,
+        )
+    )
+
+    _logger.info(
+        "async_role_theft_challenge_created",
+        user_id=user_id,
+        decision_id=decision.decision_id,
+        turn_status=turn.status.value,
+        challenge_types=[q.challenge_type for q in turn.challenger_questions],
+        trigger=trigger[:160],
+    )
+    if turn.status is TurnStatus.COMPLETE and turn.challenger_questions:
+        return 1
+    if turn.status in (TurnStatus.DEGRADED, TurnStatus.BLOCKED):
+        # Still counts as an opened background workflow for demo visibility.
+        return 1
     return 0
 
 

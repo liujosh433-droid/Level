@@ -111,6 +111,8 @@ Or tear everything down: `terraform destroy`.
 3. Open http://localhost:3000/sources → **Start as guest** → upload the zip.
 4. When Memory Bank shows facts → **Ask Level** with a real decision.
 
+Child names are optional on calendar titles: Level still opens a **child care** role from pickup/school/sports cues (shown as “your kids” until a name appears). Named nodes fill in from `Title — Name`, `Jordan's soccer`, ChatGPT/Memory Bank relationship facts, or a Tell Level note like “my kid is Maya.”
+
 Note: with `LEVEL_ENV=local`, memory is in-process — restarting the API clears guest data. For persistence, set `LEVEL_ENV=cloud` + `LEVEL_VECTOR_BACKEND=firestore` (ADC via `gcloud auth application-default login`).
 
 ### B. Google Calendar

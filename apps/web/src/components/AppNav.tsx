@@ -8,9 +8,9 @@ import styles from "./AppNav.module.css";
 
 const TABS = [
   { href: "/today", label: "Today", hint: "Schedule & ask" },
-  { href: "/profile", label: "Priorities", hint: "What you protect" },
-  { href: "/sources", label: "Sources", hint: "Calendar & ChatGPT" },
-  { href: "/about", label: "About", hint: "What Level can do" },
+  { href: "/profile", label: "About me", hint: "Who you are" },
+  { href: "/sources", label: "Sources", hint: "Calendar & Memory" },
+  { href: "/about", label: "Info", hint: "What Level can do" },
 ] as const;
 
 function initials(name?: string | null): string {
@@ -186,7 +186,7 @@ export function AppNav({
                         setOpen(false);
                       }}
                     >
-                      Your Priorities
+                      About me
                     </Link>
                     <Link
                       href="/about"
@@ -197,7 +197,7 @@ export function AppNav({
                         setOpen(false);
                       }}
                     >
-                      About Level
+                      Info
                     </Link>
                     <button
                       type="button"

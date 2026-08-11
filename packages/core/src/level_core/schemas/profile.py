@@ -33,6 +33,10 @@ class ProfileBullet(TraceableModel):
     text: str = Field(min_length=8, max_length=400)
     status: BulletStatus = BulletStatus.PENDING
     source_fact_ids: list[str] = Field(default_factory=list)
+    care_role_id: str | None = Field(
+        default=None,
+        description="CareRoleId when this bullet projects a caregiver role.",
+    )
 
 
 class Contradiction(TraceableModel):

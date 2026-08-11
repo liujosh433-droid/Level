@@ -16,7 +16,6 @@ from level_core.auth.google_oauth import credentials_from_token, token_from_cred
 from level_core.calendar.agenda_sync import ensure_calendar_watch, refresh_agenda_cache
 from level_core.calendar.sync_state import CalendarSyncState
 from level_core.observability.logger import get_logger
-from level_core.profile.synthesize import infer_priority_facts
 from level_core.schemas.base import _now_utc
 from level_core.schemas.signal import Signal
 
@@ -103,12 +102,14 @@ async def onboard_google_user(user_id: str) -> None:
         # Seed priorities from agenda immediately (not calendar-analytics dumps).
         state = await sync_store.get(user_id)
         if state and state.events:
-            priority_facts = infer_priority_facts(
+            from level_api.routes.sources import _infer_persist_care_profile
+
+            await _infer_persist_care_profile(
+                memory,
+                user_id,
                 [{"summary": e.summary, "start": e.start} for e in state.events.values()],
-                user_id=user_id,
+                embed=True,
             )
-            await _persist_pattern_facts(memory, priority_facts)
-            await _refresh_profile(memory, user_id)
 
         summary = await _run_signals(memory, signals)
         snap = await _refresh_profile(memory, user_id)

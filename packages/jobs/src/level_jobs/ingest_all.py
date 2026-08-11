@@ -12,14 +12,22 @@ from level_core.agents.ingest_normalizer import IngestNormalizer
 from level_core.config import get_settings
 from level_core.guardrails.inbound import InboundGuardrail
 from level_core.ingest.connectors import (
+    ChatExportConnector,
     FixtureConnector,
+    GoogleCalendarConnector,
     SignalConnector,
+    VoiceMemoConnector,
     demo_caregiver_signals,
 )
 from level_core.ingest.pipeline import IngestPipeline
 from level_core.memory.factory import build_memory
 from level_core.models.factory import build_embedding_client, build_gemini_client
 from level_core.observability.logger import get_logger
+from level_core.profile.persist import (
+    events_from_calendar_signals,
+    persist_care_profile_from_events,
+)
+from level_core.schemas.signal import Signal
 from level_jobs.base import run_job
 
 _logger = get_logger(__name__)
@@ -37,12 +45,6 @@ def _connectors_for_user(user_id: str, *, use_fixtures: bool) -> list[SignalConn
             for source, items in by_source.items()
         ]
     # Live connectors (OAuth) — currently stubs that yield nothing.
-    from level_core.ingest.connectors import (
-        ChatExportConnector,
-        GoogleCalendarConnector,
-        VoiceMemoConnector,
-    )
-
     return [
         GoogleCalendarConnector(),
         ChatExportConnector(),
@@ -70,8 +72,10 @@ async def main() -> int:
     blocked = 0
     skipped = 0
     facts = 0
+    care_profiles = 0
 
     for user_id in user_ids:
+        calendar_signals: list[Signal] = []
         for connector in _connectors_for_user(user_id, use_fixtures=use_fixtures):
             async for signal in connector.fetch(user_id=user_id):
                 result = await pipeline.run(signal)
@@ -82,6 +86,19 @@ async def main() -> int:
                 elif result.signal is not None:
                     accepted += 1
                     facts += len(result.facts)
+                    calendar_signals.append(result.signal)
+
+        # Evolving Knowledge: mutate Care Profile from ingested calendar signals.
+        events = events_from_calendar_signals(calendar_signals)
+        if not events and use_fixtures:
+            # Re-read fixture GCAL texts even if duplicates were skipped.
+            events = events_from_calendar_signals(demo_caregiver_signals(user_id=user_id))
+        if events:
+            snap = await persist_care_profile_from_events(
+                memory, user_id, events, embed=True
+            )
+            if snap is not None:
+                care_profiles += 1
 
     _logger.info(
         "ingest_job_complete",
@@ -89,6 +106,7 @@ async def main() -> int:
         blocked=blocked,
         skipped=skipped,
         facts=facts,
+        care_profiles_mutated=care_profiles,
         users=len(user_ids),
     )
     return 0

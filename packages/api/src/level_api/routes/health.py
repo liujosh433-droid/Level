@@ -16,9 +16,20 @@ router = APIRouter(tags=["health"])
 
 
 @router.get("/healthz")
-async def healthz() -> dict[str, str]:
-    """Liveness probe. Cheap and always returns 200 if the process is up."""
-    return {"status": "ok"}
+async def healthz() -> dict[str, object]:
+    """Liveness probe + runtime backend fingerprint (so local vs cloud is obvious)."""
+    from level_core.config import get_settings
+
+    settings = get_settings()
+    return {
+        "status": "ok",
+        "env": settings.env.value,
+        "memory": "firestore" if settings.is_cloud else "in_memory_fake",
+        "vectors": settings.vector_backend if settings.is_cloud else "in_memory_fake",
+        "calendar_sync": "firestore" if settings.is_cloud else "local_file",
+        "oauth_tokens": "firestore" if settings.is_cloud else "local_file",
+        "project": settings.gcp_project if settings.is_cloud else None,
+    }
 
 
 @router.get("/readyz")

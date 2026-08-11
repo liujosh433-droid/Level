@@ -56,10 +56,43 @@ def demo_caregiver_signals(user_id: str = "demo-parent") -> list[Signal]:
             external_id="gcal-picture-day",
             occurred_at=now + timedelta(days=3),
             text=(
-                "Calendar: Picture Day — Lincoln Elementary, Friday 8:15am. "
+                "Calendar: Picture Day — Lincoln Elementary — Maya, Friday 8:15am. "
                 "Note from me: need to figure out Maya's hair. Can't be late to "
                 "the 9am standup."
             ),
+        ),
+        Signal(
+            user_id=user_id,
+            source=SignalSource.GCAL,
+            external_id="gcal-thu-pickup",
+            occurred_at=now + timedelta(days=((3 - now.weekday()) % 7) or 7),
+            text=(
+                "Calendar: School pickup — Maya, Thursday 3:15pm. "
+                "Protected window — leave work by 2:45."
+            ),
+        ),
+        Signal(
+            user_id=user_id,
+            source=SignalSource.GCAL,
+            external_id="gcal-soccer",
+            occurred_at=now
+            + timedelta(days=((3 - now.weekday()) % 7) or 7)
+            + timedelta(hours=1),
+            text="Calendar: Soccer practice — Maya, Thursday 4:30pm at Lincoln field.",
+        ),
+        Signal(
+            user_id=user_id,
+            source=SignalSource.GCAL,
+            external_id="gcal-mom-visit",
+            occurred_at=now + timedelta(days=5),
+            text="Calendar: Visit Mom — clinic follow-up, Tuesday 11:00am.",
+        ),
+        Signal(
+            user_id=user_id,
+            source=SignalSource.GCAL,
+            external_id="gcal-standup",
+            occurred_at=now + timedelta(days=1),
+            text="Calendar: Work standup — team sync, weekday 9:00am.",
         ),
         Signal(
             user_id=user_id,

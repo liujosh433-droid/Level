@@ -11,18 +11,18 @@ import styles from "./welcome.module.css";
 const BEATS = [
   {
     mark: "1",
-    title: "Learns from your past",
-    line: "Your real week day by day — not generic advice.",
+    title: "Learns your care roles",
+    line: "Child care, elder care, work, recovery — from your real week.",
   },
   {
     mark: "2",
-    title: "Adapts for what’s next",
-    line: "Today’s schedule and load, in view.",
+    title: "Holds the model for you",
+    line: "So you don’t recompute who’s depending on you every morning.",
   },
   {
     mark: "3",
-    title: "Reasons with you",
-    line: "The hard question before you commit.",
+    title: "Names care collisions",
+    line: "The hard question before a yes crowds out what you hold.",
   },
 ] as const;
 
@@ -34,8 +34,8 @@ const HOW = [
   },
   {
     icon: "chat",
-    title: "Optional: ChatGPT chats",
-    body: "You’ve probably asked ChatGPT for help with hard choices before. If you’d like, we can use those past questions so Level can help you take a step further with real knowledge of your lifestyle.",
+    title: "Optional: ChatGPT Memory",
+    body: "If ChatGPT already remembers your family, work, or caregiving constraints, paste that Memory summary so Level can start with real context — not a full chat export.",
   },
 ] as const;
 

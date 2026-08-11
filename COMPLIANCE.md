@@ -4,9 +4,9 @@ Living document mapping every rule and bonus lever in the [All Things Agentic Ha
 
 ## Category selection
 
-**The Collaborative Partner** — Level asks clarifying questions, guides the user step-by-step, and captures structured feedback (via `Judge`'s `BiasEvent` outputs and the self-rewriting `Manifesto`) so it constantly adapts to the user's unique way of thinking.
+**The Collaborative Partner** — Level asks clarifying questions about **care collisions**, guides caregivers step-by-step, and captures structured feedback (Keep / Not me on care roles, `Judge` bias events, self-rewriting Manifesto + mutating **Care Profile**) so it constantly adapts to how *this* caregiver holds competing roles.
 
-We additionally implement several **Fortified Enterprise Fleet** architectural components (Agent Registry, Memory Bank, Model Armor, Agent Observability, Agent Identity) to strengthen the *Architectural Discipline* score. This is allowed and expected — the rubric rewards architectural depth regardless of primary category.
+We additionally implement several **Fortified Enterprise Fleet** architectural components (Agent Registry, Memory Bank, Model Armor, Agent Observability, Agent Identity, Agent Gateway on the Retriever hot path) to strengthen the *Architectural Discipline* score.
 
 ---
 
@@ -30,14 +30,14 @@ We additionally implement several **Fortified Enterprise Fleet** architectural c
 
 | Sub-criterion | Level's answer |
 |---|---|
-| Eliminates real-world friction | Caregivers making complex decisions under time pressure with fragmented context — Level unifies context and forces the hard question. |
-| "Twist" is present | Anti-sycophancy tone contract + evidence-cited challenges + evolving bias profile. Every mainstream AI is a yes-man; Level structurally can't be. |
-| Continuous Action Engine — background multi-step workflow | Yes — ingestion loop runs asynchronously every 15 min across Calendar/Gmail, normalizes into facts, embeds, updates bias profile — no user in the loop. |
-| Bring Your Own Friction — personal problem | Yes — targeted at single parents and caregivers, an "Unlikely Hero" cohort not served by enterprise-first AI tools. |
-| Evolving Knowledge Engine — synthesizes/mutates data | Yes — Level rewrites the user's own Manifesto over time as a synthesis of their stated values; Challenger cites this synthesized artifact back at them. |
-| Ingests messy unstructured data | Yes — voice memos (audio), screenshotted chats (multimodal), free-text notes, prior AI chat exports (JSON/HTML), calendar events. |
-| Multi-Agent Nexus — task warrants multi-agent | Yes — Framer, Retriever, Challenger, Judge, IngestNormalizer are five distinct roles with strictly separated concerns; Conductor is deterministic sequencing. |
-| Delegates to specialized sub-agents | Yes — see above. |
+| Eliminates real-world friction | Caregivers under scarce degrees of freedom — Level holds competing care roles and makes **care collisions** visible before they say yes. |
+| "Twist" is present | Fixed care-role taxonomy + care-collision Challenger (`role_theft` type) + anti-sycophancy + Keep/Not me. |
+| Continuous Action Engine — background multi-step workflow | Yes — `async_challenge` job detects calendar↔care-window collisions and opens an unsolicited Conductor turn (`origin=async_role_theft`) with no human in the loop. Ingest job mutates Care Profile after signals land. |
+| Bring Your Own Friction — personal problem | Yes — busy parents / sandwich / working caregivers (Unlikely Hero). |
+| Evolving Knowledge Engine — synthesizes/mutates data | Yes — Care Profile is **mutated** on ingest/sync (`persist_care_profile_from_events`); Manifesto regenerates from care roles; Keep/Not me mutates salience/status. |
+| Ingests messy unstructured data | Yes — Google Calendar, ChatGPT export JSON/zip, voice-memo transcripts (fixtures), free-text notes. (Gmail connector not shipped yet.) |
+| Multi-Agent Nexus — task warrants multi-agent | Yes — Framer → Retriever (care-pinned) → Challenger (`role_theft`) → Judge; Conductor retries once on invalid/hallucinated Challenger output. |
+| Delegates to specialized sub-agents | Yes — see above; Retriever loads Care Profile via Agent Gateway tool `get_care_profile`. |
 | Built for Unlikely Hero | Single parents / caregivers, not corporate roles. |
 
 ### Architectural Discipline & Tech Stack (30%)
@@ -49,9 +49,9 @@ We additionally implement several **Fortified Enterprise Fleet** architectural c
 | Tools isolated and scoped for security | Each agent has its own Google Cloud service account with narrowly scoped IAM. Agent Gateway enforces per-agent tool allowlists at runtime. |
 | Intelligent schema design | Every inter-agent payload is a Pydantic model with strict validation. Firestore docs versioned; ingestion is idempotent. |
 | Efficient vector embedding | Single multi-tenant Vector Search index with `user_id` restrict; 500-token chunks with 50-token overlap; `text-embedding-004` (768-d). |
-| Manages massive context windows | Retriever pre-summarizes retrievals; Challenger receives only cited chunks + Manifesto snippet, not raw signals. |
+| Manages massive context windows | Retriever role-pins ≤~10 facts; care snippet ≤800 chars. **Implemented** retention: `level-retain` job prunes EVENT facts past 90d TTL + soft-caps at 150 facts/user without deleting Keep’d/cited pins ([`retention.py`](./packages/core/src/level_core/memory/retention.py)). GCS cold archive = scale-up only — see [`ARCHITECTURE.md`](./ARCHITECTURE.md#memory-retention-context-limits-and-scale-judges). |
 | Strict separation of concerns between agents | Enforced by per-agent SAs (IAM) + Pydantic contracts + Agent Gateway. |
-| Failure-tolerant inter-agent routing | Conductor retries once with stricter schema on invalid output; degrades gracefully with an audit event; hallucinated citations are rejected via post-hoc `fact_id` check. See [`ARCHITECTURE.md` failure-mode inventory](./ARCHITECTURE.md#failure-mode-inventory). |
+| Failure-tolerant inter-agent routing | Conductor **retries Challenger once** with a repair prompt on `InvalidAgentOutput` or hallucinated citations, then degrades/blocks with an audit event. Outbound `fact_id` guardrail is enforced. |
 
 ### Demo & Production Readiness (30%)
 

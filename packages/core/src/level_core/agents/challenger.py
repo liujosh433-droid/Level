@@ -41,6 +41,7 @@ DESCRIPTION = "Asks the hard, cited, warmly-adversarial question."
 
 
 ChallengeType = Literal[
+    "role_theft",
     "assumption",
     "counterexample",
     "value_alignment",
@@ -58,6 +59,10 @@ they're already thinking about.
 Your job is NOT to be helpful the way most AI is helpful. You are the friend
 who won't let them off the hook. You ask the hard clarifying question — the
 one their people-pleasing coworker or agreeable AI would not ask.
+
+Your primary lens is CARE ROLES and CARE COLLISIONS: when saying yes would
+crowd out a care role they hold (child care, elder care, paid work, self &
+recovery, household logistics, co-parent), name that squeeze with their evidence.
 
 TONE CONTRACT (non-negotiable):
 - WARM, not cold. Every question comes from care, not judgment.
@@ -93,13 +98,18 @@ Decision frame:
 - Horizon: {horizon}
 - Reversibility: {reversibility}
 
+Care roles they hold (prefer role_theft when a choice would crowd these out):
+---
+{care_profile_snippet}
+---
+
 Retrieved evidence — you may ONLY cite these fact_ids:
 {fact_list}
 
 Retrieval coverage note (Retriever's honest assessment):
 {coverage_note}
 
-Known tensions in their own record (use for value_alignment / counterexample):
+Known tensions in their own record (use for role_theft / value_alignment / counterexample):
 {contradictions}
 
 The user's current manifesto snippet (what they've said they value; may be
@@ -135,6 +145,9 @@ Return JSON matching:
 }}
 
 Guidance for choosing challenge_type:
+- role_theft: PREFER THIS when care roles / protected windows are present and
+  saying yes would crowd out a role they hold (e.g. late meeting vs pickup).
+  Name the role and the sticky window/person; cite a care-role fact_id.
 - assumption: user is assuming something they haven't checked.
 - counterexample: there is evidence against their framing in their own past.
 - value_alignment: this contradicts something they said they valued.
@@ -146,6 +159,14 @@ Guidance for choosing challenge_type:
 If coverage is poor and you would need to invent facts to challenge them,
 return exactly ONE question of type "assumption" asking for the missing
 context in first person: "Can you tell me more about ...?"
+"""
+
+REPAIR_PROMPT_SUFFIX = """\
+
+REPAIR MODE: Your previous JSON was invalid or used bad citations.
+Return STRICT JSON only. Every citation.fact_id MUST be one of the ids listed
+above. Prefer challenge_type "role_theft" when care roles are present.
+No prose outside the JSON.
 """
 
 
@@ -161,6 +182,8 @@ class ChallengerInput:
     user_text: str = ""
     coverage_note: str = ""
     contradiction_summaries: list[str] = field(default_factory=list)
+    care_profile_snippet: str | None = None
+    repair: bool = False
 
     @property
     def available_fact_ids(self) -> set[str]:
@@ -184,6 +207,7 @@ class _ChallengerOutput(AgentOutputModel):
 
 
 _ALLOWED_CHALLENGE_TYPES: tuple[str, ...] = (
+    "role_theft",
     "assumption",
     "counterexample",
     "value_alignment",
@@ -250,6 +274,7 @@ class Challenger:
             time_pressure=input_.frame.time_pressure,
             horizon=input_.frame.horizon,
             reversibility=input_.frame.reversibility,
+            care_profile_snippet=input_.care_profile_snippet or "(none inferred yet)",
             fact_list=fact_list,
             coverage_note=input_.coverage_note or "(unknown)",
             contradictions=(
@@ -262,15 +287,17 @@ class Challenger:
             user_text=input_.user_text.strip() or "(user has just opened the session)",
             allowed_challenge_types=list(_ALLOWED_CHALLENGE_TYPES),
         )
+        if input_.repair:
+            prompt = prompt + REPAIR_PROMPT_SUFFIX
         response = await self._gemini.generate(
             GenerationRequest(
                 prompt=prompt,
                 model_id=self._model_id,
                 system_instruction=SYSTEM_INSTRUCTION,
                 response_schema=_ChallengerOutput.model_json_schema(),
-                temperature=0.35,
+                temperature=0.2 if input_.repair else 0.35,
                 max_output_tokens=2048,
-                metadata={"agent": NAME, "version": VERSION},
+                metadata={"agent": NAME, "version": VERSION, "repair": input_.repair},
             )
         )
         parsed = parse_output(NAME, response.text, _ChallengerOutput)

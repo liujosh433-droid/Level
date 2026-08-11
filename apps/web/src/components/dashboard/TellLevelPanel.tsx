@@ -20,6 +20,7 @@ export function TellLevelPanel({
   headerActions,
   voiceEnabled = false,
   onVoiceError,
+  stickyInput = true,
   children,
 }: {
   title?: string;
@@ -37,6 +38,8 @@ export function TellLevelPanel({
   headerActions?: ReactNode;
   voiceEnabled?: boolean;
   onVoiceError?: (message: string) => void;
+  /** When false, the composer stays in document flow (needed when content sits below). */
+  stickyInput?: boolean;
   children?: ReactNode;
 }) {
   const valueRef = useRef(value);
@@ -73,7 +76,7 @@ export function TellLevelPanel({
         {headerActions}
       </div>
       {lead ? <p className={styles.lead}>{lead}</p> : null}
-      <div className={styles.dock}>
+      <div className={stickyInput ? styles.dock : styles.composer}>
         <form onSubmit={(e) => void handleSubmit(e)} className={styles.form}>
           {error ? <p className={styles.error}>{error}</p> : null}
           <textarea

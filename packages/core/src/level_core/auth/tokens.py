@@ -196,7 +196,7 @@ class FirestoreTokenStore:
         snap = await self._db().collection("users").document(user_id).get()
         if not snap.exists:
             return None
-        return User(**snap.to_dict())
+        return User.model_validate(snap.to_dict() or {}, strict=False)
 
     async def get_user_by_google_sub(self, google_sub: str) -> User | None:
         snap = await self._db().collection("google_subs").document(google_sub).get()
@@ -228,7 +228,7 @@ class FirestoreTokenStore:
         )
         if not snap.exists:
             return None
-        return OAuthToken(**snap.to_dict())
+        return OAuthToken.model_validate(snap.to_dict() or {}, strict=False)
 
     async def delete_google_token(self, user_id: str) -> bool:
         ref = (

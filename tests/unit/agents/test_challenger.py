@@ -134,3 +134,54 @@ class TestChallenger:
             )
         )
         assert len(questions) == 3
+
+    async def test_role_theft_with_care_profile_snippet(self) -> None:
+        gemini = FakeGeminiClient.scripted(
+            [
+                ScriptedResponse(
+                    json_payload={
+                        "questions": [
+                            {
+                                "question": (
+                                    "You marked Thursday pickup as Keep — how does a late "
+                                    "networking dinner not steal from that child-care window?"
+                                ),
+                                "citations": [
+                                    {
+                                        "fact_id": "fact-care",
+                                        "quote": "Child care — protecting school and pickup",
+                                        "relevance": 0.97,
+                                    }
+                                ],
+                                "challenge_type": "role_theft",
+                            }
+                        ]
+                    }
+                )
+            ]
+        )
+        challenger = Challenger(gemini=gemini, model_id="gemini-3.5-pro")
+        questions = await challenger.run(
+            ChallengerInput(
+                frame=_frame(),
+                retrieved_facts=[
+                    _fact(
+                        "fact-care",
+                        "Child care — protecting school and pickup with Jordan",
+                        FactType.RELATIONSHIP,
+                    )
+                ],
+                manifesto_snippet=None,
+                bias_profile=None,
+                user_text="Can I take a late Thursday networking dinner?",
+                coverage_note="Strong care-role coverage",
+                care_profile_snippet=(
+                    "Care roles you hold:\n"
+                    "- Child care (Jordan): salience 0.92 — e.g. Thursday ~15:00 care block"
+                ),
+            )
+        )
+        assert questions[0].challenge_type == "role_theft"
+        prompt_used = gemini.calls[-1].prompt
+        assert "Care roles they hold" in prompt_used
+        assert "Thursday" in prompt_used or "Child care" in prompt_used

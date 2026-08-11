@@ -4,6 +4,7 @@ import { Suspense, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
 import {
+  CareLoadGraph,
   DashboardWorkspace,
   TellLevelPanel,
   TellLevelReply,
@@ -20,6 +21,35 @@ import {
 import styles from "./profile.module.css";
 
 type ChatLine = { role: "you" | "level"; text: string };
+
+const CARE_ROLE_LABELS: Record<string, string> = {
+  child_care: "Child care",
+  elder_care: "Elder care",
+  paid_work: "Work/Job",
+  self_recovery: "Self & recovery",
+  household_logistics: "Household logistics",
+  partner_coparent: "Co-parent / partner",
+};
+
+function careRoleLabel(id?: string | null): string | null {
+  if (!id) return null;
+  return CARE_ROLE_LABELS[id] ?? id.replace(/_/g, " ");
+}
+
+function formatCareUpdated(iso: string): string {
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return iso;
+    return d.toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    });
+  } catch {
+    return iso;
+  }
+}
 
 function ManifestoSummary({
   text,
@@ -124,7 +154,7 @@ function ProfileInner() {
         true,
       );
       setProfile(updated);
-      setStatus("Priorities saved.");
+      setStatus("Saved.");
     } catch (err) {
       setStatus(err instanceof Error ? err.message : String(err));
     } finally {
@@ -161,42 +191,80 @@ function ProfileInner() {
       <DashboardWorkspace
         railAriaLabel="Tell Level more"
         rail={
-          <TellLevelPanel
-            title="Tell Level more"
-            lead="Add a priority Level missed — sleep, family rituals, recovery, or anything that should shape hard decisions."
-            placeholder='Ex: “Sunday dinners with my parents are non-negotiable” or “Mental recovery matters more than late work”'
-            value={draft}
-            onChange={setDraft}
-            onSubmit={onTellMore}
-            busy={busy}
-            disabled={!userId}
-            submitLabel="Save priority"
-            busyLabel="Saving…"
-            minLength={8}
-            voiceEnabled
-            onVoiceError={setStatus}
-            error={null}
-          >
-            {chat.length > 0
-              ? chat.map((line, i) =>
-                  line.role === "you" ? (
-                    <article key={i}>
-                      <TellLevelYou>{line.text}</TellLevelYou>
-                    </article>
-                  ) : (
-                    <article key={i}>
-                      <TellLevelReply>{line.text}</TellLevelReply>
-                    </article>
-                  ),
-                )
-              : null}
-          </TellLevelPanel>
+          <div className={styles.railStack}>
+            <div className={styles.chatBlock}>
+              <TellLevelPanel
+                title="Tell Level more"
+                lead="Add a priority Level missed — sleep, family rituals, recovery, or anything that should shape hard decisions."
+                placeholder='Ex: “Sunday dinners with my parents are non-negotiable” or “Mental recovery matters more than late work”'
+                value={draft}
+                onChange={setDraft}
+                onSubmit={onTellMore}
+                busy={busy}
+                disabled={!userId}
+                submitLabel="Save priority"
+                busyLabel="Saving…"
+                minLength={8}
+                voiceEnabled
+                stickyInput={false}
+                onVoiceError={setStatus}
+                error={null}
+              >
+                {chat.length > 0
+                  ? chat.map((line, i) =>
+                      line.role === "you" ? (
+                        <article key={i}>
+                          <TellLevelYou>{line.text}</TellLevelYou>
+                        </article>
+                      ) : (
+                        <article key={i}>
+                          <TellLevelReply>{line.text}</TellLevelReply>
+                        </article>
+                      ),
+                    )
+                  : null}
+              </TellLevelPanel>
+            </div>
+            <div className={styles.graphBlock}>
+              <CareLoadGraph graph={profile?.care_graph} />
+            </div>
+          </div>
         }
       >
-        <h1 className={styles.title}>Your Priorities</h1>
+        <h1 className={styles.title}>About me</h1>
         <p className={styles.sub}>
-          Let Level learn your priorities from your schedule and past chats.
+          What Level has gathered about you — care load, preferences, and how you like to be
+          helped — grounded only in what you’ve shared or connected.
         </p>
+
+        {profile?.about_summary ? (
+          <section className={styles.aboutSummary} aria-label="Level’s read on you">
+            <p className={styles.aboutKicker}>Level’s read</p>
+            <p className={styles.aboutBody}>{profile.about_summary}</p>
+          </section>
+        ) : null}
+
+        {profile &&
+        (profile.care_profile_version != null || profile.care_role_count) ? (
+          <p className={styles.versionLine}>
+            Care Profile v{profile.care_profile_version ?? "—"}
+            {profile.care_role_count != null
+              ? ` · ${profile.care_role_count} role${profile.care_role_count === 1 ? "" : "s"}`
+              : ""}
+            {profile.care_updated_at
+              ? ` · updated ${formatCareUpdated(profile.care_updated_at)}`
+              : ""}
+            {typeof profile.fact_count === "number"
+              ? ` · ${profile.fact_count} facts`
+              : ""}
+          </p>
+        ) : null}
+
+        {profile?.conflict_summaries && profile.conflict_summaries.length > 0 ? (
+          <p className={styles.conflictLine}>
+            Tension Level is watching: {profile.conflict_summaries[0]}
+          </p>
+        ) : null}
 
         {profile?.manifesto || bullets.length > 0 ? (
           <ManifestoSummary
@@ -206,27 +274,30 @@ function ProfileInner() {
         ) : null}
 
         {loading ? (
-          <p className={styles.meta}>Loading your priorities…</p>
+          <p className={styles.meta}>Loading about you…</p>
         ) : bullets.length === 0 ? (
           <p className={styles.meta}>
             {googleConnected ? (
               <>
-                Your calendar is connected — refresh in a moment and Level will draft priorities
-                from your week (family time, work hours, recovery, and more).
+                Your calendar is connected — refresh in a moment and Level will draft what it
+                knows from your week (care roles, people, and load).
               </>
             ) : (
               <>
-                Connect Google on Sources so Level can infer priorities from your real calendar —
+                Connect Google on Sources so Level can learn from your real calendar —
                 about a minute.
               </>
             )}
           </p>
         ) : (
-          <ul className={styles.list}>
+          <>
+            <h2 className={styles.sectionTitle}>Care load</h2>
+            <ul className={styles.list}>
             {bullets.map((b) => (
               <li key={b.bullet_id}>
                 <span className={styles.cat}>
-                  {b.status === "accepted" || b.status === "edited" ? "Kept" : "Priority"}
+                  {careRoleLabel(b.care_role_id) || "Care role"}
+                  {b.status === "accepted" || b.status === "edited" ? " · Holding" : ""}
                 </span>
                 <p>{b.text}</p>
                 <div className={styles.row}>
@@ -250,6 +321,7 @@ function ProfileInner() {
               </li>
             ))}
           </ul>
+          </>
         )}
 
         {bullets.length > 0 && pendingCount > 0 && (

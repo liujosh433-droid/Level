@@ -62,7 +62,7 @@ export default function HomePage() {
           <p className={styles.brand}>Level</p>
           <h1 className={styles.headline}>Steady when everything else isn’t.</h1>
           <p className={styles.sub}>
-            For busy caregivers and single parents — honest help with the hard calls.
+            For busy caregivers — see what saying yes would crowd out from the care roles you hold.
           </p>
           <div className={styles.cta}>
             <button type="button" className={styles.primary} onClick={start}>

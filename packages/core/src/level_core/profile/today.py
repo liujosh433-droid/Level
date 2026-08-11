@@ -296,15 +296,39 @@ def build_recommendations(
     return out
 
 
-def format_event_time(start_raw: str | None, *, all_day: bool = False) -> str:
+def format_event_time(
+    start_raw: str | None,
+    *,
+    end_raw: str | None = None,
+    all_day: bool = False,
+) -> str:
+    """Human time label — prefer a start–end range when end is known."""
     if all_day or not start_raw:
         return "All day"
-    try:
-        dt = datetime.fromisoformat(start_raw.replace("Z", "+00:00"))
-        label = dt.strftime("%I:%M %p")
-        return label.lstrip("0")
-    except ValueError:
+
+    def _parse(raw: str) -> datetime | None:
+        try:
+            return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    def _clock(dt: datetime) -> str:
+        # 3:00 PM / 12:05 PM — drop leading zero on the hour.
+        return dt.strftime("%I:%M %p").lstrip("0")
+
+    start = _parse(start_raw)
+    if start is None:
         return start_raw
+
+    end = _parse(end_raw) if end_raw else None
+    if end is None or end <= start:
+        return _clock(start)
+
+    # Same meridian → "3:00 – 4:30 PM"; otherwise "11:00 AM – 1:00 PM".
+    if start.strftime("%p") == end.strftime("%p"):
+        start_bit = start.strftime("%I:%M").lstrip("0")
+        return f"{start_bit} – {_clock(end)}"
+    return f"{_clock(start)} – {_clock(end)}"
 
 
 def build_tomorrow_preview(

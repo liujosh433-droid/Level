@@ -22,8 +22,8 @@
   --font-brand: "Literata", "Iowan Old Style", "Palatino Linotype", Palatino, serif;
   --font-display: "Literata", "Iowan Old Style", "Palatino Linotype", Palatino, serif;
   --font-body: "Source Sans 3", "Helvetica Neue", sans-serif;
-  --shell-max: 42rem;
-  --pad-x: clamp(1.1rem, 4.5vw, 2rem);
+  --shell-max: 56rem;
+  --pad-x: clamp(1rem, 2.8vw, 2.5rem);
   --pad-y: clamp(1rem, 3vw, 1.75rem);
   --nav-h: 3.5rem;
   /* Sticky header height incl. safe-area — keep side rails below it */

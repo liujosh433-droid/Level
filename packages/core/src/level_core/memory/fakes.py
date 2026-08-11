@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from level_core.errors import NotFound
 from level_core.memory.base import MemoryBank, VectorHit
 from level_core.schemas.bias import BiasEvent, BiasProfile, Manifesto
+from level_core.schemas.care import CareProfile
 from level_core.schemas.decision import Decision
 from level_core.schemas.profile import ProfileSnapshot
 from level_core.schemas.signal import Fact, Signal
@@ -83,6 +84,11 @@ class InMemoryFactRepository:
     async def list_for_user(self, *, user_id: str, limit: int = 100) -> list[Fact]:
         return list(self._by_user.get(user_id, {}).values())[:limit]
 
+    async def delete(self, *, user_id: str, fact_id: str) -> None:
+        bucket = self._by_user.get(user_id)
+        if bucket is not None:
+            bucket.pop(fact_id, None)
+
     async def clear_for_user(self, *, user_id: str) -> int:
         n = len(self._by_user.get(user_id, {}))
         self._by_user.pop(user_id, None)
@@ -118,6 +124,11 @@ class InMemoryDecisionRepository:
     async def list_turns(self, *, user_id: str, decision_id: str) -> list[Turn]:
         return list(self._turns.get((user_id, decision_id), []))
 
+    async def list_for_user(self, *, user_id: str, limit: int = 50) -> list[Decision]:
+        rows = [d for (uid, _), d in self._decisions.items() if uid == user_id]
+        rows.sort(key=lambda d: d.updated_at or d.created_at, reverse=True)
+        return rows[:limit]
+
 
 @dataclass(slots=True)
 class InMemoryTurnRepository:
@@ -139,6 +150,7 @@ class InMemoryManifestoRepository:
     _manifestos: dict[str, Manifesto] = field(default_factory=dict)
     _bias_profiles: dict[str, BiasProfile] = field(default_factory=dict)
     _snapshots: dict[str, ProfileSnapshot] = field(default_factory=dict)
+    _care_profiles: dict[str, CareProfile] = field(default_factory=dict)
 
     async def get_current_manifesto(self, *, user_id: str) -> Manifesto | None:
         return self._manifestos.get(user_id)
@@ -158,6 +170,12 @@ class InMemoryManifestoRepository:
     async def save_profile_snapshot(self, snapshot: ProfileSnapshot) -> None:
         self._snapshots[snapshot.user_id] = snapshot
 
+    async def get_care_profile(self, *, user_id: str) -> CareProfile | None:
+        return self._care_profiles.get(user_id)
+
+    async def save_care_profile(self, profile: CareProfile) -> None:
+        self._care_profiles[profile.user_id] = profile
+
     async def clear_for_user(self, *, user_id: str) -> int:
         n = 0
         if self._manifestos.pop(user_id, None) is not None:
@@ -165,6 +183,8 @@ class InMemoryManifestoRepository:
         if self._bias_profiles.pop(user_id, None) is not None:
             n += 1
         if self._snapshots.pop(user_id, None) is not None:
+            n += 1
+        if self._care_profiles.pop(user_id, None) is not None:
             n += 1
         return n
 

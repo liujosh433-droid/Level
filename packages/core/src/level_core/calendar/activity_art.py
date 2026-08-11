@@ -97,11 +97,6 @@ _KIND_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
             "sync",
             "1:1",
             "1-1",
-        ),
-    ),
-    (
-        "meeting",
-        (
             "meeting",
             "conference",
             "call",
@@ -109,6 +104,8 @@ _KIND_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
             "review",
             "catch up",
             "catch-up",
+            "okrs",
+            "client",
         ),
     ),
     (

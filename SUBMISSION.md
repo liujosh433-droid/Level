@@ -6,11 +6,11 @@ Working copy of the text we'll paste into the Devpost submission form. Keep this
 
 ## Project title
 
-**Level — the AI decision partner that isn't afraid to ask you the hard question.**
+**Level — see what saying yes crowds out from the care roles you hold.**
 
 ## Short tagline (140 chars)
 
-A warm-but-honest multi-agent AI (Gemini 3.5 + ADK) for busy caregivers that challenges you on real decisions with citations to your own past.
+Multi-agent care-role partner (Gemini 3.5 + ADK): mutates a Care Profile from messy calendar/chat data and challenges care collisions before you commit.
 
 ## Category
 
@@ -18,20 +18,22 @@ A warm-but-honest multi-agent AI (Gemini 3.5 + ADK) for busy caregivers that cha
 
 ## Inspiration
 
-Modern AI is a yes-man. Ask ChatGPT if you should quit your job to move across the country and it will help you plan it. Ask it if you should stay and it will help you plan that too. The most useful advice usually comes from a friend who knows your history well enough to say *"you told me last month you couldn't survive another year at that job — what changed?"*
+Modern AI helps busy people say yes faster. Caregivers don’t need more hours invented — they need to see **which care role a yes would crowd out** before they commit. Research on the triple bind, sandwich caregiving, and mental load says the unit of analysis is competing roles under scarce degrees of freedom — not inbox zero.
 
-Nobody needs that friend more than a single parent or caregiver making high-stakes decisions under time pressure with fragmented context. Level is that friend.
+Level is the friend who won’t let a late networking dinner quietly erase Thursday pickup you marked Keep.
 
 ## What it does
 
-Level continuously ingests messy personal signals — Google Calendar, voice memos, screenshotted chats, prior AI chat exports — into a persistent Memory Bank. When the user brings a decision, a chain of specialized ADK agents runs:
+Level ingests messy personal signals — Google Calendar, ChatGPT exports, voice-memo transcripts, notes — into a Memory Bank and **mutates a Care Profile** (child care, elder care, paid work, self & recovery, household logistics, co-parent). Users correct with Keep / Not me.
+
+When the user brings a decision — or the background job spots a collision — specialized agents run:
 
 - **Framer** restates the decision precisely (Gemini 3.5 Pro)
-- **Retriever** pulls cited evidence from the user's own history (Gemini 3.5 Flash + Vertex Vector Search)
-- **Challenger** asks the hard clarifying question, warmly but specifically, citing the user's own past (Gemini 3.5 Pro, streamed with Model Armor outbound guardrails)
-- **Judge** scores which cognitive biases showed up in the user's framing (Gemini 3.5 Flash)
+- **Retriever** pins care-role facts + vector evidence; loads Care Profile via Agent Gateway (Gemini 3.5 Flash)
+- **Challenger** prefers **`role_theft`** challenges (user-facing: care collisions) grounded in sticky windows (Gemini 3.5 Pro + outbound citation guardrails; Conductor retries once on bad output)
+- **Judge** scores cognitive biases in the framing (Gemini 3.5 Flash)
 
-Every turn updates a persistent **Bias Profile** — a numeric picture of the user's decision-making patterns. Over weeks, Level learns *how* the user tends to be wrong so it can push back more precisely. A **Manifesto** — a self-rewriting statement of what the user says they value — is regenerated after each session so Challenger can catch "you said X three weeks ago" moments.
+**Continuous Action:** `async_challenge` finds events that crowd out confirmed care windows and opens an unsolicited care-collision Decision — no human until they open Today.
 
 ## How we built it
 
@@ -72,7 +74,7 @@ Every turn updates a persistent **Bias Profile** — a numeric picture of the us
 - **Live URL:** *(Cloud Run URL — added after deploy)*
 - **Public code repo:** *(GitHub URL — added when repo pushed)*
 - **Demo video:** *(YouTube URL — added after recording)*
-- **Testing instructions:** No login required — landing page includes a "Try the demo caregiver profile" button that runs a full session against a seeded user with pre-ingested demo signals. Judges can also click "Connect Google" for a real OAuth flow if they want to try their own data.
+- **Testing instructions:** No login required — landing page includes a "Try the demo caregiver profile" button that runs a full session against a seeded user with pre-ingested demo signals. Judges can also click "Connect Google" for a real OAuth flow if they want to try their own data. From the repo: `make demo-judge` prints Continuous Action proof (ingest → Care Profile version bump → async care-collision Decision → retention prune); open Today for the Care collision banner and Profile for `Care Profile vN`.
 - **Access for judges:** Public URL, no restrictions. GitHub repo is public. `testing@devpost.com` and `cloudhackathons@google.com` are added as collaborators as a courtesy.
 
 ## Video pitch (4-minute outline)

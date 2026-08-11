@@ -7,7 +7,9 @@ import { ActivityIcon } from "@/components/ActivityIcon";
 import { AppShell } from "@/components/AppShell";
 import {
   DashboardWorkspace,
+  CareLoadGraph,
   RailSection,
+  RoleLoadBar,
   TellLevelPanel,
   TellLevelReply,
   TellLevelYou,
@@ -105,7 +107,7 @@ function TodayInner() {
   }, [router]);
 
   function refreshToday() {
-    void fetchToday()
+    return fetchToday()
       .then((data) => {
         setToday(data);
         if (data.display_name) setDisplayName(data.display_name);
@@ -201,14 +203,25 @@ function TodayInner() {
     setBusy(true);
     setError(null);
     try {
-      const schedule = await proposeSchedule(text);
-      if (schedule.is_schedule_ask && schedule.proposal) {
-        setItems((prev) => [
-          ...prev,
-          { id: schedule.proposal!.proposal_id, kind: "proposal", proposal: schedule.proposal! },
-        ]);
-        setDraft("");
-        return;
+      // Skip the schedule propose hop unless the text looks like a calendar ask.
+      const looksLikeSchedule =
+        /\b(add|schedule|put|book|block)\b.+\b(calendar|every|weekly|recurring|mon(day)?|tue(s|sday)?|wed(nesday)?|thu(r|rs|rsday)?|fri(day)?|sat(urday)?|sun(day)?)\b/i.test(
+          text,
+        ) ||
+        /\b(do i have time|am i free|when (else )?am i free|when can i|free at|fit in|make (it|dinner|lunch)|have room|does .+ work|can i (do|make|meet)|available)\b/i.test(
+          text,
+        );
+
+      if (looksLikeSchedule) {
+        const schedule = await proposeSchedule(text);
+        if (schedule.is_schedule_ask && schedule.proposal) {
+          setItems((prev) => [
+            ...prev,
+            { id: schedule.proposal!.proposal_id, kind: "proposal", proposal: schedule.proposal! },
+          ]);
+          setDraft("");
+          return;
+        }
       }
 
       // Day reflections / tips → profile + event cues
@@ -225,8 +238,9 @@ function TodayInner() {
             reply: check.reply,
           },
         ]);
-        if (check.today) setToday(check.today);
         setDraft("");
+        // Refresh Today off the critical path (check-in no longer blocks on it).
+        void refreshToday();
         return;
       }
 
@@ -263,7 +277,7 @@ function TodayInner() {
             : it,
         ),
       );
-      refreshToday();
+      await refreshToday();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -344,6 +358,18 @@ function TodayInner() {
             )}
           </TellLevelReply>
         ))}
+        {(item.turn.status === "degraded" || item.turn.status === "blocked") && (
+          <TellLevelReply>
+            <p className={styles.admit}>
+              {item.turn.status === "blocked"
+                ? "I blocked that reply — it didn’t pass Level’s safety check. Try rephrasing, or ask again in a moment."
+                : "I couldn’t finish a grounded challenge this turn (retrieval or the model glitched). Your care roles are still saved — try again."}
+            </p>
+            {item.turn.degradation_reason ? (
+              <p className={styles.admitDetail}>{item.turn.degradation_reason}</p>
+            ) : null}
+          </TellLevelReply>
+        )}
       </article>
     ) : item.kind === "checkin" ? (
       <article key={item.id} className={styles.turn}>
@@ -438,22 +464,30 @@ function TodayInner() {
               )}
             </RailSection>
 
-            <TellLevelPanel
-              title="Ask Level"
-              lead="How’s the day going — or facing a hard call? Level can weigh it with you using your real calendar and what it’s learned from your past, not generic advice."
-              placeholder="Ex: Need to fit in weekly grandparent visits — what should I move to make time?"
-              value={draft}
-              onChange={setDraft}
-              onSubmit={onAsk}
-              busy={busy || booting}
-              disabled={!userId || booting}
-              voiceEnabled
-              onVoiceError={setError}
-              error={error}
-              headerActions={hearDayButton}
-            >
-              {items.length > 0 ? chatThread : null}
-            </TellLevelPanel>
+            <div className={styles.railStack}>
+              <div className={styles.chatBlock}>
+                <TellLevelPanel
+                  title="Ask Level"
+                  lead="How’s the day going — or facing a hard call? Level can weigh it with you using your real calendar and what it’s learned from your past, not generic advice."
+                  placeholder="Ex: Need to fit in weekly grandparent visits — what should I move to make time?"
+                  value={draft}
+                  onChange={setDraft}
+                  onSubmit={onAsk}
+                  busy={busy || booting}
+                  disabled={!userId || booting}
+                  voiceEnabled
+                  stickyInput={false}
+                  onVoiceError={setError}
+                  error={error}
+                  headerActions={hearDayButton}
+                >
+                  {items.length > 0 ? chatThread : null}
+                </TellLevelPanel>
+              </div>
+              <div className={styles.graphBlock}>
+                <CareLoadGraph graph={today?.care_graph} />
+              </div>
+            </div>
           </>
         }
       >
@@ -470,15 +504,90 @@ function TodayInner() {
                   Hi {name || "there"}
                   {weekday ? `, Happy ${weekday}` : ""}
                 </h1>
+                {today.holding && today.holding.length > 0 ? (
+                  <p className={styles.holdingLine}>
+                    <span className={styles.holdingLabel}>Today you&rsquo;re holding</span>
+                    <span className={styles.holdingChips}>
+                      {today.holding.map((h, i) => (
+                        <span key={`${h.role_id}-${h.label}`}>
+                          {i > 0 ? (
+                            <span className={styles.holdingSep} aria-hidden>
+                              ·
+                            </span>
+                          ) : null}
+                          <span
+                            className={styles.holdingChip}
+                            style={{ ["--hold-color" as string]: h.color }}
+                          >
+                            {h.label}
+                          </span>
+                        </span>
+                      ))}
+                    </span>
+                  </p>
+                ) : null}
+                <RoleLoadBar load={today.week_load} />
               </>
             )}
           </div>
         </div>
 
+        {today?.conflict_summaries &&
+          today.conflict_summaries.length > 0 &&
+          !(today.pending_challenges && today.pending_challenges.length > 0) && (
+          <p className={styles.tension}>
+            <span className={styles.tensionLabel}>Care collision</span>
+            {today.conflict_summaries[0]}
+          </p>
+        )}
+
+        {today?.pending_challenges && today.pending_challenges.length > 0 && (
+          <div className={styles.banner}>
+            <p>
+              <strong>Care collision:</strong>{" "}
+              {today.pending_challenges[0].trigger_label}
+            </p>
+            {today.pending_challenges[0].question ? (
+              <p style={{ marginTop: "0.4rem" }}>{today.pending_challenges[0].question}</p>
+            ) : null}
+            <button
+              type="button"
+              className={styles.linkish}
+              style={{ marginTop: "0.5rem" }}
+              onClick={() => {
+                const ch = today.pending_challenges![0];
+                setDecisionId(ch.decision_id);
+                if (ch.question) {
+                  setItems((prev) => [
+                    {
+                      id: `pending-${ch.decision_id}`,
+                      kind: "turn",
+                      turn: {
+                        turn_id: `pending-${ch.decision_id}`,
+                        status: "complete",
+                        challenger_questions: [
+                          {
+                            question: ch.question!,
+                            challenge_type: ch.challenge_type || "role_theft",
+                            citations: [],
+                          },
+                        ],
+                      },
+                    },
+                    ...prev.filter((i) => i.id !== `pending-${ch.decision_id}`),
+                  ]);
+                }
+              }}
+            >
+              Open challenge →
+            </button>
+          </div>
+        )}
+
         {today?.needs_review && (
           <p className={styles.banner}>
-            Level drafted your profile — take 30 seconds to confirm it.{" "}
-            <Link href="/profile">Review profile →</Link>
+            Level drafted your care roles — take 30 seconds to confirm what you hold.{" "}
+            <Link href="/profile">Open About me →</Link>
           </p>
         )}
 

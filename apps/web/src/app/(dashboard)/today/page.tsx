@@ -439,7 +439,7 @@ function TodayInner() {
   );
 
   return (
-    <AppShell userId={userId} displayName={displayName} dashboard>
+    <AppShell userId={userId} displayName={displayName} dashboard contentOnly>
       <DashboardWorkspace
         railAriaLabel="Reminders and ask Level"
         rail={
@@ -465,8 +465,8 @@ function TodayInner() {
               <div className={styles.chatBlock}>
                 <TellLevelPanel
                   title="Ask Level"
-                  lead="How’s the day going — or facing a hard call? Level can weigh it with you using your real calendar and what it’s learned from your past, not generic advice."
-                  placeholder="Ex: Need to fit in weekly grandparent visits — what should I move to make time?"
+                  lead="How’s the day going - or facing a hard call? Level can weigh it with you using your calendar, learned priorities, and interactions. It can also
+                  book events for you!"
                   value={draft}
                   onChange={setDraft}
                   onSubmit={onAsk}
@@ -474,7 +474,7 @@ function TodayInner() {
                   busyLabel="Thinking…"
                   busyHints={[
                     "Looking at your calendar…",
-                    "Weighing what this would crowd out…",
+                    "Weighing decisions and priorities…",
                     "Checking your care load…",
                     "Putting an honest answer together…",
                   ]}
@@ -512,7 +512,7 @@ function TodayInner() {
                 ) : null}
                 <h1 className={styles.title}>
                   Hi {name || "there"}
-                  {weekday ? `, Happy ${weekday}` : ""}
+                  {weekday ? `, happy ${weekday}` : ""}!
                 </h1>
                 {today.holding && today.holding.length > 0 ? (
                   <p className={styles.holdingLine}>
@@ -541,15 +541,6 @@ function TodayInner() {
             )}
           </div>
         </div>
-
-        {today?.conflict_summaries &&
-          today.conflict_summaries.length > 0 &&
-          !(today.pending_challenges && today.pending_challenges.length > 0) && (
-          <p className={styles.tension}>
-            <span className={styles.tensionLabel}>Care collision</span>
-            {today.conflict_summaries[0]}
-          </p>
-        )}
 
         {today?.pending_challenges && today.pending_challenges.length > 0 && (
           <div className={styles.banner}>
@@ -701,7 +692,7 @@ function TodayInner() {
 
 export default function TodayPage() {
   return (
-    <Suspense fallback={<AppShell><p className={styles.meta}>Loading…</p></AppShell>}>
+    <Suspense fallback={<AppShell contentOnly><p className={styles.meta}>Loading…</p></AppShell>}>
       <TodayInner />
     </Suspense>
   );

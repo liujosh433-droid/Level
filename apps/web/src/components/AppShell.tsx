@@ -11,6 +11,8 @@ export function AppShell({
   children,
   wide,
   dashboard,
+  /** When true, render only page body (nav/shell provided by dashboard layout). */
+  contentOnly,
 }: {
   /** When set, shows signed-in chrome. Identity comes from the cookie. */
   userId?: string;
@@ -19,6 +21,7 @@ export function AppShell({
   wide?: boolean;
   /** Two-column dashboard workspace (Today, Profile, …). */
   dashboard?: boolean;
+  contentOnly?: boolean;
 }) {
   const [displayName, setDisplayName] = useState<string | null | undefined>(displayNameProp);
 
@@ -32,6 +35,10 @@ export function AppShell({
       .then((me) => setDisplayName(me.display_name))
       .catch(() => undefined);
   }, [userId, displayNameProp]);
+
+  if (contentOnly) {
+    return <div className={styles.body}>{children}</div>;
+  }
 
   const shellClass = [
     styles.shell,

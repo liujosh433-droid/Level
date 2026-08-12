@@ -4,12 +4,17 @@ from level_core.profile.today import build_tomorrow_preview
 
 
 def test_infer_activity_kinds() -> None:
-    # AI care role wins over title keywords.
+    # Role is fallback when the title is generic; specific title cues win.
     assert infer_activity_kind("Random block", care_role="paid_work") == "work"
     assert infer_activity_kind("Soccer practice — Jordan") == "sports"
     assert infer_activity_kind("School pickup — Jordan") == "school"
     assert infer_activity_kind("Catch up on work email") == "work"
     assert infer_activity_kind("Dentist — Jordan") == "medical"
+    # child_care used to force "school" even for dentist visits.
+    assert (
+        infer_activity_kind("Theo dentist (cleaning)", care_role="child_care")
+        == "medical"
+    )
     assert infer_activity_kind("Dinner with Diane") == "food"
     assert infer_activity_kind("Co-parent weekend") == "family"
     assert infer_activity_kind("Mystery block") == "generic"

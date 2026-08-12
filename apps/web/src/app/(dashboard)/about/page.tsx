@@ -23,7 +23,7 @@ function AboutInner() {
   }, []);
 
   return (
-    <AppShell userId={userId || undefined} displayName={displayName} dashboard>
+    <AppShell userId={userId || undefined} displayName={displayName} dashboard contentOnly>
       <div className={styles.layout}>
         <aside className={styles.artCol} aria-hidden="true">
           <figure className={styles.artFrame}>
@@ -153,7 +153,7 @@ export default function AboutPage() {
   return (
     <Suspense
       fallback={
-        <AppShell dashboard>
+        <AppShell dashboard contentOnly>
           <p className={styles.lead}>Loading…</p>
         </AppShell>
       }

@@ -201,7 +201,7 @@ function SourcesInner() {
 
   if (!ready) {
     return (
-      <AppShell userId={userId || undefined} dashboard>
+      <AppShell userId={userId || undefined} dashboard contentOnly>
         <div className={styles.wrap}>
           <section className={`${styles.panel} ${styles.syncPanel}`}>
             <div className={styles.syncCard}>
@@ -217,7 +217,7 @@ function SourcesInner() {
   }
 
   return (
-    <AppShell userId={userId || undefined} dashboard>
+    <AppShell userId={userId || undefined} dashboard contentOnly>
       <div className={styles.wrap}>
         {phase === "connect" && (
           <section className={`${styles.panel} ${styles.enter}`} key="connect">
@@ -399,7 +399,7 @@ export default function SourcesPage() {
   return (
     <Suspense
       fallback={
-        <AppShell dashboard>
+        <AppShell dashboard contentOnly>
           <p className={styles.line}>Loading…</p>
         </AppShell>
       }

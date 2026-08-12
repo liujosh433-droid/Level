@@ -16,11 +16,15 @@ from pydantic import Field
 from level_core.schemas.base import TraceableModel, _new_id, _now_utc
 from level_core.schemas.profile import BulletStatus
 
-# Drop meta / empty conflict blurbs that sound like system status, not evidence.
+# Drop meta, retrospective, or non-actionable conflict blurbs.
 _VAGUE_CONFLICT = re.compile(
-    r"(indicates a conflict|other obligations|level is watching|"
+    r"(indicates?(?:\s+that)?|other obligations|level is watching|"
     r"\bcollision day\b|watch for care collisions|tension level|"
-    r"conflict with other|potential conflict|may indicate)",
+    r"conflict with other|potential conflict|may indicate|"
+    r"creating a conflict|previously scheduled|were previously|"
+    r"were scheduled|has been scheduled|have been scheduled|"
+    r"\bpaid_work\b|\bchild_care\b|\belder_care\b|\bself_recovery\b|"
+    r"\bhousehold_logistics\b|\bpartner_coparent\b)",
     re.IGNORECASE,
 )
 _CONFLICT_PREFIX = re.compile(
@@ -30,7 +34,7 @@ _CONFLICT_PREFIX = re.compile(
 
 
 def clean_conflict_summaries(items: list[str] | None) -> list[str]:
-    """Keep short, human conflict lines; drop jargon-only fluff."""
+    """Keep short, actionable conflict lines; drop observations and jargon."""
     out: list[str] = []
     seen: set[str] = set()
     for raw in items or []:

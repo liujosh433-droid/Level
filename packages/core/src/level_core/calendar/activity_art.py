@@ -43,22 +43,34 @@ def kind_from_care_role(role: str | CareRoleId | None) -> str | None:
     return _ROLE_TO_KIND.get(rid)
 
 
+def _kind_from_title(summary: str) -> str | None:
+    text = re.sub(r"\s+", " ", (summary or "").strip().lower())
+    if not text:
+        return None
+    for kind, words in _KIND_KEYWORDS:
+        for w in words:
+            if w in text:
+                return kind
+    return None
+
+
 def infer_activity_kind(
     summary: str,
     *,
     care_role: str | CareRoleId | None = None,
 ) -> str:
-    """Prefer AI care role; else thin visual keyword fallback; else generic."""
+    """Illustration kind for Today cards.
+
+    Specific title cues (dentist → medical, soccer → sports) win over the coarse
+    care-role default (child_care → school), so kid medical visits aren't painted
+    as school. Role mapping is the fallback when the title is generic.
+    """
+    from_title = _kind_from_title(summary)
+    if from_title:
+        return from_title
     from_role = kind_from_care_role(care_role)
     if from_role:
         return from_role
-    text = re.sub(r"\s+", " ", (summary or "").strip().lower())
-    if not text:
-        return "generic"
-    for kind, words in _KIND_KEYWORDS:
-        for w in words:
-            if w in text:
-                return kind
     return "generic"
 
 

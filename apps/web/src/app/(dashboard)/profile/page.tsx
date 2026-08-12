@@ -187,7 +187,7 @@ function ProfileInner() {
   const pendingCount = bullets.filter((b) => b.status === "pending").length;
 
   return (
-    <AppShell userId={userId} displayName={displayName} dashboard>
+    <AppShell userId={userId} displayName={displayName} dashboard contentOnly>
       <DashboardWorkspace
         railAriaLabel="Tell Level more"
         rail={
@@ -348,7 +348,7 @@ export default function ProfilePage() {
   return (
     <Suspense
       fallback={
-        <AppShell dashboard>
+        <AppShell dashboard contentOnly>
           <p className={styles.meta}>Loading…</p>
         </AppShell>
       }

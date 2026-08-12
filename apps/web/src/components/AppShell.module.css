@@ -1,7 +1,5 @@
 .root {
   min-height: 100dvh;
-  /* Opacity-only — transform on an ancestor breaks position:sticky */
-  animation: fade 0.45s ease-out both;
 }
 
 .shell {

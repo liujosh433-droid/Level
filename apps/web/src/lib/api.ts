@@ -226,6 +226,7 @@ export type ProposedUsualView = {
   weekday: number;
   start_minute: number;
   end_minute: number;
+  when_label?: string;
 };
 
 export type CommitmentProposal = {
@@ -500,6 +501,25 @@ export async function dayCheckIn(
   });
 }
 
+export async function sendChat(
+  message: string,
+  includeProfile = false,
+): Promise<{
+  reply: string;
+  path: string;
+  proposal: CommitmentProposal | null;
+  school_proposals: CommitmentProposal[];
+  wants_paper_upload: boolean;
+  facts_added: number;
+  cues_added: number;
+  profile: Profile | null;
+}> {
+  return request(`/v1/chat`, {
+    method: "POST",
+    body: JSON.stringify({ message, include_profile: includeProfile }),
+  });
+}
+
 export async function profileChat(
   message: string,
 ): Promise<{ reply: string; facts_added: number; profile: Profile }> {
@@ -534,11 +554,15 @@ export async function proposeSchedule(
 export async function confirmProposal(
   proposalId: string,
   useSlotStart?: string | null,
+  email?: { to_email?: string; email_subject?: string; email_body?: string },
 ): Promise<{ proposal: CommitmentProposal; google_event_id: string | null; html_link: string | null }> {
   return request(`/v1/calendar/proposals/${proposalId}/confirm`, {
     method: "POST",
     body: JSON.stringify({
       use_slot_start: useSlotStart ?? null,
+      to_email: email?.to_email ?? null,
+      email_subject: email?.email_subject ?? null,
+      email_body: email?.email_body ?? null,
     }),
   });
 }

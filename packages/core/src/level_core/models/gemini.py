@@ -139,7 +139,9 @@ class GeminiGenAIClient:
         # for the actual payload.
         max_tokens = request.max_output_tokens
         if request.response_schema is not None:
-            max_tokens = max(max_tokens, 4096)
+            # Thinking models spend this budget on thoughts first; 4k was
+            # truncating Care Profile JSON mid-string.
+            max_tokens = max(max_tokens, 8192)
 
         config: dict[str, Any] = {
             "temperature": request.temperature,
@@ -205,14 +207,18 @@ class GeminiGenAIClient:
                     raise ModelBlocked(f"Gemini refused to answer (finish_reason={finish})")
 
                 if request.response_schema is not None and text:
-                    # Fail fast on unparseable JSON so the caller can retry
-                    # with a stricter prompt / schema.
                     try:
                         json.loads(text)
                     except json.JSONDecodeError as exc:
-                        raise ModelUnavailable(
-                            f"Gemini returned unparseable JSON: {exc.msg}"
-                        ) from exc
+                        # Truncated JSON is not transient — retrying the same
+                        # call just reprints the stack. Return the fragment so
+                        # the caller can shrink the prompt.
+                        _logger.warning(
+                            "gemini_unparseable_json",
+                            finish=finish,
+                            error=exc.msg,
+                            preview=text[:160],
+                        )
 
                 return GenerationResponse(
                     text=text,

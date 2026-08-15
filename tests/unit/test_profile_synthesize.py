@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from level_core.profile.synthesize import (
+    build_about_summary,
     calendar_pattern_facts,
     detect_contradictions,
     synthesize_snapshot,
@@ -63,3 +64,30 @@ def test_calendar_patterns_from_evening_load() -> None:
     types = {f.type for f in facts}
     assert FactType.CONSTRAINT in types
     assert any("evening" in f.statement.lower() for f in facts)
+
+
+def test_about_summary_skips_day_notice_facts() -> None:
+    facts = [
+        Fact(
+            user_id="u1",
+            type=FactType.PREFERENCE,
+            statement="I notice: send Alpha's teacher an email cuz Alpha is going to be sick today.",
+            salience=0.7,
+        ),
+        Fact(
+            user_id="u1",
+            type=FactType.PREFERENCE,
+            statement="I notice: Alpha needs to take a sick day.",
+            salience=0.7,
+        ),
+        Fact(
+            user_id="u1",
+            type=FactType.VALUE_STATEMENT,
+            statement="Sunday dinners with my parents are non-negotiable for me.",
+            salience=0.9,
+        ),
+    ]
+    text = build_about_summary(care_profile=None, facts=facts) or ""
+    assert "i notice" not in text.lower()
+    assert "sick" not in text.lower()
+    assert "sunday dinners" in text.lower()

@@ -554,6 +554,36 @@
   color: var(--foam);
 }
 
+.emailField {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin: 0 0 0.55rem;
+}
+
+.emailField span {
+  font-size: 0.75rem;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  color: var(--mist);
+}
+
+.emailField input,
+.emailField textarea {
+  width: 100%;
+  padding: 0.45rem 0.55rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: var(--panel, #fff);
+  color: inherit;
+  font: inherit;
+}
+
+.emailField textarea {
+  resize: vertical;
+  min-height: 7rem;
+}
+
 .proposalSummary {
   margin: 0 0 0.45rem !important;
   color: var(--signal);

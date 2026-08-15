@@ -1,7 +1,9 @@
 """Google onboard + agenda refresh orchestration.
 
 Initial connect may run Memory Bank / Gemini once.
-Webhook-driven refreshes are agenda-only (no LLM).
+Webhook-driven refreshes update the agenda cache first. If the dated
+agenda fingerprint changed, usuals infer runs in that same background task
+(not on the webhook request).
 """
 
 from __future__ import annotations
@@ -12,10 +14,21 @@ from level_api.dependencies import (
     cached_settings,
     cached_token_store,
 )
+from level_api.services.care_enrich import (
+    enrich_care_from_agenda,
+    ensure_profile_from_agenda,
+    run_ingest_signals,
+)
 from level_core.auth.google_oauth import credentials_from_token, token_from_credentials
 from level_core.calendar.agenda_sync import ensure_calendar_watch, refresh_agenda_cache
 from level_core.calendar.sync_state import CalendarSyncState
+from level_core.calendar.usuals import agenda_fingerprint
+from level_core.ingest.google_live import pull_calendar
 from level_core.observability.logger import get_logger
+from level_core.profile.persist import (
+    persist_care_profile_from_events,
+    refresh_persisted_profile,
+)
 from level_core.schemas.base import _now_utc
 from level_core.schemas.signal import Signal
 
@@ -38,13 +51,6 @@ async def _refresh_oauth_token(user_id: str):
 
 async def onboard_google_user(user_id: str) -> None:
     """After OAuth: warm agenda cache, register watch, LLM ingest once if needed."""
-    from level_api.routes.sources import (
-        _persist_pattern_facts,
-        _refresh_profile,
-        _run_signals,
-    )
-    from level_core.ingest.google_live import pull_calendar
-
     sync_store = cached_calendar_sync_store()
     memory = cached_memory()
     state = await sync_store.get(user_id) or CalendarSyncState(user_id=user_id)
@@ -86,8 +92,6 @@ async def onboard_google_user(user_id: str) -> None:
 
     if state.profile_ingested_at is not None:
         # Memory may have been wiped on reload — rebuild bullets from agenda cache.
-        from level_api.routes.sources import ensure_profile_from_agenda
-
         await ensure_profile_from_agenda(
             user_id=user_id, memory=memory, sync_store=sync_store
         )
@@ -102,23 +106,28 @@ async def onboard_google_user(user_id: str) -> None:
         # Seed priorities from agenda immediately (not calendar-analytics dumps).
         state = await sync_store.get(user_id)
         if state and state.events:
-            from level_api.routes.sources import _infer_persist_care_profile
-
-            await _infer_persist_care_profile(
+            await persist_care_profile_from_events(
                 memory,
                 user_id,
                 [{"summary": e.summary, "start": e.start} for e in state.events.values()],
                 embed=True,
             )
 
-        summary = await _run_signals(memory, signals)
-        snap = await _refresh_profile(memory, user_id)
+        summary = await run_ingest_signals(memory, signals)
+        snap = await refresh_persisted_profile(memory, user_id)
         state = await sync_store.get(user_id) or state
+        onboard_events = [
+            {"summary": e.summary, "start": e.start}
+            for e in (state.events or {}).values()
+            if e.summary
+        ]
         state = state.model_copy(
             update={
                 "profile_ingested_at": _now_utc(),
                 "initial_sync_done": True,
                 "initial_sync_error": summary.detail or None,
+                "care_infer_fingerprint": agenda_fingerprint(onboard_events)
+                or state.care_infer_fingerprint,
             }
         )
         await sync_store.upsert(state)
@@ -130,8 +139,6 @@ async def onboard_google_user(user_id: str) -> None:
         )
     except Exception as exc:  # noqa: BLE001
         _logger.exception("google_onboard_llm_failed", user_id=user_id)
-        from level_api.routes.sources import ensure_profile_from_agenda
-
         snap = await ensure_profile_from_agenda(
             user_id=user_id, memory=memory, sync_store=sync_store
         )
@@ -153,7 +160,7 @@ async def onboard_google_user(user_id: str) -> None:
 
 
 async def agenda_only_refresh(user_id: str) -> None:
-    """Webhook path: update agenda cache only. Never Gemini / profile."""
+    """Webhook path: refresh agenda, then usuals infer if the calendar changed."""
     token = await _refresh_oauth_token(user_id)
     if token is None:
         _logger.warning("agenda_refresh_no_token", user_id=user_id)
@@ -162,6 +169,7 @@ async def agenda_only_refresh(user_id: str) -> None:
     await refresh_agenda_cache(user_id=user_id, token=token, sync_store=sync_store)
     # Opportunistic channel renewal (no-op if still valid).
     await ensure_calendar_watch(user_id=user_id, token=token, sync_store=sync_store)
+    await enrich_care_from_agenda(user_id, cached_memory(), sync_store, force=False)
 
 
 __all__ = ["agenda_only_refresh", "onboard_google_user"]

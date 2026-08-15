@@ -136,7 +136,8 @@ LEVEL_WEB_APP_URL=http://localhost:3000
 ```
 
 6. Restart API → Sources → **Connect Google** → sync Calendar. On Google’s screen, leave **Send email** checked.
-7. OAuth consent screen: add your Google account as a test user if the app is in Testing. `gmail.send` is a sensitive scope — if it isn’t listed on the consent screen, Google will connect Calendar but Level still can’t send the teacher a note.
+7. Calendar push: leave `LEVEL_PUBLIC_API_URL` blank on localhost — Today pulls deltas on each load. In prod (or a tunnel to `:8080`), set it to the public `https://…` API origin so Google can POST `/v1/sources/google/webhook`.
+8. OAuth consent screen: add your Google account as a test user if the app is in Testing. `gmail.send` is a sensitive scope — if it isn’t listed on the consent screen, Google will connect Calendar but Level still can’t send the teacher a note.
 
 ### C. What “helpful in reality” looks like
 

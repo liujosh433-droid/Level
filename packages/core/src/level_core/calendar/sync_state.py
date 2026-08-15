@@ -38,7 +38,24 @@ class CalendarSyncState(LevelModel):
     resource_id: str | None = None
     channel_token: str | None = None
     channel_expiration_ms: int | None = None
+    # Agenda hash last sent through Care / usuals infer. Empty = never stamped.
+    care_infer_fingerprint: str | None = None
     updated_at: datetime = Field(default_factory=_now_utc)
+
+
+def watch_is_live(
+    state: CalendarSyncState | None,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """True when Google can still push to our webhook for this user."""
+    if state is None or not state.channel_id or not state.resource_id:
+        return False
+    if not state.channel_expiration_ms:
+        return True
+    current = now or datetime.now(tz=timezone.utc)
+    now_ms = int(current.timestamp() * 1000)
+    return state.channel_expiration_ms > now_ms
 
 
 class CalendarSyncStore(Protocol):
@@ -268,4 +285,5 @@ __all__ = [
     "FirestoreCalendarSyncStore",
     "build_calendar_sync_store",
     "events_for_local_day",
+    "watch_is_live",
 ]

@@ -33,6 +33,7 @@ from level_core.memory.base import MemoryBank
 from level_core.memory.factory import build_memory
 from level_core.models.factory import build_embedding_client, build_gemini_client
 from level_core.observability.logger import get_logger
+from level_core.profile.care_store import apply_series_usuals
 from level_core.schemas.care import CareRoleId
 from level_core.schemas.decision import Decision, DecisionStatus
 from level_core.schemas.turn import TurnStatus
@@ -92,6 +93,7 @@ async def _load_agenda_events(user_id: str) -> list[dict[str, str | None]]:
                 "start": e.start,
                 "end": e.end,
                 "status": e.status,
+                "recurring_event_id": e.recurring_event_id,
             }
             for e in state.events.values()
             if e.summary
@@ -184,6 +186,7 @@ async def _process_user(
         return 0
 
     events = await _load_agenda_events(user_id)
+    care = await apply_series_usuals(memory, user_id, events) or care
     collisions = find_role_collisions(care=care, events=events) if care.roles else []
     if not collisions and allow_demo_synth:
         demo = synthesize_demo_collision_event(care)

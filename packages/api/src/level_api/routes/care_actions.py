@@ -1,6 +1,6 @@
 """Care actions — missing usuals, school paper, sick-day send.
 
-Writes stay behind Hold/Run. No coverage search, no friend texts.
+School notes send only when the user presses Send. No coverage search, no friend texts.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from level_core.calendar.school import (
     attach_school_email,
     build_school_send_proposal,
     draft_contact_note,
-    draft_paper_hold_title,
+    draft_paper_title,
     events_for_person_on_date,
     match_contacts_by_role,
     match_people_by_names,
@@ -35,6 +35,7 @@ from level_core.calendar.school import (
     school_send_target,
 )
 from level_core.calendar.sync_state import CalendarSyncStore
+from level_core.calendar.routines import usual_event_title
 from level_core.calendar.usuals import (
     DEFAULT_TZ,
     apply_usual_resolution,
@@ -47,8 +48,8 @@ from level_core.memory.base import MemoryBank
 from level_core.models.base import GenerationRequest, PromptMedia
 from level_core.models.factory import build_gemini_client
 from level_core.observability.logger import get_logger
+from level_core.profile.care_store import apply_care, apply_care_or_create
 from level_core.profile.people_usuals import hydrate_people_from_roles
-from level_core.profile.synthesize import invalidate_care_graph_cache
 from level_core.schemas.base import _new_id
 from level_core.schemas.care import (
     CareContact,
@@ -171,10 +172,15 @@ async def resolve_usual(
                 status_code=400, detail="Connect Google Calendar on Sources first."
             )
         start, end = usual_window_datetimes(usual, on_date)
+        summary = usual_event_title(
+            person,
+            usual,
+            routine_by_summary=care.calendar_routine_by_summary,
+        )
         try:
             created = await create_calendar_event(
                 token,
-                summary=usual.label,
+                summary=summary,
                 start=start,
                 end=end,
                 timezone_name="America/Los_Angeles",
@@ -193,7 +199,7 @@ async def resolve_usual(
                 sync_store=sync_store,
                 google_event={
                     "id": event_id or f"level-usual:{usual.usual_id}:{on_date.isoformat()}",
-                    "summary": usual.label,
+                    "summary": summary,
                     "status": "confirmed",
                     "start": {
                         "dateTime": start.astimezone(wall).isoformat(timespec="seconds"),
@@ -211,11 +217,15 @@ async def resolve_usual(
             refresh_agenda_cache, user_id=user_id, token=token, sync_store=sync_store
         )
 
-    care = apply_usual_resolution(
-        care, usual_id=payload.usual_id, action=action, on_date=on_date
+    care = await apply_care(
+        memory,
+        user_id,
+        lambda current: apply_usual_resolution(
+            current, usual_id=payload.usual_id, action=action, on_date=on_date
+        ),
     )
-    invalidate_care_graph_cache(user_id)
-    await memory.manifestos.save_care_profile(care)
+    if care is None:
+        raise HTTPException(status_code=404, detail="Care Profile not found.")
     return UsualResolveResponse(ok=True, google_event_id=event_id)
 
 
@@ -293,14 +303,6 @@ async def add_care_person(
             status_code=400,
             detail="Add a child or someone in elder care.",
         )
-    care = await memory.manifestos.get_care_profile(user_id=user_id)
-    if care is None:
-        care = CareProfile(user_id=user_id)
-    if any(p.display_name.lower() == name.lower() for p in care.people_profiles):
-        existing = next(
-            p for p in care.people_profiles if p.display_name.lower() == name.lower()
-        )
-        return SchoolContactResponse(ok=True, person_id=existing.person_id)
     relation = payload.their_relation.strip()[:48]
     if not relation:
         relation = "child" if role == CareRoleId.CHILD_CARE.value else "elder"
@@ -311,15 +313,31 @@ async def add_care_person(
         status=BulletStatus.ACCEPTED,
         contacts=seed_contacts(role),
     )
-    care = care.model_copy(
-        update={
-            "people_profiles": [*care.people_profiles, person],
-            "version": int(care.version or 1) + 1,
-        }
+
+    def _add(current):
+        match = next(
+            (
+                p
+                for p in current.people_profiles
+                if p.display_name.lower() == name.lower()
+            ),
+            None,
+        )
+        if match is not None:
+            return current
+        return current.model_copy(
+            update={
+                "people_profiles": [*current.people_profiles, person],
+                "version": int(current.version or 1) + 1,
+            }
+        )
+
+    care = await apply_care_or_create(memory, user_id, _add)
+    existing = next(
+        (p for p in care.people_profiles if p.display_name.lower() == name.lower()),
+        person,
     )
-    invalidate_care_graph_cache(user_id)
-    await memory.manifestos.save_care_profile(care)
-    return SchoolContactResponse(ok=True, person_id=person.person_id)
+    return SchoolContactResponse(ok=True, person_id=existing.person_id)
 
 
 @router.post("/people/self", response_model=SchoolContactResponse)
@@ -328,15 +346,16 @@ async def ensure_self_person(
     user_id: str = Depends(require_user),
     memory: MemoryBank = Depends(get_memory),
 ) -> SchoolContactResponse:
-    care = await memory.manifestos.get_care_profile(user_id=user_id)
-    if care is None:
-        care = CareProfile(user_id=user_id)
-    next_care, person = ensure_self_care_person(care, payload.display_name)
-    next_care = hydrate_people_from_roles(next_care)
-    if next_care.version != care.version:
-        invalidate_care_graph_cache(user_id)
-        await memory.manifestos.save_care_profile(next_care)
-    return SchoolContactResponse(ok=True, person_id=person.person_id)
+    person_id = ""
+
+    def _ensure_self(current):
+        nonlocal person_id
+        next_care, person = ensure_self_care_person(current, payload.display_name)
+        person_id = person.person_id
+        return hydrate_people_from_roles(next_care)
+
+    await apply_care_or_create(memory, user_id, _ensure_self)
+    return SchoolContactResponse(ok=True, person_id=person_id)
 
 
 @router.post("/people/contacts", response_model=SchoolContactResponse)
@@ -345,40 +364,44 @@ async def save_person_contacts(
     user_id: str = Depends(require_user),
     memory: MemoryBank = Depends(get_memory),
 ) -> SchoolContactResponse:
-    care = await memory.manifestos.get_care_profile(user_id=user_id)
+    found = False
+
+    def _save_contacts(current):
+        nonlocal found
+        people = []
+        for person in current.people_profiles:
+            if person.person_id != payload.person_id:
+                people.append(person)
+                continue
+            found = True
+            contacts: list[CareContact] = []
+            for row in payload.contacts[:12]:
+                role = row.role.strip()[:40]
+                if not role:
+                    continue
+                contacts.append(
+                    CareContact(
+                        contact_id=row.contact_id or _new_id(),
+                        role=role,
+                        name=row.name.strip()[:80],
+                        email=row.email.strip()[:200],
+                    )
+                )
+            people.append(person.model_copy(update={"contacts": contacts}))
+        if not found:
+            return current
+        return current.model_copy(
+            update={
+                "people_profiles": people,
+                "version": int(current.version or 1) + 1,
+            }
+        )
+
+    care = await apply_care(memory, user_id, _save_contacts)
     if care is None:
         raise HTTPException(status_code=404, detail="Care Profile not found.")
-    people = []
-    found = False
-    for person in care.people_profiles:
-        if person.person_id != payload.person_id:
-            people.append(person)
-            continue
-        found = True
-        contacts: list[CareContact] = []
-        for row in payload.contacts[:12]:
-            role = row.role.strip()[:40]
-            if not role:
-                continue
-            contacts.append(
-                CareContact(
-                    contact_id=row.contact_id or _new_id(),
-                    role=role,
-                    name=row.name.strip()[:80],
-                    email=row.email.strip()[:200],
-                )
-            )
-        people.append(person.model_copy(update={"contacts": contacts}))
     if not found:
         raise HTTPException(status_code=404, detail="Person not found.")
-    care = care.model_copy(
-        update={
-            "people_profiles": people,
-            "version": int(care.version or 1) + 1,
-        }
-    )
-    invalidate_care_graph_cache(user_id)
-    await memory.manifestos.save_care_profile(care)
     return SchoolContactResponse(ok=True, person_id=payload.person_id)
 
 
@@ -404,50 +427,68 @@ async def school_paper(
         extract = await extract_school_paper(pasted, media=media)
     except (ModelUnavailable, json.JSONDecodeError, ValueError) as exc:
         raise HTTPException(status_code=502, detail=f"Could not read the form: {exc}") from exc
+    proposal, ask = await propose_from_school_extract(
+        user_id=user_id,
+        user_text=(pasted or (media[0].filename if media else "School form"))[:400],
+        extract=extract,
+        care=care,
+        memory=memory,
+        store=store,
+    )
+    return SchoolPaperResponse(proposal=proposal, ask=ask)
 
+
+async def propose_from_school_extract(
+    *,
+    user_id: str,
+    user_text: str,
+    extract: SchoolPaperExtract,
+    care,
+    memory,
+    store: ProposalStore,
+) -> tuple[CommitmentProposal | None, str | None]:
+    """Turn a Gemini form extract into a send-now draft, or an ask."""
     people = match_people_by_names(care, [extract.person_name] if extract.person_name else [])
     if extract.person_name and not people and care and care.people_profiles:
         names = ", ".join(p.display_name for p in held_care_people(care)[:8])
-        return SchoolPaperResponse(
-            ask=f"Which person is this form for? Level knows: {names}."
-        )
+        return None, f"Which person is this form for? Level knows: {names}."
     person = people[0] if people else None
     to_email = (extract.to_email or "").strip()
     if person and care:
         if to_email:
-            care = attach_school_email(
-                care, person_id=person.person_id, email=to_email
-            )
-            await memory.manifestos.save_care_profile(care)
+            pid = person.person_id
+            email = to_email
+
+            def _attach(current):
+                next_care = attach_school_email(
+                    current, person_id=pid, email=email
+                )
+                if next_care is current:
+                    return current
+                return next_care.model_copy(
+                    update={"version": int(current.version or 1) + 1}
+                )
+
+            care = await apply_care(memory, user_id, _attach) or care
         if not to_email:
             to_email, _ = school_send_target(person)
     if not to_email:
-        return SchoolPaperResponse(
-            ask="Add the school email from the form (or on this person) before Level can send."
-        )
+        return None, "Add the school email from the form (or on this person) before Level can send."
 
-    hold_title = draft_paper_hold_title(extract, person)
-    deadline = (extract.deadline or "").strip()[:10]
+    title = draft_paper_title(extract, person)
     who = person.display_name if person else "this person"
     proposal = build_school_send_proposal(
         user_id=user_id,
-        user_text=(pasted or (media[0].filename if media else "School form"))[:400],
+        user_text=user_text[:400],
         people=people,
         to_email=to_email,
-        subject=extract.subject or hold_title,
+        subject=extract.subject or title,
         body=extract.body or f"Please find the signed form for {who}.\n",
         cancel_event_ids=[],
-        level_message=(
-            f"Hold: {hold_title}"
-            + (f" on {deadline}" if deadline else "")
-            + f". Run sends to {to_email}."
-        ),
-        hold_on_calendar=bool(deadline),
-        hold_date=deadline or None,
-        hold_title=hold_title,
+        level_message=f"Draft for {who}. Edit the preview if you want, then Send to {to_email}.",
     )
     await store.save(proposal)
-    return SchoolPaperResponse(proposal=proposal)
+    return proposal, None
 
 
 async def propose_sick_day_notes(
@@ -463,7 +504,7 @@ async def propose_sick_day_notes(
     cancel_today: bool = True,
     from_name: str = "",
 ) -> tuple[list[CommitmentProposal], str | None]:
-    """Build one Hold/Run proposal per matched person. Ask if ambiguous."""
+    """Build one send-now draft per matched person. Ask if ambiguous."""
     day = on_date or datetime.now(tz=DEFAULT_TZ).date()
     people = match_people_by_names(care, named)
     known = [p.display_name for p in held_care_people(care) if p.display_name][:8]
@@ -538,7 +579,9 @@ async def propose_sick_day_notes(
 
 
 __all__ = [
+    "extract_school_paper",
     "parse_on_date",
+    "propose_from_school_extract",
     "propose_sick_day_notes",
     "router",
 ]

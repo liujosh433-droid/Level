@@ -12,15 +12,23 @@ import {
 } from "@/components/dashboard";
 import {
   AuthError,
+  confirmProposal,
+  declineProposal,
   fetchMe,
   fetchProfile,
-  profileChat,
   reviewProfile,
+  sendChat,
+  submitSchoolPaper,
+  type CommitmentProposal,
   type Profile,
 } from "@/lib/api";
 import styles from "./profile.module.css";
+import chatStyles from "../today/today.module.css";
 
-type ChatLine = { role: "you" | "level"; text: string };
+type ChatItem =
+  | { id: string; kind: "checkin"; you: string; reply: string }
+  | { id: string; kind: "proposal"; proposal: CommitmentProposal }
+  | { id: string; kind: "paper"; you: string; reply: string };
 
 const CARE_ROLE_LABELS: Record<string, string> = {
   child_care: "Child care",
@@ -96,9 +104,13 @@ function ProfileInner() {
   const [googleConnected, setGoogleConnected] = useState(false);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [draft, setDraft] = useState("");
-  const [chat, setChat] = useState<ChatLine[]>([]);
+  const [chat, setChat] = useState<ChatItem[]>([]);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
+  const [canSendEmail, setCanSendEmail] = useState(true);
+  const [paperText, setPaperText] = useState("");
+  const [paperFile, setPaperFile] = useState<File | null>(null);
+  const [paperFileKey, setPaperFileKey] = useState(0);
   const [loading, setLoading] = useState(true);
   useEffect(() => {
     let cancelled = false;
@@ -110,6 +122,7 @@ function ProfileInner() {
         setUserId(me.user_id);
         setDisplayName(me.display_name);
         setGoogleConnected(Boolean(me.google_connected));
+        setCanSendEmail(me.can_send_email !== false);
         setProfile(nextProfile);
       } catch (err) {
         if (cancelled) return;
@@ -161,16 +174,112 @@ function ProfileInner() {
     }
   }
 
-  async function onTellMore(message: string) {
+  function patchProposal(proposalId: string, patch: Partial<CommitmentProposal>) {
+    setChat((prev) =>
+      prev.map((it) =>
+        it.kind === "proposal" && it.proposal.proposal_id === proposalId
+          ? { ...it, proposal: { ...it.proposal, ...patch } }
+          : it,
+      ),
+    );
+  }
+
+  async function onConfirm(proposal: CommitmentProposal, slotStart?: string) {
     if (!userId || busy) return;
-    setDraft("");
-    setChat((prev) => [...prev, { role: "you", text: message }]);
     setBusy(true);
     setStatus(null);
     try {
-      const res = await profileChat(message);
-      setProfile(res.profile);
-      setChat((prev) => [...prev, { role: "level", text: res.reply }]);
+      const email =
+        proposal.kind === "school_send"
+          ? {
+              to_email: proposal.to_email,
+              email_subject: proposal.email_subject,
+              email_body: proposal.email_body,
+            }
+          : undefined;
+      const res = await confirmProposal(proposal.proposal_id, slotStart, email);
+      setChat((prev) =>
+        prev.map((it) =>
+          it.kind === "proposal" && it.proposal.proposal_id === proposal.proposal_id
+            ? { ...it, proposal: res.proposal }
+            : it,
+        ),
+      );
+    } catch (err) {
+      setStatus(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onDecline(proposal: CommitmentProposal) {
+    if (!userId || busy) return;
+    setBusy(true);
+    try {
+      const updated = await declineProposal(proposal.proposal_id);
+      setChat((prev) =>
+        prev.map((it) =>
+          it.kind === "proposal" && it.proposal.proposal_id === proposal.proposal_id
+            ? { ...it, proposal: updated }
+            : it,
+        ),
+      );
+    } catch (err) {
+      setStatus(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onSchoolPaper() {
+    const text = paperText.trim();
+    if ((!text && !paperFile) || busy) return;
+    setBusy(true);
+    setStatus(null);
+    try {
+      const res = await submitSchoolPaper(text, paperFile);
+      if (res.proposal) {
+        setChat((prev) => [
+          ...prev,
+          { id: res.proposal!.proposal_id, kind: "proposal", proposal: res.proposal! },
+        ]);
+        setPaperText("");
+        setPaperFile(null);
+        setPaperFileKey((k) => k + 1);
+      } else if (res.ask) {
+        setChat((prev) => [
+          ...prev,
+          { id: `paper-${Date.now()}`, kind: "checkin", you: text.slice(0, 160), reply: res.ask ?? "" },
+        ]);
+      }
+    } catch (err) {
+      setStatus(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onTellMore(message: string) {
+    if (!userId || busy) return;
+    setDraft("");
+    setBusy(true);
+    setStatus(null);
+    try {
+      const res = await sendChat(message, true);
+      if (res.profile) setProfile(res.profile);
+      const next: ChatItem[] = [];
+      if (res.proposal) {
+        next.push({ id: res.proposal.proposal_id, kind: "proposal", proposal: res.proposal });
+      }
+      for (const proposal of res.school_proposals ?? []) {
+        next.push({ id: proposal.proposal_id, kind: "proposal", proposal });
+      }
+      if (res.wants_paper_upload) {
+        next.push({ id: `paper-${Date.now()}`, kind: "paper", you: message, reply: res.reply });
+      } else if (next.length === 0) {
+        next.push({ id: `checkin-${Date.now()}`, kind: "checkin", you: message, reply: res.reply });
+      }
+      setChat((prev) => [...prev, ...next]);
     } catch (err) {
       if (err instanceof AuthError) {
         router.replace("/welcome");
@@ -193,31 +302,156 @@ function ProfileInner() {
           <div className={styles.railStack}>
             <div className={styles.chatBlock}>
               <TellLevelPanel
-                title="Tell Level more"
-                lead="Add a priority Level missed — sleep, family rituals, recovery, or anything that should shape hard decisions."
-                placeholder='Ex: “Sunday dinners with my parents are non-negotiable” or “Mental recovery matters more than late work”'
+                title="Ask Level"
+                lead="Priorities, a hard call, or anything else — same Level as Today. Say you need to email the school and it will draft here."
+                placeholder='“Sunday dinners are non-negotiable” or “What’s crowding this week?”'
                 value={draft}
                 onChange={setDraft}
                 onSubmit={onTellMore}
                 busy={busy}
                 disabled={!userId}
-                submitLabel="Save priority"
-                busyLabel="Saving…"
-                minLength={8}
+                submitLabel="Send"
+                busyLabel="Thinking…"
+                minLength={4}
                 voiceEnabled
                 stickyInput={false}
                 onVoiceError={setStatus}
                 error={null}
               >
                 {chat.length > 0
-                  ? chat.map((line, i) =>
-                      line.role === "you" ? (
-                        <article key={i}>
-                          <TellLevelYou>{line.text}</TellLevelYou>
+                  ? chat.map((item) =>
+                      item.kind === "checkin" ? (
+                        <article key={item.id}>
+                          <TellLevelYou>{item.you}</TellLevelYou>
+                          <TellLevelReply>{item.reply}</TellLevelReply>
+                        </article>
+                      ) : item.kind === "paper" ? (
+                        <article key={item.id}>
+                          <TellLevelYou>{item.you}</TellLevelYou>
+                          <TellLevelReply>
+                            <p>{item.reply}</p>
+                            <label className={chatStyles.paperFile}>
+                              <input
+                                key={paperFileKey}
+                                type="file"
+                                accept="application/pdf,image/*,.txt"
+                                disabled={busy || !userId}
+                                onChange={(e) => setPaperFile(e.target.files?.[0] ?? null)}
+                              />
+                              <span>{paperFile ? paperFile.name : "Upload a PDF or photo"}</span>
+                            </label>
+                            <textarea
+                              className={chatStyles.paperInput}
+                              rows={3}
+                              value={paperText}
+                              onChange={(e) => setPaperText(e.target.value)}
+                              placeholder="Or paste the form text…"
+                              disabled={busy || !userId}
+                            />
+                            <button
+                              type="button"
+                              className={chatStyles.secondaryAction}
+                              disabled={busy || (!paperText.trim() && !paperFile)}
+                              onClick={() => void onSchoolPaper()}
+                            >
+                              Draft the email
+                            </button>
+                          </TellLevelReply>
                         </article>
                       ) : (
-                        <article key={i}>
-                          <TellLevelReply>{line.text}</TellLevelReply>
+                        <article key={item.id}>
+                          <TellLevelYou>{item.proposal.user_text}</TellLevelYou>
+                          <TellLevelReply>
+                            <p className={chatStyles.proposalSummary}>{item.proposal.summary}</p>
+                            <p>{item.proposal.level_message}</p>
+                            {item.proposal.kind === "school_send" && item.proposal.status === "pending" ? (
+                              <div className={chatStyles.emailPreview}>
+                                <label className={chatStyles.emailField}>
+                                  <span>To</span>
+                                  <input
+                                    type="email"
+                                    value={item.proposal.to_email ?? ""}
+                                    onChange={(e) =>
+                                      patchProposal(item.proposal.proposal_id, {
+                                        to_email: e.target.value,
+                                      })
+                                    }
+                                    disabled={busy}
+                                  />
+                                </label>
+                                <label className={chatStyles.emailField}>
+                                  <span>Subject</span>
+                                  <input
+                                    type="text"
+                                    value={item.proposal.email_subject ?? ""}
+                                    onChange={(e) =>
+                                      patchProposal(item.proposal.proposal_id, {
+                                        email_subject: e.target.value,
+                                      })
+                                    }
+                                    disabled={busy}
+                                  />
+                                </label>
+                                <label className={chatStyles.emailField}>
+                                  <span>Message</span>
+                                  <textarea
+                                    rows={6}
+                                    value={item.proposal.email_body ?? ""}
+                                    onChange={(e) =>
+                                      patchProposal(item.proposal.proposal_id, {
+                                        email_body: e.target.value,
+                                      })
+                                    }
+                                    disabled={busy}
+                                  />
+                                </label>
+                              </div>
+                            ) : null}
+                            {item.proposal.status === "pending" ? (
+                              <div className={chatStyles.proposalActions}>
+                                {item.proposal.kind === "school_send" ? (
+                                  canSendEmail ? (
+                                    <button
+                                      type="button"
+                                      className={chatStyles.primaryAction}
+                                      disabled={busy || !(item.proposal.to_email ?? "").includes("@")}
+                                      onClick={() => void onConfirm(item.proposal)}
+                                    >
+                                      Send
+                                    </button>
+                                  ) : (
+                                    <a href="/sources?need_gmail=1" className={chatStyles.primaryAction}>
+                                      Allow sending email on Sources
+                                    </a>
+                                  )
+                                ) : item.proposal.kind === "add" ? (
+                                  <button
+                                    type="button"
+                                    className={chatStyles.primaryAction}
+                                    disabled={busy}
+                                    onClick={() => void onConfirm(item.proposal)}
+                                  >
+                                    Add anyway
+                                  </button>
+                                ) : null}
+                                <button
+                                  type="button"
+                                  className={chatStyles.ghostAction}
+                                  disabled={busy}
+                                  onClick={() => void onDecline(item.proposal)}
+                                >
+                                  Never mind
+                                </button>
+                              </div>
+                            ) : null}
+                            {item.proposal.status === "confirmed" ? (
+                              <p className={styles.meta}>
+                                {item.proposal.kind === "school_send"
+                                  ? "Sent — the school has it."
+                                  : "Added to your Google Calendar."}
+                              </p>
+                            ) : null}
+                          </TellLevelReply>
                         </article>
                       ),
                     )

@@ -20,22 +20,33 @@ from level_api.dependencies import (
     get_proposal_store,
     get_token_store,
 )
-from level_api.routes.care_actions import propose_sick_day_notes
-from level_api.routes.sources import (
-    _bg_enrich_care,
-    _seed_care_from_agenda_fast,
-)
+from level_api.services.chat_turn import run_chat_turn
+from level_core.profile.persist import seed_care_from_agenda_fast
+from level_api.services.care_enrich import enrich_care_from_agenda as _bg_enrich_care
 from level_core.auth.tokens import TokenStore
 from level_core.calendar.activity_art import activity_color, infer_activity_kind
-from level_core.calendar.agenda_sync import day_events_cached_or_live, refresh_agenda_cache
+from level_core.calendar.agenda_sync import (
+    day_events_cached_or_live,
+    refresh_agenda_cache,
+    refresh_agenda_on_read,
+)
 from level_core.calendar.event_cues import EventCue, EventCueStore, match_cues_for_summary
 from level_core.calendar.proposals import ProposalStore
-from level_core.calendar.usuals import find_usual_gaps, horizon_dates
+from level_core.calendar.routines import (
+    classify_usual,
+    format_usual_slot,
+    normalize_routine,
+    routine_word,
+)
+from level_core.calendar.usuals import find_usual_gaps, horizon_dates, usuals_infer_needed
+from level_core.profile.care_store import apply_care, apply_series_usuals
+from level_core.profile.people_usuals import merge_series_usuals
 from level_core.schemas.care import pending_usuals
 from level_core.schemas.commitment import CommitmentProposal
 from level_core.calendar.sync_state import (
     CalendarSyncStore,
     events_for_local_day,
+    watch_is_live,
 )
 from level_core.config import get_settings
 from level_core.errors import ModelUnavailable
@@ -45,7 +56,7 @@ from level_core.models.factory import build_gemini_client
 from level_core.observability.logger import get_logger
 from level_core.profile.care_infer_llm import classify_week_event_roles_ai
 from level_core.schemas.care import clean_conflict_summaries
-from level_core.profile.synthesize import (
+from level_core.profile.care_graph import (
     build_holding_summary,
     build_week_role_load,
     cached_care_graph,
@@ -136,6 +147,7 @@ class ProposedUsualOut(BaseModel):
     weekday: int
     start_minute: int
     end_minute: int
+    when_label: str = ""
 
 
 class TodayResponse(BaseModel):
@@ -171,23 +183,6 @@ class DayCheckInResponse(BaseModel):
     cues_added: int = 0
     today: TodayResponse | None = None
     school_proposals: list[CommitmentProposal] = Field(default_factory=list)
-
-
-class _CheckInParse(BaseModel):
-    profile_note: str = ""
-    keywords: list[str] = Field(default_factory=list)
-    reminder: str = ""
-    reply: str = ""
-    # Exact calendar titles from the provided agenda this note applies to.
-    matched_titles: list[str] = Field(default_factory=list)
-    # When the note is about job/work, set paid_work so we can tag those events.
-    care_role: str = ""
-    is_sick_day: bool = False
-    notify_contact: bool = False
-    sick_person_names: list[str] = Field(default_factory=list)
-    contact_role: str = ""
-    email_subject: str = ""
-    email_body: str = ""
 
 
 class _TomorrowLLM(BaseModel):
@@ -245,10 +240,17 @@ def _usual_views(care, agenda_events: list[dict]) -> tuple[list[UsualGapOut], li
                 person_id=person.person_id,
                 display_name=person.display_name,
                 your_role=person.your_role,
-                label=usual.label,
+                label=routine_word(
+                    classify_usual(
+                        usual,
+                        person,
+                        routine_by_summary=care.calendar_routine_by_summary,
+                    )
+                ),
                 weekday=usual.weekday,
                 start_minute=usual.start_minute,
                 end_minute=usual.end_minute,
+                when_label=format_usual_slot(usual.weekday, usual.start_minute),
             )
         )
     return gaps_out, proposed
@@ -346,6 +348,27 @@ async def _warm_agenda_cache_bg(user_id: str, token: OAuthToken, sync_store: Cal
         await refresh_agenda_cache(user_id=user_id, token=token, sync_store=sync_store)
     except Exception as exc:  # noqa: BLE001
         _logger.warning("agenda_cache_bg_warm_failed", user_id=user_id, error=str(exc))
+        return
+    try:
+        await _bg_enrich_care(user_id, get_memory(), sync_store, force=False)
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning("care_enrich_after_warm_failed", user_id=user_id, error=str(exc))
+
+
+def _week_needs_classify(week_events: list[dict], care) -> bool:
+    """True when a week title still lacks a Gemini role or routine."""
+    hints = dict(care.calendar_role_by_summary)
+    routines = dict(care.calendar_routine_by_summary)
+    for ev in week_events:
+        title = str(ev.get("summary") or "")
+        if not title:
+            continue
+        if resolve_event_care_role(title, role_by_summary=hints or None) is None:
+            return True
+        key = " ".join(title.strip().lower().split())
+        if not normalize_routine(routines.get(key, "")):
+            return True
+    return False
 
 
 async def _bg_classify_week_roles(
@@ -353,7 +376,7 @@ async def _bg_classify_week_roles(
     memory: MemoryBank,
     sync_store: CalendarSyncStore,
 ) -> None:
-    """Background: classify this week's titles into care roles (do not block /today)."""
+    """Background: classify this week's titles into care roles + routines."""
     try:
         care = await memory.manifestos.get_care_profile(user_id=user_id)
         if care is None:
@@ -372,38 +395,38 @@ async def _bg_classify_week_roles(
             if ev.summary
         ]
         week_events = filter_events_for_local_week(agenda_events)
-        hints = dict(care.calendar_role_by_summary)
-        needs = any(
-            resolve_event_care_role(
-                str(ev.get("summary") or ""),
-                role_by_summary=hints or None,
-            )
-            is None
-            for ev in week_events
-        )
-        if not needs or not week_events:
+        if not week_events or not _week_needs_classify(week_events, care):
             return
-        week_hints = await classify_week_event_roles_ai(
+        classified = await classify_week_event_roles_ai(
             week_events=week_events,  # type: ignore[arg-type]
             profile=care,
             gemini=build_gemini_client(get_settings()),
         )
-        if not week_hints:
+        if not classified.roles and not classified.routines:
             return
-        merged = {**hints, **week_hints}
-        care = care.model_copy(
-            update={
-                "calendar_role_by_summary": merged,
-                "version": int(care.version or 1) + 1,
-                "updated_at": _now_utc(),
-            }
-        )
-        invalidate_care_graph_cache(user_id)
-        await memory.manifestos.save_care_profile(care)
+
+        def _merge_hints(current):
+            return current.model_copy(
+                update={
+                    "calendar_role_by_summary": {
+                        **dict(current.calendar_role_by_summary),
+                        **classified.roles,
+                    },
+                    "calendar_routine_by_summary": {
+                        **dict(current.calendar_routine_by_summary),
+                        **classified.routines,
+                    },
+                    "version": int(current.version or 1) + 1,
+                    "updated_at": _now_utc(),
+                }
+            )
+
+        await apply_care(memory, user_id, _merge_hints)
         _logger.info(
             "week_roles_classified_bg",
             user_id=user_id,
-            tagged=len(week_hints),
+            tagged=len(classified.roles),
+            routines=len(classified.routines),
         )
     except Exception:  # noqa: BLE001
         _logger.exception("week_roles_classify_bg_failed", user_id=user_id)
@@ -439,8 +462,13 @@ async def get_today(
     state = None
     if token is not None:
         try:
-            # Parallel day pulls; never block on full agenda resync (that was the lag).
-            raw_today, raw_tomorrow, state, care = await asyncio.gather(
+            # No public HTTPS watch (localhost): pull deltas now so a just-deleted
+            # event is gone on this load. Prod with a live watch uses the cache;
+            # Google push refreshes it via /v1/sources/google/webhook.
+            state = await refresh_agenda_on_read(
+                user_id=user_id, token=token, sync_store=sync_store
+            )
+            raw_today, raw_tomorrow, care = await asyncio.gather(
                 day_events_cached_or_live(
                     user_id=user_id,
                     token=token,
@@ -453,19 +481,12 @@ async def get_today(
                     sync_store=sync_store,
                     day_offset=1,
                 ),
-                sync_store.get(user_id),
                 memory.manifestos.get_care_profile(user_id=user_id),
             )
-            updated = state.agenda_updated_at if state else None
-            if updated is not None and updated.tzinfo is None:
-                updated = updated.replace(tzinfo=timezone.utc)
-            cache_stale = (
-                state is None
-                or updated is None
-                or (datetime.now(tz=timezone.utc) - updated).total_seconds() > 3600
-            )
-            if cache_stale:
-                background_tasks.add_task(_warm_agenda_cache_bg, user_id, token, sync_store)
+            if watch_is_live(state):
+                background_tasks.add_task(
+                    _warm_agenda_cache_bg, user_id, token, sync_store
+                )
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=502, detail=f"Calendar read failed: {exc}") from exc
         role_hints = dict(care.calendar_role_by_summary) if care else None
@@ -573,6 +594,8 @@ async def get_today(
                     "start": ev.start,
                     "end": ev.end,
                     "all_day": ev.all_day,
+                    "status": ev.status,
+                    "recurring_event_id": ev.recurring_event_id,
                 }
                 for ev in state.events.values()
                 if ev.summary
@@ -587,12 +610,22 @@ async def get_today(
                             "start": ev.start,
                             "end": ev.end,
                             "all_day": ev.all_day,
+                            "status": ev.status,
+                            "recurring_event_id": ev.recurring_event_id,
                         }
                         for ev in state.events.values()
                         if ev.summary
                     ]
             except Exception:  # noqa: BLE001
                 pass
+
+        if care is not None and agenda_events:
+            next_care = merge_series_usuals(care, agenda_events)
+            if next_care.version != care.version:
+                background_tasks.add_task(
+                    apply_series_usuals, memory, user_id, agenda_events
+                )
+                care = next_care
 
         if agenda_events and (
             care is None
@@ -607,27 +640,30 @@ async def get_today(
                 sync_store,
                 force=True,
             )
+        elif agenda_events and usuals_infer_needed(
+            stored_fingerprint=state.care_infer_fingerprint if state else None,
+            events=agenda_events,
+        ):
+            # Calendar changed (or never stamped) — re-propose usuals in the background.
+            background_tasks.add_task(
+                _bg_enrich_care,
+                user_id,
+                memory,
+                sync_store,
+                force=False,
+            )
         # Opt-in regex seed only (LEVEL_ALLOW_HEURISTIC_CARE=1).
         if (care is None or not care.roles) and agenda_events:
-            care = await _seed_care_from_agenda_fast(
+            care = await seed_care_from_agenda_fast(
                 user_id=user_id,
                 memory=memory,
-                sync_store=sync_store,
                 events=agenda_events,
             )
             invalidate_care_graph_cache(user_id)
 
         if care is not None:
             week_events = filter_events_for_local_week(agenda_events)
-            hints = dict(care.calendar_role_by_summary)
-            needs_week_ai = any(
-                resolve_event_care_role(
-                    str(ev.get("summary") or ""),
-                    role_by_summary=hints or None,
-                )
-                is None
-                for ev in week_events
-            )
+            needs_week_ai = _week_needs_classify(week_events, care)
             # Never await Gemini on /today — classify in the background.
             if needs_week_ai and week_events:
                 background_tasks.add_task(
@@ -698,240 +734,26 @@ async def day_check_in(
     sync_store: CalendarSyncStore = Depends(get_calendar_sync_store),
     store: ProposalStore = Depends(get_proposal_store),
 ) -> DayCheckInResponse:
-    """Friendly day check-in → profile fact + optional event-linked reminder."""
-    settings = get_settings()
-    gemini = build_gemini_client(settings)
-    message = payload.message.strip()
-
-    # Today's titles help the model attach reminders to real calendar events.
-    agenda_titles: list[str] = []
-    token, state, user = await asyncio.gather(
-        tokens.get_google_token(user_id),
-        sync_store.get(user_id),
-        tokens.get_user(user_id),
+    """Friendly day check-in — same router as /v1/chat."""
+    result = await run_chat_turn(
+        user_id=user_id,
+        message=payload.message,
+        memory=memory,
+        tokens=tokens,
+        sync_store=sync_store,
+        store=store,
+        cue_store=cue_store,
+        background_tasks=background_tasks,
     )
-    try:
-        if token is not None:
-            raw_today = await day_events_cached_or_live(
-                user_id=user_id,
-                token=token,
-                sync_store=sync_store,
-                day_offset=0,
-            )
-            agenda_titles = [
-                (e.get("summary") or "").strip()
-                for e in raw_today
-                if (e.get("summary") or "").strip()
-            ][:20]
-        if not agenda_titles and state and state.events:
-            agenda_titles = [
-                e["summary"]
-                for e in events_for_local_day(state, day_offset=0)
-                if e.get("summary")
-            ][:20]
-    except Exception:  # noqa: BLE001
-        agenda_titles = []
-
-    titles_block = "\n".join(f"- {t}" for t in agenda_titles) or "(no titles available)"
-    parsed = _CheckInParse(
-        profile_note=message[:400],
-        reply="Got it — I’ll remember that.",
-    )
-    try:
-        resp = await gemini.generate(
-            GenerationRequest(
-                model_id=settings.fast_model,
-                system_instruction=(
-                    "You help Level learn from a caregiver's day check-in. "
-                    "Reason from the user's words + today's agenda together "
-                    "(do not rely on fixed keyword lists).\n"
-                    "Extract:\n"
-                    "- profile_note: first-person fact about their life.\n"
-                    "- keywords: lowercase tokens from agenda titles this note "
-                    "should attach to (copy words that appear in those titles).\n"
-                    "- matched_titles: exact agenda title strings this note applies "
-                    "to (copy from the agenda list; empty if none fit).\n"
-                    "- care_role: holistically choose paid_work, child_care, "
-                    "elder_care, self_recovery, household_logistics, "
-                    "partner_coparent, or empty. Use agenda + wording: e.g. "
-                    "forgetting a charger for work + a Meeting on the agenda → "
-                    "paid_work and match that Meeting. Classes/courses are not "
-                    "self_recovery.\n"
-                    "- reminder: short warm nudge shown on matching days.\n"
-                    "- reply: 1 short warm sentence (complete — do not trail off).\n"
-                    "- is_sick_day: true when they say someone already on the "
-                    "care list is home sick / absent from school today.\n"
-                    "- notify_contact: true when they ask to email a saved role "
-                    "(teacher, doctor, attendance, …).\n"
-                    "- sick_person_names: names they used (copy from their words; "
-                    "empty if they said 'the kids' without naming).\n"
-                    "- contact_role: the role to email (teacher, doctor, …) or empty.\n"
-                    "Do not write email_subject or email_body — Level drafts the note.\n"
-                    "JSON only."
-                ),
-                prompt=(
-                    f"User said: {message}\n\n"
-                    f"Today's agenda titles:\n{titles_block}\n"
-                ),
-                response_schema=_CheckInParse.model_json_schema(),
-                temperature=0.2,
-                max_output_tokens=320,
-            )
-        )
-        parsed = _CheckInParse.model_validate(json.loads(resp.text))
-    except (ModelUnavailable, json.JSONDecodeError, ValueError):
-        pass
-    except Exception:  # noqa: BLE001
-        pass
-
-    note = (parsed.profile_note or message).strip()[:500]
-    facts_added = 0
-    fact = None
-    signal = None
-    if len(note) >= 8:
-        fact = Fact(
-            user_id=user_id,
-            type=FactType.CONSTRAINT if parsed.keywords else FactType.PREFERENCE,
-            statement=note if note.lower().startswith("i ") else f"I notice: {note}",
-            source_signal_ids=[],
-            salience=0.7,
-        )
-        facts_added = 1
-        signal = Signal(
-            user_id=user_id,
-            source=SignalSource.MANUAL,
-            external_id=f"day-checkin:{uuid.uuid4().hex[:12]}",
-            text=f"Day check-in: {message}",
-        )
-
-    cues_added = 0
-    keywords = [k.strip().lower() for k in parsed.keywords if k and k.strip()][:8]
-    # Fold AI-matched agenda titles into cue keywords so reminders stick to events.
-    for title in parsed.matched_titles:
-        t = (title or "").strip()
-        if not t:
-            continue
-        for token in re.findall(r"[a-z0-9']+", t.lower()):
-            if len(token) >= 3 and token not in keywords:
-                keywords.append(token)
-        if len(keywords) >= 8:
-            break
-    keywords = keywords[:8]
-    reminder = (parsed.reminder or "").strip()[:220]
-    cue = None
-    if keywords and reminder:
-        cue = EventCue(
-            user_id=user_id,
-            keywords=keywords,
-            reminder=reminder,
-            source_text=message[:400],
-        )
-        cues_added = 1
-
-    # Apply AI-chosen role tags immediately; holistic enrich reconciles the rest.
-    role_raw = (parsed.care_role or "").strip().lower()
-    titles_to_tag = [t.strip() for t in parsed.matched_titles if t and t.strip()]
-    care = None
-    if role_raw and titles_to_tag:
-        try:
-            care = await memory.manifestos.get_care_profile(user_id=user_id)
-        except Exception:  # noqa: BLE001
-            care = None
-
-    persist_jobs = []
-    if fact is not None and signal is not None:
-        persist_jobs.append(memory.facts.upsert(fact))
-        persist_jobs.append(memory.signals.upsert(signal))
-    if cue is not None:
-        persist_jobs.append(cue_store.add(cue))
-    if persist_jobs:
-        await asyncio.gather(*persist_jobs)
-
-    if role_raw and titles_to_tag and care is not None:
-        try:
-            hints = dict(care.calendar_role_by_summary)
-            for title in titles_to_tag:
-                key = re.sub(r"\s+", " ", title.strip().lower())
-                if key:
-                    hints[key] = role_raw
-            care = care.model_copy(
-                update={
-                    "calendar_role_by_summary": hints,
-                    "version": int(care.version or 1) + 1,
-                    "updated_at": _now_utc(),
-                }
-            )
-            invalidate_care_graph_cache(user_id)
-            await memory.manifestos.save_care_profile(care)
-        except Exception:  # noqa: BLE001
-            _logger.warning("checkin_care_tag_failed", user_id=user_id)
-
-    # Reclassify agenda off the request path — never block the chat reply on it.
-    if facts_added:
-        background_tasks.add_task(
-            _bg_enrich_care, user_id, memory, sync_store, force=True
-        )
-
-    fallback = "Got it — I’ll keep that in mind."
-    reply = (parsed.reply or fallback).strip()
-    # Models sometimes return Got it: " or a fully quoted sentence.
-    if len(reply) >= 2 and reply[0] in "\"'" and reply[-1] == reply[0]:
-        reply = reply[1:-1].strip()
-    if reply.endswith('"') and reply.count('"') % 2 == 1:
-        reply = reply[:-1].rstrip()
-    reply = reply.strip() or fallback
-    if cues_added and keywords:
-        reply = f"{reply} I’ll nudge you on {keywords[0]} days."
-
-    school_proposals: list[CommitmentProposal] = []
-    if parsed.is_sick_day or parsed.notify_contact:
-        try:
-            if care is None:
-                care = await memory.manifestos.get_care_profile(user_id=user_id)
-            sick_events: list[dict[str, str | None]] = []
-            if state and state.events:
-                sick_events = [
-                    {
-                        "id": ev.id,
-                        "summary": ev.summary,
-                        "start": ev.start,
-                        "end": ev.end,
-                        "status": ev.status,
-                    }
-                    for ev in state.events.values()
-                    if ev.summary
-                ]
-            if care is not None:
-                school_proposals, ask = await propose_sick_day_notes(
-                    user_id=user_id,
-                    user_text=message,
-                    care=care,
-                    named=list(parsed.sick_person_names),
-                    events=sick_events,
-                    store=store,
-                    contact_role=parsed.contact_role or "teacher",
-                    cancel_today=parsed.is_sick_day,
-                    from_name=(
-                        ""
-                        if (sign := _first_name(user.display_name if user else None))
-                        == "there"
-                        else sign
-                    ),
-                )
-                if ask:
-                    reply = ask
-                elif school_proposals:
-                    reply = school_proposals[0].level_message or reply
-        except Exception:  # noqa: BLE001
-            _logger.warning("sick_day_propose_failed", user_id=user_id)
-
-    # Reply first — full Today rebuild was adding 1–2s after Gemini already ran.
+    school = list(result.school_proposals)
+    if result.proposal is not None and result.proposal.kind.value == "school_send":
+        school.append(result.proposal)
     return DayCheckInResponse(
-        reply=reply,
-        facts_added=facts_added,
-        cues_added=cues_added,
+        reply=result.reply,
+        facts_added=result.facts_added,
+        cues_added=result.cues_added,
         today=None,
-        school_proposals=school_proposals,
+        school_proposals=school,
     )
 
 

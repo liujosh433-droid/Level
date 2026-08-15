@@ -15,15 +15,15 @@ from level_core.config import get_settings
 from level_core.memory.base import MemoryBank
 from level_core.models.factory import build_embedding_client, build_gemini_client
 from level_core.observability.logger import get_logger
+from level_core.errors import ConflictError
 from level_core.profile.care_infer_llm import (
     infer_care_profile_ai,
     reconcile_exclusive_people,
 )
-from level_core.profile.synthesize import (
-    infer_care_profile_heuristic,
-    invalidate_care_graph_cache,
-    refresh_profile_and_manifesto,
-)
+from level_core.profile.care_store import save_care
+from level_core.profile.care_heuristic import infer_care_profile_heuristic
+from level_core.profile.synthesize import refresh_profile_and_manifesto
+from level_core.schemas.care import CareProfile
 from level_core.schemas.profile import ProfileSnapshot
 from level_core.schemas.signal import Fact, Signal, SignalSource
 
@@ -100,8 +100,14 @@ async def persist_care_profile_from_events(
         return None
 
     await _persist_pattern_facts(memory, facts, embed=embed)
-    invalidate_care_graph_cache(user_id)
-    await memory.manifestos.save_care_profile(care)
+    try:
+        await save_care(
+            memory,
+            care,
+            expected_version=previous.version if previous is not None else None,
+        )
+    except ConflictError:
+        _logger.warning("care_profile_save_conflict", user_id=user_id)
     snap = await refresh_persisted_profile(memory, user_id)
     _logger.info(
         "care_profile_mutated",
@@ -111,6 +117,7 @@ async def persist_care_profile_from_events(
         version=care.version,
         source=source,
         calendar_hints=len(care.calendar_role_by_summary),
+        usuals=sum(len(p.usuals) for p in care.people_profiles),
     )
     return snap
 
@@ -134,9 +141,16 @@ async def refresh_persisted_profile(memory: MemoryBank, user_id: str) -> Profile
         memory.manifestos.save_profile_snapshot(snapshot),
         memory.manifestos.save_manifesto(manifesto),
     ]
-    if care_out is not None:
-        writes.append(memory.manifestos.save_care_profile(care_out))
     await asyncio.gather(*writes)
+    if care_out is not None:
+        try:
+            await save_care(
+                memory,
+                care_out,
+                expected_version=care.version if care is not None else None,
+            )
+        except ConflictError:
+            _logger.warning("care_refresh_conflict", user_id=user_id)
     return snapshot
 
 
@@ -171,6 +185,57 @@ async def _persist_pattern_facts(
             )
 
 
+async def seed_care_from_agenda_fast(
+    *,
+    user_id: str,
+    memory: MemoryBank,
+    events: list[dict[str, str | None]],
+) -> CareProfile | None:
+    """Opt-in regex seed only. Live path waits for Gemini.
+
+    Set ``LEVEL_ALLOW_HEURISTIC_CARE=1`` to restore the old fast seed.
+    """
+    previous = await memory.manifestos.get_care_profile(user_id=user_id)
+    if not _heuristic_care_allowed():
+        _logger.info(
+            "care_seed_skipped_awaiting_ai",
+            user_id=user_id,
+            events=len(events),
+        )
+        return previous
+
+    care, facts = infer_care_profile_heuristic(
+        events, user_id=user_id, previous=previous
+    )
+    care = reconcile_exclusive_people(care)
+    if not care.roles and not facts:
+        return previous
+    for fact in facts:
+        try:
+            await memory.facts.upsert(fact)
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        await save_care(
+            memory,
+            care,
+            expected_version=previous.version if previous is not None else None,
+        )
+    except ConflictError:
+        _logger.warning("care_seed_conflict", user_id=user_id)
+    try:
+        await refresh_persisted_profile(memory, user_id)
+    except Exception:  # noqa: BLE001
+        _logger.warning("seed_care_refresh_failed", user_id=user_id)
+    _logger.info(
+        "care_seeded_from_agenda_heuristic",
+        user_id=user_id,
+        roles=len(care.roles),
+        events=len(events),
+    )
+    return care
+
+
 def events_from_calendar_signals(
     signals: list,
 ) -> list[dict[str, str | None]]:
@@ -199,4 +264,5 @@ __all__ = [
     "events_from_calendar_signals",
     "persist_care_profile_from_events",
     "refresh_persisted_profile",
+    "seed_care_from_agenda_fast",
 ]

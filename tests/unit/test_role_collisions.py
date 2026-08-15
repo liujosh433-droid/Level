@@ -11,10 +11,12 @@ from level_core.calendar.role_collisions import (
 )
 from level_core.schemas.care import (
     CARE_ROLE_LABELS,
+    CarePerson,
     CareProfile,
     CareRoleId,
     CareRoleState,
     ProtectedWindow,
+    UsualWindow,
 )
 from level_core.schemas.profile import BulletStatus
 
@@ -63,6 +65,50 @@ class TestRoleCollisions:
         ev = synthesize_demo_collision_event(_care())
         assert ev is not None
         assert "Networking" in (ev.get("summary") or "")
+
+    def test_locked_usual_is_the_clock(self) -> None:
+        now = datetime(2026, 8, 10, 12, 0, tzinfo=timezone.utc)
+        thu = datetime(2026, 8, 13, 22, 30, tzinfo=timezone.utc)  # 15:30 PT
+        care = CareProfile(
+            user_id="u1",
+            roles=[
+                CareRoleState(
+                    role_id=CareRoleId.CHILD_CARE,
+                    label="Child care",
+                    salience=0.9,
+                    status=BulletStatus.ACCEPTED,
+                    people=["Alpha"],
+                )
+            ],
+            people_profiles=[
+                CarePerson(
+                    person_id="p-a",
+                    display_name="Alpha",
+                    care_role_id="child_care",
+                    status=BulletStatus.ACCEPTED,
+                    their_relation="child",
+                    usuals=[
+                        UsualWindow(
+                            usual_id="u:p-a:3:900",
+                            person_id="p-a",
+                            label="Alpha window",
+                            weekday=3,
+                            start_minute=15 * 60,
+                            end_minute=16 * 60,
+                            status=BulletStatus.ACCEPTED,
+                        )
+                    ],
+                )
+            ],
+        )
+        hits = find_role_collisions(
+            care=care,
+            events=[{"summary": "Late standup", "start": thu.isoformat()}],
+            now=now,
+        )
+        assert len(hits) == 1
+        assert hits[0].window_label == "Alpha window"
+        assert hits[0].people == ("Alpha",)
 
     def test_role_theft_copy(self) -> None:
         msg = role_theft_copy_for_conflicts(

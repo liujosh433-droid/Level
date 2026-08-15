@@ -6,6 +6,8 @@ this module only matches records and preserves locks.
 
 from __future__ import annotations
 
+from level_core.calendar.routines import normalize_routine
+from level_core.calendar.usuals import series_usuals_from_agenda
 from level_core.schemas.base import _now_utc
 from level_core.schemas.care import (
     CARE_ROLE_LABELS,
@@ -58,6 +60,12 @@ def find_person_by_name(
 def _usual_slot_key(person_id: str, weekday: int, start_minute: int) -> tuple[str, int, int]:
     band = (int(start_minute) // 60) * 60
     return (person_id, int(weekday), band)
+
+
+def usual_id_for_slot(person_id: str, weekday: int, start_minute: int) -> str:
+    """Stable id so a Today read and a later persist resolve the same slot."""
+    pid, weekday_n, band = _usual_slot_key(person_id, weekday, start_minute)
+    return f"u:{pid}:{weekday_n}:{band}"
 
 
 def merge_people_and_usuals(
@@ -173,7 +181,8 @@ def merge_people_and_usuals(
             end_m = _hours_to_minutes(getattr(raw, "end_hour", None), int(start_m) + 60)
         start_m = max(0, min(24 * 60 - 15, int(start_m)))
         end_m = max(start_m + 15, min(24 * 60, int(end_m)))
-        label = " ".join((getattr(raw, "label", None) or "").split())[:120]
+        routine = normalize_routine(getattr(raw, "routine", None) or "")
+        label = routine or " ".join((getattr(raw, "label", None) or "").split())[:120]
         if len(label) < 3:
             continue
         evidence = " ".join((getattr(raw, "evidence", None) or "").split())[:240]
@@ -228,6 +237,7 @@ def merge_people_and_usuals(
             next_usuals = [
                 *person.usuals,
                 UsualWindow(
+                    usual_id=usual_id_for_slot(person.person_id, int(weekday), start_m),
                     person_id=person.person_id,
                     label=label,
                     weekday=int(weekday),
@@ -324,6 +334,107 @@ def hydrate_people_from_roles(care: CareProfile) -> CareProfile:
     )
 
 
+def merge_series_usuals(
+    care: CareProfile,
+    events: list[dict[str, str | None]],
+) -> CareProfile:
+    """Lock repeating agenda slots onto Keep'd people. Does not invent people.
+
+    Keep on the person is the lock — a clear series becomes an accepted usual.
+    Rejected slots stay rejected.
+    """
+    series = series_usuals_from_agenda(care=care, events=events)
+    if not series:
+        return care
+    by_id = {person.person_id: person for person in care.people_profiles}
+    person_hints = dict(care.calendar_person_by_summary)
+    changed = False
+    for row in series:
+        person = by_id.get(row.person_id)
+        if person is None:
+            continue
+        slot = _usual_slot_key(person.person_id, row.weekday, row.start_minute)
+        existing = next(
+            (
+                usual
+                for usual in person.usuals
+                if _usual_slot_key(usual.person_id, usual.weekday, usual.start_minute)
+                == slot
+            ),
+            None,
+        )
+        if existing is not None and existing.status is BulletStatus.REJECTED:
+            continue
+        titles = list(
+            dict.fromkeys(
+                [*(existing.evidence_titles if existing else []), *row.evidence_titles]
+            )
+        )[:8]
+        for title in titles:
+            key = _norm(title)
+            if key and person_hints.get(key) != person.person_id:
+                person_hints[key] = person.person_id
+                changed = True
+        if existing is None:
+            next_usuals = [
+                *person.usuals,
+                UsualWindow(
+                    usual_id=usual_id_for_slot(
+                        person.person_id, row.weekday, row.start_minute
+                    ),
+                    person_id=person.person_id,
+                    label=row.label,
+                    weekday=row.weekday,
+                    start_minute=row.start_minute,
+                    end_minute=row.end_minute,
+                    evidence_titles=titles,
+                    hit_count=row.hit_count,
+                    last_seen_on=row.last_seen_on,
+                    status=BulletStatus.ACCEPTED,
+                ),
+            ]
+        elif (
+            existing.status is BulletStatus.PENDING
+            or titles != list(existing.evidence_titles)
+            or existing.label != row.label
+        ):
+            status = (
+                BulletStatus.ACCEPTED
+                if existing.status is BulletStatus.PENDING
+                else existing.status
+            )
+            next_usuals = [
+                existing.model_copy(
+                    update={
+                        "label": row.label,
+                        "end_minute": max(existing.end_minute, row.end_minute),
+                        "evidence_titles": titles,
+                        "hit_count": max(existing.hit_count, row.hit_count),
+                        "last_seen_on": row.last_seen_on or existing.last_seen_on,
+                        "status": status,
+                    }
+                )
+                if usual.usual_id == existing.usual_id
+                else usual
+                for usual in person.usuals
+            ]
+        else:
+            continue
+        person = person.model_copy(update={"usuals": next_usuals})
+        by_id[person.person_id] = person
+        changed = True
+    if not changed:
+        return care
+    return care.model_copy(
+        update={
+            "people_profiles": list(by_id.values()),
+            "calendar_person_by_summary": person_hints,
+            "version": int(care.version or 1) + 1,
+            "updated_at": _now_utc(),
+        }
+    )
+
+
 def attach_people_to_profile(
     profile: CareProfile,
     *,
@@ -346,5 +457,7 @@ __all__ = [
     "find_person_by_name",
     "hydrate_people_from_roles",
     "merge_people_and_usuals",
+    "merge_series_usuals",
     "person_name_keys",
+    "usual_id_for_slot",
 ]

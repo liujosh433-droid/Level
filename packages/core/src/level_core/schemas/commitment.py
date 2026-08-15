@@ -98,13 +98,13 @@ class CommitmentProposal(TraceableModel):
     google_event_id: str | None = None
     resolved_at: datetime | None = None
 
-    # School paper / sick-day — institutional send behind Hold/Run.
+    # School paper / sick-day — send only when the user presses Send.
     to_email: str = ""
     email_subject: str = ""
     email_body: str = ""
     person_ids: list[str] = Field(default_factory=list)
     cancel_event_ids: list[str] = Field(default_factory=list)
-    hold_on_calendar: bool = False
+    hold_on_calendar: bool = False  # unused; kept so stored proposals still load
 
 
 __all__ = [

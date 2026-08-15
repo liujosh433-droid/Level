@@ -230,6 +230,10 @@ class CareProfile(TraceableModel):
         default_factory=dict,
         description="Normalized calendar title → person_id (AI event assign).",
     )
+    calendar_routine_by_summary: dict[str, str] = Field(
+        default_factory=dict,
+        description="AI-inferred routine per calendar title (pickup, school, activity, clinic).",
+    )
 
 
 class CareGraphNode(TraceableModel):

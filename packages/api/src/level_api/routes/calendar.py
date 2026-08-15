@@ -53,6 +53,9 @@ class ConfirmRequest(BaseModel):
         default=None,
         description="ISO start from a suggested free_slot to book instead of the original time.",
     )
+    to_email: str | None = None
+    email_subject: str | None = None
+    email_body: str | None = None
 
 
 class ConfirmResponse(BaseModel):
@@ -121,6 +124,7 @@ async def confirm_proposal(
     if proposal.kind is CommitmentKind.SCHOOL_SEND:
         return await _confirm_school_send(
             proposal,
+            payload=payload,
             user_id=user_id,
             token=token,
             tokens=tokens,
@@ -282,6 +286,7 @@ _GMAIL_SEND_MISSING = (
 async def _confirm_school_send(
     proposal: CommitmentProposal,
     *,
+    payload: ConfirmRequest,
     user_id: str,
     token: object,
     tokens: TokenStore,
@@ -289,6 +294,12 @@ async def _confirm_school_send(
     sync_store: CalendarSyncStore,
     background_tasks: BackgroundTasks,
 ) -> ConfirmResponse:
+    if payload.to_email is not None:
+        proposal.to_email = payload.to_email.strip()
+    if payload.email_subject is not None:
+        proposal.email_subject = payload.email_subject.strip()[:200]
+    if payload.email_body is not None:
+        proposal.email_body = payload.email_body[:4000]
     if not (proposal.to_email or "").strip() or "@" not in proposal.to_email:
         raise HTTPException(
             status_code=400,
@@ -339,57 +350,14 @@ async def _confirm_school_send(
         except Exception:  # noqa: BLE001
             pass
 
-    event_id = None
-    html_link = None
-    created: dict = {}
-    if proposal.hold_on_calendar and proposal.draft.local_date:
-        start, end = apply_draft_to_window(proposal.draft)
-        try:
-            created = await create_calendar_event(
-                token,  # type: ignore[arg-type]
-                summary=proposal.draft.title,
-                start=start,
-                end=end,
-                timezone_name=proposal.draft.timezone,
-                description=proposal.draft.notes or proposal.email_subject,
-            )
-            event_id = created.get("id")
-            html_link = created.get("htmlLink")
-            tz_name = proposal.draft.timezone or "America/Los_Angeles"
-            wall_tz = ZoneInfo(tz_name)
-            await inject_event_into_agenda_cache(
-                user_id=user_id,
-                sync_store=sync_store,
-                google_event={
-                    "id": event_id or f"level:{proposal.proposal_id}",
-                    "summary": proposal.draft.title,
-                    "status": "confirmed",
-                    "start": {
-                        "dateTime": start.astimezone(wall_tz).isoformat(timespec="seconds"),
-                        "timeZone": tz_name,
-                    },
-                    "end": {
-                        "dateTime": end.astimezone(wall_tz).isoformat(timespec="seconds"),
-                        "timeZone": tz_name,
-                    },
-                },
-            )
-        except Exception as exc:  # noqa: BLE001
-            _logger.warning("school_hold_write_failed", user_id=user_id, error=str(exc))
-
     proposal.status = ProposalStatus.CONFIRMED
-    proposal.google_event_id = event_id
     proposal.resolved_at = datetime.now(tz=timezone.utc)
     proposal.touch()
     await store.save(proposal)
     background_tasks.add_task(
         refresh_agenda_cache, user_id=user_id, token=token, sync_store=sync_store
     )
-    return ConfirmResponse(
-        proposal=proposal,
-        google_event_id=event_id,
-        html_link=html_link,
-    )
+    return ConfirmResponse(proposal=proposal)
 
 
 __all__ = ["router"]

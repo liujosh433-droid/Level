@@ -9,12 +9,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
+from level_core.calendar.usuals import DEFAULT_TZ
 from level_core.schemas.care import (
     CARE_ROLE_LABELS,
     CareProfile,
     CareRoleId,
     CareRoleState,
     ProtectedWindow,
+    locked_usuals,
 )
 from level_core.schemas.profile import BulletStatus
 
@@ -96,6 +98,11 @@ def find_role_collisions(
     roles = _active_roles(care)
     if not roles:
         return []
+    usuals_by_role: dict[str, list] = {}
+    for person, usual in locked_usuals(care):
+        rid = (person.care_role_id or "").strip().lower()
+        if rid:
+            usuals_by_role.setdefault(rid, []).append((person, usual))
 
     hits: list[RoleCollision] = []
     for ev in events:
@@ -106,6 +113,33 @@ def find_role_collisions(
         if start is None or start < now - timedelta(hours=1) or start > horizon:
             continue
         for role in roles:
+            role_usuals = usuals_by_role.get(role.role_id.value, [])
+            if role_usuals:
+                local = start.astimezone(DEFAULT_TZ)
+                for person, usual in role_usuals:
+                    if local.weekday() != usual.weekday:
+                        continue
+                    minute = local.hour * 60 + local.minute
+                    lo = min(usual.start_minute, usual.end_minute)
+                    hi = max(usual.start_minute, usual.end_minute)
+                    if hi <= lo:
+                        hi = lo + 60
+                    if minute < lo or minute >= hi:
+                        continue
+                    hits.append(
+                        RoleCollision(
+                            event_summary=summary[:120],
+                            event_start=start,
+                            role_id=role.role_id,
+                            role_label=role.label
+                            or CARE_ROLE_LABELS.get(role.role_id, role.role_id.value),
+                            window_label=usual.label,
+                            people=(person.display_name,) if person.display_name else (),
+                            confirmed=True,
+                            evidence=usual.label,
+                        )
+                    )
+                continue
             for window in role.protected_windows:
                 if not _window_matches(window, start):
                     continue

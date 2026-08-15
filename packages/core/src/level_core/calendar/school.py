@@ -262,11 +262,8 @@ def build_school_send_proposal(
     body: str,
     cancel_event_ids: list[str],
     level_message: str,
-    hold_on_calendar: bool = False,
-    hold_date: str | None = None,
-    hold_title: str = "",
 ) -> CommitmentProposal:
-    """Hold/Run proposal for an institutional send. Does not write until confirm."""
+    """Draft an institutional send. Nothing goes out until the user presses Send."""
     names = ", ".join(p.display_name for p in people if p.display_name)
     summary = subject or (f"School note for {names}" if names else "School note")
     return CommitmentProposal(
@@ -274,10 +271,7 @@ def build_school_send_proposal(
         kind=CommitmentKind.SCHOOL_SEND,
         user_text=user_text[:2000],
         draft=EventDraft(
-            title=(hold_title or summary)[:120],
-            local_date=hold_date,
-            local_time="08:00",
-            duration_minutes=30,
+            title=summary[:120],
             notes=body[:500],
         ),
         summary=summary[:240],
@@ -288,11 +282,10 @@ def build_school_send_proposal(
         email_body=body[:4000],
         person_ids=[p.person_id for p in people],
         cancel_event_ids=cancel_event_ids[:20],
-        hold_on_calendar=hold_on_calendar,
     )
 
 
-def draft_paper_hold_title(extract: SchoolPaperExtract, person: CarePerson | None) -> str:
+def draft_paper_title(extract: SchoolPaperExtract, person: CarePerson | None) -> str:
     label = (extract.hold_label or extract.title or extract.subject or "").strip()
     if label:
         return label[:120]
@@ -306,7 +299,7 @@ __all__ = [
     "attach_school_email",
     "build_school_send_proposal",
     "draft_contact_note",
-    "draft_paper_hold_title",
+    "draft_paper_title",
     "draft_sick_note",
     "events_for_person_on_date",
     "match_contacts_by_role",

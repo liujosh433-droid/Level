@@ -13,6 +13,7 @@ from level_core.calendar.sync_state import (
     CalendarSyncState,
     CalendarSyncStore,
     events_for_local_day,
+    watch_is_live,
 )
 from level_core.config import Settings, get_settings
 from level_core.ingest.google_live import (
@@ -96,6 +97,25 @@ async def refresh_agenda_cache(
         llm=False,
     )
     return state
+
+
+async def refresh_agenda_on_read(
+    *,
+    user_id: str,
+    token: OAuthToken,
+    sync_store: CalendarSyncStore,
+) -> CalendarSyncState:
+    """Local substitute for Calendar push: pull deltas when no watch is live.
+
+    Prod with ``LEVEL_PUBLIC_API_URL`` keeps a watch; the webhook refreshes
+    the cache and this returns the existing state so Today stays cheap.
+    """
+    state = await sync_store.get(user_id) or CalendarSyncState(user_id=user_id)
+    if watch_is_live(state):
+        return state
+    return await refresh_agenda_cache(
+        user_id=user_id, token=token, sync_store=sync_store
+    )
 
 
 async def inject_event_into_agenda_cache(
@@ -258,4 +278,5 @@ __all__ = [
     "inject_event_into_agenda_cache",
     "mark_events_cancelled_in_cache",
     "refresh_agenda_cache",
+    "refresh_agenda_on_read",
 ]

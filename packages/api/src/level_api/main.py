@@ -19,9 +19,11 @@ from level_api.routes import (
     auth,
     calendar,
     care_actions,
+    chat,
     health,
     ingest,
     observability,
+    profile,
     sessions,
     sources,
     today,
@@ -92,7 +94,9 @@ def create_app() -> FastAPI:
     app.include_router(sessions.router)
     app.include_router(ingest.router)
     app.include_router(sources.router)
+    app.include_router(profile.router)
     app.include_router(today.router)
+    app.include_router(chat.router)
     app.include_router(care_actions.router)
     app.include_router(calendar.router)
     app.include_router(observability.router)

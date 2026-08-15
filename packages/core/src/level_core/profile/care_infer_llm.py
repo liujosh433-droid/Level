@@ -10,9 +10,12 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field
+
+from level_core.calendar.routines import normalize_routine
 
 from level_core.config import get_settings
 from level_core.errors import ModelUnavailable
@@ -26,7 +29,9 @@ from level_core.schemas.care import (
     CareRoleId,
     CareRoleState,
     clean_conflict_summaries,
+    held_care_people,
 )
+from level_core.calendar.usuals import dated_event_evidence_lines
 from level_core.profile.people_usuals import (
     attach_people_to_profile,
     find_person_by_name,
@@ -79,6 +84,7 @@ class CareEventAssign(BaseModel):
     summary: str = ""
     role: str = "other"
     person: str = ""
+    routine: str = ""
 
 
 class UsualInferRow(BaseModel):
@@ -86,6 +92,7 @@ class UsualInferRow(BaseModel):
 
     person: str = ""
     label: str = ""
+    routine: str = ""
     weekday: int | None = None
     start_hour: int | None = None
     end_hour: int | None = None
@@ -93,6 +100,10 @@ class UsualInferRow(BaseModel):
     end_minute: int | None = None
     evidence: str = ""
     evidence_titles: list[str] = Field(default_factory=list)
+
+
+class UsualsOnlyInfer(BaseModel):
+    usuals: list[UsualInferRow] = Field(default_factory=list)
 
 
 class CareRoleInfer(BaseModel):
@@ -135,27 +146,26 @@ class CareNoteUpdate(BaseModel):
 
 
 class WeekEventClassifyOut(BaseModel):
-    """Specialized wrapper: this week's titles → care roles."""
+    """Specialized wrapper: this week's titles → care roles + routines."""
 
     events: list[CareEventAssign] = Field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
+class WeekEventClassify:
+    """Parsed week-classify result — roles and routines, never invented people."""
+
+    roles: dict[str, str] = field(default_factory=dict)
+    routines: dict[str, str] = field(default_factory=dict)
 
 
 def _norm_title(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip().lower())
 
 
-def _dated_event_lines(events: list[dict[str, str | None]], *, limit: int = 40) -> list[str]:
-    """Compact dated lines for usual inference — no title clustering."""
-    lines: list[str] = []
-    for ev in events:
-        title = (ev.get("summary") or "").strip()
-        start = (ev.get("start") or "").strip()
-        if not title or title == "(no title)" or not start:
-            continue
-        lines.append(f"{start[:16]} {title[:120]}")
-        if len(lines) >= limit:
-            break
-    return lines
+def _dated_event_lines(events: list[dict[str, str | None]], *, limit: int = 80) -> list[str]:
+    """Compact dated lines for usual inference — series first, no title invent."""
+    return dated_event_evidence_lines(events, limit=limit)
 
 
 def _unique_titles(events: list[dict[str, str | None]], *, limit: int = 48) -> list[str]:
@@ -330,7 +340,7 @@ async def infer_care_holistic(
         titles = all_titles[:title_cap]
         titles_block = "\n".join(f"- {t}" for t in titles) or "(no calendar titles)"
         dated_block = "\n".join(
-            f"- {line}" for line in _dated_event_lines(events, limit=36)
+            f"- {line}" for line in _dated_event_lines(events, limit=24)
         ) or "(no dated events)"
         event_cap = min(len(titles), 18)
         prompt = (
@@ -349,10 +359,14 @@ async def infer_care_holistic(
             f"- events: classify at most {event_cap} distinctive titles from the list into "
             "{child_care, elder_care, paid_work, self_recovery, household_logistics, "
             "partner_coparent, other}; copy the exact title string; set person to the "
-            "canonical name when the event is for that human (else empty).\n"
-            "- usuals: repeating care obligations (pickup, clinic, after-school) with "
-            "{person, label, weekday 0=Mon..6=Sun, start_hour, end_hour, evidence, "
-            "evidence_titles[]}. Only when the dated events show a real series. "
+            "canonical name when the event is for that human (else empty); set routine "
+            "to exactly one of pickup, school, activity, clinic, usual "
+            "(pickup = school run / drop-off / carpool; school = the school day; "
+            "activity = sports / lessons / clubs; clinic = medical for that person).\n"
+            "- usuals: repeating care obligations with "
+            "{person, routine, label, weekday 0=Mon..6=Sun, start_hour, end_hour, evidence, "
+            "evidence_titles[]}. routine is pickup/school/activity/clinic/usual; "
+            "label should be that same routine word. Only when the dated events show a real series. "
             "Honor Rejected usuals in previous people — do not revive them. "
             "Keep accepted usuals even if this window is thin.\n"
             "- conflicts: at most 3 actionable forward-looking sentences. "
@@ -374,7 +388,7 @@ async def infer_care_holistic(
                     system_instruction=_SYSTEM_CARE,
                     response_schema=CareHolisticInfer.model_json_schema(),
                     temperature=0.1,
-                    max_output_tokens=4096,
+                    max_output_tokens=8192,
                     metadata={"task": "care_profile_infer", "title_cap": title_cap},
                 )
             )
@@ -616,6 +630,9 @@ def care_profile_from_holistic(
     # Event hints.
     catalog = list(event_titles or [])
     hints: dict[str, str] = {}
+    routine_hints: dict[str, str] = {}
+    if previous:
+        routine_hints.update(previous.calendar_routine_by_summary)
     event_person_names: dict[str, str] = {}
     for ev in inferred.events:
         title = _match_title(ev.summary, catalog) if catalog else (ev.summary or "").strip()
@@ -626,6 +643,9 @@ def care_profile_from_holistic(
         role = _parse_role(ev.role)
         if role is not None:
             hints[_norm_title(title)] = role.value
+        routine = normalize_routine(ev.routine)
+        if routine:
+            routine_hints[_norm_title(title)] = routine
         who = _canonical_person_name(ev.person, alias_map)
         if who:
             event_person_names[_norm_title(title)] = who
@@ -669,6 +689,7 @@ def care_profile_from_holistic(
                     **previous.calendar_role_by_summary,
                     **hints,
                 },
+                "calendar_routine_by_summary": routine_hints,
                 "conflict_summaries": clean_conflict_summaries(inferred.conflicts)
                 or clean_conflict_summaries(previous.conflict_summaries),
                 "person_relationships": person_rels or previous.person_relationships,
@@ -696,6 +717,7 @@ def care_profile_from_holistic(
         updated_at=datetime.now(tz=timezone.utc),
         conflict_summaries=clean_conflict_summaries(inferred.conflicts),
         calendar_role_by_summary=hints,
+        calendar_routine_by_summary=routine_hints,
         helpers=list(previous.helpers) if previous else [],
         person_relationships=person_rels,
     )
@@ -924,6 +946,72 @@ async def consolidate_care_people_ai(
     )
 
 
+async def infer_usuals_only(
+    gemini: GeminiClient,
+    *,
+    events: list[dict[str, str | None]],
+    previous: CareProfile | None,
+    holistic: CareHolisticInfer,
+    model_id: str | None = None,
+) -> list[UsualInferRow]:
+    """Second pass when holistic infer filled people/roles but skipped usuals."""
+    names: list[str] = []
+    if previous is not None:
+        names.extend(p.display_name for p in held_care_people(previous) if p.display_name)
+    names.extend((p.name or "").strip() for p in holistic.people if (p.name or "").strip())
+    names = list(dict.fromkeys(n for n in names if n))
+    dated = _dated_event_lines(events, limit=80)
+    if not names or not dated:
+        return []
+    rejected: list[str] = []
+    if previous is not None:
+        for person in previous.people_profiles:
+            for usual in person.usuals:
+                if usual.status is BulletStatus.REJECTED:
+                    rejected.append(f"{person.display_name}: {usual.label} wd={usual.weekday}")
+    settings = get_settings()
+    model = model_id or settings.fast_model
+    prompt = (
+        "List repeating care obligations (pickup, clinic, after-school, adult day) "
+        "as usuals. person must be one of these Keep'd people: "
+        f"{', '.join(names)}. "
+        "routine must be exactly one of pickup, school, activity, clinic, usual. "
+        "label should be that same routine word — not the raw calendar title. "
+        "weekday is 0=Mon .. 6=Sun. Use start_hour/end_hour from the dated series. "
+        "evidence_titles must be exact calendar titles from the list. "
+        "Skip one-offs. Do not invent people. "
+        "Honor Rejected usuals — do not revive them. "
+        "Keep accepted usuals even if this window is thin.\n\n"
+        f"People:\n" + "\n".join(f"- {n}" for n in names) + "\n\n"
+        f"Rejected usuals:\n{chr(10).join(f'- {r}' for r in rejected) or '(none)'}\n\n"
+        f"Dated events:\n" + "\n".join(f"- {line}" for line in dated)
+    )
+    try:
+        resp = await gemini.generate(
+            GenerationRequest(
+                model_id=model,
+                prompt=prompt,
+                system_instruction=_SYSTEM_CARE,
+                response_schema=UsualsOnlyInfer.model_json_schema(),
+                temperature=0.1,
+                max_output_tokens=2048,
+                metadata={"task": "usuals_infer"},
+            )
+        )
+    except (ModelUnavailable, Exception):  # noqa: BLE001
+        _logger.info("usuals_only_infer_skipped")
+        return []
+    text = (resp.text or "").strip()
+    if not text:
+        return []
+    try:
+        parsed = UsualsOnlyInfer.model_validate(json.loads(text))
+    except Exception:  # noqa: BLE001
+        _logger.warning("usuals_only_parse_failed", preview=text[:160])
+        return []
+    return [row for row in parsed.usuals if (row.person or "").strip() and (row.label or "").strip()]
+
+
 async def infer_care_profile_ai(
     *,
     user_id: str,
@@ -943,6 +1031,13 @@ async def infer_care_profile_ai(
     )
     if inferred is None:
         return None
+    if not inferred.usuals:
+        extra = await infer_usuals_only(
+            client, events=events, previous=previous, holistic=inferred
+        )
+        if extra:
+            inferred = inferred.model_copy(update={"usuals": extra})
+            _logger.info("usuals_only_infer_filled", count=len(extra), user_id=user_id)
     inferred = await consolidate_care_people_ai(
         client,
         inferred=inferred,
@@ -986,10 +1081,15 @@ async def enrich_care_profile_holistic(
             **profile.calendar_role_by_summary,
             **care.calendar_role_by_summary,
         }
+        merged_routines = {
+            **profile.calendar_routine_by_summary,
+            **care.calendar_routine_by_summary,
+        }
         return reconcile_exclusive_people(
             profile.model_copy(
                 update={
                     "calendar_role_by_summary": merged_hints,
+                    "calendar_routine_by_summary": merged_routines,
                     "version": profile.version + 1,
                     "updated_at": datetime.now(tz=timezone.utc),
                 }
@@ -1275,15 +1375,16 @@ async def classify_week_event_roles_ai(
     profile: CareProfile | None,
     gemini: GeminiClient | None = None,
     model_id: str | None = None,
-) -> dict[str, str]:
-    """Specialized AI wrapper: classify this week's calendar into care roles.
+) -> WeekEventClassify:
+    """Specialized AI wrapper: classify this week's calendar into care roles
+    and routines (pickup / school / activity / clinic).
 
     Uses the caregiver's known roles + week titles. Returns normalized
-    title → role_id for merging into ``calendar_role_by_summary``.
+    title → role_id and title → routine for merging onto the Care Profile.
     """
     titles = _unique_titles(week_events, limit=36)
     if not titles:
-        return {}
+        return WeekEventClassify()
     client = gemini or build_gemini_client(get_settings())
     settings = get_settings()
     model = model_id or settings.fast_model
@@ -1300,18 +1401,25 @@ async def classify_week_event_roles_ai(
     )
     titles_block = "\n".join(f"- {t}" for t in titles)
     prompt = (
-        "Classify each calendar event into ONE care role for this busy caregiver.\n"
+        "Classify each calendar event into ONE care role and ONE routine.\n"
         "Use the care roles they hold + the event titles. Reason holistically — "
         "do not keyword-match naively.\n"
         "Valid role ids: child_care, elder_care, paid_work, self_recovery, "
         "household_logistics, partner_coparent, other.\n"
-        "Meeting / call / sync / 1:1 → paid_work unless clearly personal.\n"
-        "School pickup / soccer / kid activities → child_care.\n"
-        "Mom/Dad medical or visits → elder_care.\n"
-        "Therapy / sleep / recovery for the caregiver → self_recovery.\n"
-        "Groceries / forms / errands → household_logistics.\n"
+        "Valid routines: pickup, school, activity, clinic, usual.\n"
+        "pickup = fetching / dropping a kid (school run, carpool, drop-off).\n"
+        "school = the school day itself.\n"
+        "activity = sports, lessons, clubs, rehearsals.\n"
+        "clinic = medical / therapy for the care person.\n"
+        "usual = repeating care that is none of those.\n"
+        "Meeting / call / sync / 1:1 → paid_work unless clearly personal; "
+        "routine usual unless it is clearly a clinic.\n"
+        "School pickup / soccer / kid activities → child_care, with the matching routine.\n"
+        "Mom/Dad medical or visits → elder_care (clinic or usual).\n"
+        "Therapy / sleep / recovery for the caregiver → self_recovery, routine usual.\n"
+        "Groceries / forms / errands → household_logistics, routine usual.\n"
         "Classes/courses are paid_work if career, else other — never self_recovery.\n"
-        "Return JSON: events[{summary, role}] using the exact title strings.\n\n"
+        "Return JSON: events[{summary, role, routine}] using the exact title strings.\n\n"
         f"Care roles held:\n{roles_block}\n\n"
         f"This week's events:\n{titles_block}\n"
     )
@@ -1321,43 +1429,51 @@ async def classify_week_event_roles_ai(
                 model_id=model,
                 prompt=prompt,
                 system_instruction=(
-                    "You are Level. Assign each calendar title to a care role. "
-                    "JSON only. No lectures."
+                    "You are Level. Assign each calendar title a care role and a "
+                    "routine. JSON only. No lectures."
                 ),
                 response_schema=WeekEventClassifyOut.model_json_schema(),
                 temperature=0.1,
-                max_output_tokens=900,
+                max_output_tokens=1200,
                 metadata={"task": "week_event_classify"},
             )
         )
     except ModelUnavailable:
         _logger.info("week_event_classify_unavailable")
-        return {}
+        return WeekEventClassify()
     except Exception:  # noqa: BLE001
         _logger.exception("week_event_classify_failed")
-        return {}
+        return WeekEventClassify()
 
     text = (resp.text or "").strip()
     if not text:
-        return {}
+        return WeekEventClassify()
     try:
         parsed = WeekEventClassifyOut.model_validate(json.loads(text))
     except Exception:  # noqa: BLE001
         _logger.warning("week_event_classify_parse_failed", preview=text[:160])
-        return {}
+        return WeekEventClassify()
 
-    out: dict[str, str] = {}
+    roles: dict[str, str] = {}
+    routines: dict[str, str] = {}
     title_set = {_norm_title(t) for t in titles}
     for item in parsed.events:
         key = _norm_title(item.summary)
-        role = (item.role or "").strip().lower()
         if not key or key not in title_set:
             continue
-        if role not in _ALL_ROLES:
-            continue
-        out[key] = role
-    _logger.info("week_event_classify_done", titles=len(titles), tagged=len(out))
-    return out
+        role = (item.role or "").strip().lower()
+        if role in _ALL_ROLES:
+            roles[key] = role
+        routine = normalize_routine(item.routine)
+        if routine:
+            routines[key] = routine
+    _logger.info(
+        "week_event_classify_done",
+        titles=len(titles),
+        tagged=len(roles),
+        routines=len(routines),
+    )
+    return WeekEventClassify(roles=roles, routines=routines)
 
 
 __all__ = [
@@ -1369,7 +1485,10 @@ __all__ = [
     "CarePersonAssign",
     "CareRoleInfer",
     "UsualInferRow",
+    "UsualsOnlyInfer",
+    "WeekEventClassify",
     "WeekEventClassifyOut",
+    "infer_usuals_only",
     "apply_holistic_inference",
     "apply_note_to_care_profile_ai",
     "care_profile_from_holistic",

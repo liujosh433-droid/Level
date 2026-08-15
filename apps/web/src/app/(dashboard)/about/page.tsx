@@ -93,10 +93,10 @@ function AboutInner() {
             <h2>Does the school chore</h2>
             <p>
               On Contacts, save you, each kid, and each person in elder care — plus who to
-              email for them (teacher, doctor, or a type you add). Then say it: email her
-              teacher that she’s home sick. Level drafts the note, shows a preview, and you{" "}
-              <span className={styles.ui}>Run</span> the send. Upload or paste a slip the same
-              way. Institution only — never a friend text.
+              email for them (teacher, doctor, or a type you add). Then ask Level in chat:
+              email her teacher that she’s home sick, or that you need to send a slip.
+              Level drafts the note, you edit the preview, and you{" "}
+              <span className={styles.ui}>Send</span>. Institution only — never a friend text.
             </p>
           </section>
 

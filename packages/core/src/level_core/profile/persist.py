@@ -19,7 +19,11 @@ from level_core.profile.care_infer_llm import (
     infer_care_profile_ai,
     reconcile_exclusive_people,
 )
-from level_core.profile.synthesize import refresh_profile_and_manifesto
+from level_core.profile.synthesize import (
+    infer_care_profile_heuristic,
+    invalidate_care_graph_cache,
+    refresh_profile_and_manifesto,
+)
 from level_core.schemas.profile import ProfileSnapshot
 from level_core.schemas.signal import Fact, Signal, SignalSource
 
@@ -76,8 +80,6 @@ async def persist_care_profile_from_events(
         _logger.exception("care_ai_infer_failed", user_id=user_id)
 
     if care is None and _heuristic_care_allowed():
-        from level_core.profile.synthesize import infer_care_profile_heuristic
-
         source = "heuristic_opt_in"
         care, facts = infer_care_profile_heuristic(
             events, user_id=user_id, previous=previous
@@ -98,8 +100,6 @@ async def persist_care_profile_from_events(
         return None
 
     await _persist_pattern_facts(memory, facts, embed=embed)
-    from level_core.profile.synthesize import invalidate_care_graph_cache
-
     invalidate_care_graph_cache(user_id)
     await memory.manifestos.save_care_profile(care)
     snap = await refresh_persisted_profile(memory, user_id)

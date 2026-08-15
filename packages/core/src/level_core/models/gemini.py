@@ -163,12 +163,22 @@ class GeminiGenAIClient:
                     pass
 
         async def _call() -> Any:
-            # google-genai exposes an async client on `.aio`. Contents are
-            # accepted as a plain string or a list of parts; we pass a string
-            # since we've already assembled the prompt.
+            # google-genai exposes an async client on `.aio`.
+            contents: Any = request.prompt
+            if request.media:
+                from google.genai import types as genai_types
+
+                parts: list[Any] = [genai_types.Part.from_text(text=request.prompt)]
+                for item in request.media:
+                    parts.append(
+                        genai_types.Part.from_bytes(
+                            data=item.data, mime_type=item.mime_type
+                        )
+                    )
+                contents = parts
             return await client.aio.models.generate_content(
                 model=request.model_id,
-                contents=request.prompt,
+                contents=contents,
                 config=config,
             )
 

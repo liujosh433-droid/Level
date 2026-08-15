@@ -9,6 +9,7 @@ import styles from "./AppNav.module.css";
 const TABS = [
   { href: "/today", label: "Today", hint: "Schedule & ask" },
   { href: "/profile", label: "About me", hint: "Who you are" },
+  { href: "/contacts", label: "Contacts", hint: "Teachers & doctors" },
   { href: "/sources", label: "Sources", hint: "Calendar & Memory" },
   { href: "/about", label: "Info", hint: "What Level can do" },
 ] as const;
@@ -187,6 +188,17 @@ export function AppNav({
                       }}
                     >
                       About me
+                    </Link>
+                    <Link
+                      href="/contacts"
+                      className={styles.menuItem}
+                      role="menuitem"
+                      onClick={() => {
+                        setPendingPath("/contacts");
+                        setOpen(false);
+                      }}
+                    >
+                      Contacts
                     </Link>
                     <Link
                       href="/about"

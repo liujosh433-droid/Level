@@ -1,0 +1,135 @@
+.title {
+  font-family: var(--font-display);
+  font-size: clamp(1.85rem, 5vw, 2.45rem);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  margin: 0 0 0.45rem;
+  line-height: 1.15;
+}
+
+.page {
+  max-width: 52rem;
+  margin: 0 auto;
+}
+
+.sub {
+  color: var(--mist);
+  margin: 0 0 1.15rem;
+  max-width: none;
+  line-height: 1.5;
+}
+
+.meta {
+  color: var(--mist);
+  margin: 0 0 1.15rem;
+}
+
+.list {
+  list-style: none;
+  margin: 0 0 1.35rem;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+.list li {
+  padding: 0.95rem 1rem;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.cat {
+  display: block;
+  font-family: var(--font-display);
+  font-size: 1.05rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--foam, inherit);
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  margin-top: 0.65rem;
+}
+
+.field {
+  min-height: var(--touch);
+  padding: 0.45rem 0.65rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: var(--panel, #fff);
+  color: inherit;
+  font: inherit;
+}
+
+.addPerson,
+.addRole {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin: 0.55rem 0 0;
+  align-items: center;
+}
+
+.addPerson .field,
+.addRole .field {
+  flex: 1 1 8rem;
+  min-width: 7rem;
+}
+
+.contactRow {
+  display: grid;
+  grid-template-columns: minmax(7.5rem, 10.5rem) minmax(0, 1fr);
+  gap: 0.45rem;
+  margin: 0.75rem 0 0;
+}
+
+.contactRow .field {
+  min-width: 0;
+  width: 100%;
+}
+
+.email {
+  grid-column: 1 / -1;
+}
+
+.save {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: var(--touch);
+  padding: 0.65rem 1.1rem;
+  border-radius: var(--radius);
+  font-weight: 600;
+  border: 1px solid rgba(45, 159, 138, 0.4);
+  background: rgba(45, 159, 138, 0.12);
+  color: #1f7a68;
+  min-width: 6.5rem;
+}
+
+.save:disabled {
+  opacity: 0.5;
+}
+
+.status {
+  margin: 0.75rem 0 0;
+  color: var(--signal);
+  font-weight: 600;
+}
+
+.section {
+  margin: 0 0 1.65rem;
+}
+
+.sectionTitle {
+  font-family: var(--font-display);
+  font-size: clamp(1.2rem, 2.8vw, 1.45rem);
+  font-weight: 550;
+  letter-spacing: -0.02em;
+  color: var(--signal);
+  margin: 0 0 0.65rem;
+}

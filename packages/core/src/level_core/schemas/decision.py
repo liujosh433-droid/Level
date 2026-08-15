@@ -80,7 +80,7 @@ class Decision(TraceableModel):
     )
     origin: str | None = Field(
         default=None,
-        description="How the decision was opened: user | async_role_theft.",
+        description="How the decision was opened: user | async_role_theft | async_usual_gap.",
     )
     trigger_label: str | None = Field(
         default=None,

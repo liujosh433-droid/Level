@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field
 
 from level_core.calendar.availability import (
+    _event_bounds,
     day_agenda,
     draft_search_day,
     draft_window,
@@ -27,7 +28,14 @@ from level_core.ingest.google_live import _parse_when, list_primary_events_windo
 from level_core.memory.base import MemoryBank
 from level_core.models.base import GeminiClient, GenerationRequest
 from level_core.models.factory import build_gemini_client
-from level_core.schemas.care import care_profile_snippet
+from level_core.schemas.care import (
+    CareProfile,
+    CareRoleId,
+    CareRoleState,
+    ProtectedWindow,
+    active_care_roles,
+    care_profile_snippet,
+)
 from level_core.schemas.commitment import (
     CommitmentCitation,
     CommitmentKind,
@@ -68,6 +76,7 @@ class _ParsedIntent(BaseModel):
     local_date: str | None = None
     local_time: str = "18:00"
     duration_minutes: int = 60
+    duration_named: bool = False
     timezone: str = "America/Los_Angeles"
     notes: str = ""
     recurring: bool = False
@@ -87,8 +96,9 @@ class _ScheduleResolve(BaseModel):
     title: str = ""
     by_days: list[str] = Field(default_factory=list)
     local_date: str | None = None
-    local_time: str = "18:00"
-    duration_minutes: int = 90
+    local_time: str = "13:00"
+    duration_minutes: int = 60
+    duration_named: bool = False
     timezone: str = "America/Los_Angeles"
     notes: str = ""
     recurring: bool = False
@@ -150,11 +160,52 @@ def _weekday_map(raw: list[str]) -> list[Weekday]:
 
 
 def _offline_title(text: str) -> str:
-    """Last-resort label when the model is down — no keyword reinterpretation."""
+    """Last-resort label when the model is down — never dump the user question."""
     t = (text or "").strip()
+    if not t or _title_echoes_ask(t, t):
+        return "Hold"
+    if len(t) > 48:
+        return t[:48].rsplit(" ", 1)[0] or "Hold"
+    return t
+
+
+def _title_echoes_ask(title: str, source_text: str) -> bool:
+    """True when the model copied the user's question as the event title."""
+    t = (title or "").strip().lower()
+    src = (source_text or "").strip().lower()
     if not t:
-        return "Plan"
-    return (t[:60] + "…") if len(t) > 60 else t
+        return True
+    if len(t) > 48:
+        return True
+    if "?" in t:
+        return True
+    if t.startswith(("i need", "i want", "can you", "which day", "what time", "when can")):
+        return True
+    if src and (t in src or src.startswith(t[:24])):
+        # Short named events ("soccer") can appear in the ask — only treat as echo
+        # when the title is sentence-like.
+        return len(t.split()) >= 6
+    return False
+
+
+def _hold_title(duration_minutes: int) -> str:
+    if duration_minutes == 60:
+        return "1-hour hold"
+    if duration_minutes % 60 == 0:
+        hours = duration_minutes // 60
+        return f"{hours}-hour hold"
+    return f"{duration_minutes}-minute hold"
+
+
+def _human_date(iso: str | None) -> str | None:
+    if not iso:
+        return None
+    try:
+        y, m, d = (int(x) for x in iso.split("-"))
+        dt = datetime(y, m, d)
+        return f"{dt.strftime('%b')} {dt.day}"
+    except ValueError:
+        return iso
 
 
 def _normalize_parsed(
@@ -172,21 +223,24 @@ def _normalize_parsed(
     if parsed.kind not in ("add", "availability"):
         parsed.kind = "availability"
     title = (parsed.title or "").strip()
-    if not title or title.lower() in {"untitled", "plan", "event", "none"}:
-        title = _offline_title(source_text)
-    parsed.title = title[:120]
+    if (
+        not title
+        or title.lower() in {"untitled", "plan", "event", "none"}
+        or _title_echoes_ask(title, source_text)
+    ):
+        title = _hold_title(parsed.duration_minutes or 60)
+    parsed.title = title[:48]
     if not parsed.local_time or not re.match(r"^\d{2}:\d{2}$", parsed.local_time):
-        parsed.local_time = "18:30"
-    if parsed.duration_minutes < 15:
+        parsed.local_time = "13:00"
+    if not parsed.duration_named or parsed.duration_minutes < 15:
         parsed.duration_minutes = 60
+    parsed.duration_minutes = max(15, min(int(parsed.duration_minutes), 24 * 60))
     # Structured conflict: pinned date weekday outside model by_days → drop date.
     by_days = _weekday_map(parsed.by_days)
     if by_days and parsed.local_date:
         try:
-            from datetime import date as _date
-
             y, m, d = (int(x) for x in parsed.local_date.split("-"))
-            pinned = _date(y, m, d).weekday()
+            pinned = date(y, m, d).weekday()
             allowed = {_WEEKDAY_INDEX[day] for day in by_days}
             if pinned not in allowed:
                 parsed.local_date = None
@@ -198,27 +252,121 @@ def _normalize_parsed(
     return parsed
 
 
+def _role_who(role: CareRoleState) -> str:
+    if role.people:
+        return f"{role.label.lower()} for {', '.join(role.people[:2])}"
+    return role.label.lower()
+
+
+def _window_phrase(role: CareRoleState, window: ProtectedWindow) -> str:
+    who = _role_who(role)
+    lab = " ".join((window.label or "").split())
+    low = lab.lower()
+    if lab and not any(tok in low for tok in ("salience", "care block", "~")):
+        return lab if who.split()[-1].lower() in low else f"{lab} — {who}"
+    return who
+
+
+def _hours_overlap(slot_start: datetime, slot_end: datetime, start_hour: int, end_hour: int) -> bool:
+    h0 = slot_start.hour + slot_start.minute / 60.0
+    h1 = slot_end.hour + slot_end.minute / 60.0
+    if h1 <= h0:
+        h1 += 24
+    w1 = float(end_hour if end_hour > start_hour else start_hour + 1)
+    return h0 < w1 and h1 > float(start_hour)
+
+
+def _care_lens_for_slot(
+    care: CareProfile | None,
+    slot: Any,
+    *,
+    timezone_name: str,
+) -> tuple[str | None, str | None]:
+    """Return (crowds_clause, clear_clause) for one free slot vs Care Profile windows."""
+    if care is None:
+        return None, None
+    try:
+        start = datetime.fromisoformat(str(slot.start).replace("Z", "+00:00"))
+        end = datetime.fromisoformat(str(slot.end).replace("Z", "+00:00"))
+    except ValueError:
+        return None, None
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=timezone.utc)
+    tz = ZoneInfo(timezone_name)
+    local_s, local_e = start.astimezone(tz), end.astimezone(tz)
+
+    crowds: list[tuple[float, str]] = []
+    clears: list[tuple[float, str]] = []
+    for role in active_care_roles(care):
+        if role.role_id is CareRoleId.PAID_WORK:
+            continue
+        for window in role.protected_windows[:4]:
+            if window.weekday is not None and window.weekday != local_s.weekday():
+                continue
+            if window.start_hour is None:
+                continue
+            end_h = window.end_hour if window.end_hour is not None else window.start_hour + 1
+            phrase = _window_phrase(role, window)
+            if _hours_overlap(local_s, local_e, window.start_hour, end_h):
+                crowds.append((role.salience, phrase))
+            else:
+                clears.append((role.salience, phrase))
+        if (
+            not role.protected_windows
+            and role.people
+            and role.role_id
+            in {CareRoleId.CHILD_CARE, CareRoleId.ELDER_CARE, CareRoleId.PARTNER_COPARENT}
+        ):
+            clears.append((role.salience, _role_who(role)))
+
+    crowds.sort(key=lambda x: -x[0])
+    clears.sort(key=lambda x: -x[0])
+    crowd_bit = f"that sits on {crowds[0][1]}" if crowds else None
+    clear_bit = None
+    if not crowds and clears:
+        clear_bit = f"Clear of {clears[0][1]}"
+    return crowd_bit, clear_bit
+
+
 def _ground_availability_reply(
     *,
     title: str,
     free_slots: list[Any],
     conflicts: list[Any],
+    care: CareProfile | None = None,
+    timezone_name: str = "America/Los_Angeles",
 ) -> str:
-    """Name real free slots from the calendar — not keyword fluff."""
-    best = free_slots[0].label
-    more = ", ".join(s.label for s in free_slots[1:3])
-    name = (title or "").strip()
-    if not name or name.lower() in {"plan", "untitled", "event", "none"}:
-        name = "that"
+    """Name real free slots and what they protect or crowd in the Care Profile."""
+    del title
+    best = free_slots[0]
+    crowd, clear = _care_lens_for_slot(care, best, timezone_name=timezone_name)
     if conflicts:
-        msg = (
-            f"That overlaps {conflicts[0].label}. "
-            f"Clearest opening for {name}: {best}."
-        )
+        msg = f"That overlaps {conflicts[0].label}. Soonest opening: {best.label}."
     else:
-        msg = f"Best opening for {name}: {best}."
-    if more:
-        msg += f" Also free: {more}."
+        msg = f"Soonest opening: {best.label}."
+
+    used_alt: str | None = None
+    if crowd:
+        msg = msg.rstrip(".") + f" — {crowd}."
+        alt = next(
+            (
+                s
+                for s in free_slots[1:3]
+                if not _care_lens_for_slot(care, s, timezone_name=timezone_name)[0]
+            ),
+            None,
+        )
+        if alt:
+            msg += f" {alt.label} is clear of that window."
+            used_alt = alt.label
+    elif clear:
+        msg += f" {clear}."
+
+    leftover = [s.label for s in free_slots[1:3] if s.label != used_alt]
+    if leftover:
+        msg += f" Also free: {', '.join(leftover)}."
     return msg
 
 
@@ -236,6 +384,19 @@ def _offline_intent(text: str) -> _ParsedIntent:
     )
 
 
+def _search_hours(local_time: str) -> tuple[int, int]:
+    """Search window from the draft clock time (morning / afternoon / evening)."""
+    try:
+        hour = int((local_time or "13:00").split(":")[0])
+    except ValueError:
+        hour = 13
+    if hour < 12:
+        return 8, 12
+    if hour < 17:
+        return 12, 17
+    return 17, 21
+
+
 def _draft_from_parsed(parsed: _ParsedIntent) -> EventDraft:
     by_days = _weekday_map(parsed.by_days)
     # Availability with preferred weekdays should still use by_days for
@@ -243,7 +404,7 @@ def _draft_from_parsed(parsed: _ParsedIntent) -> EventDraft:
     recurring = bool(parsed.recurring) or (
         parsed.kind == "add" and len(by_days) >= 1 and not parsed.local_date
     )
-    title = (parsed.title or "").strip()[:120] or "Plan"
+    title = (parsed.title or "").strip()[:48] or "Hold"
     return EventDraft(
         title=title,
         by_days=by_days,
@@ -265,22 +426,31 @@ def _summarize_draft(kind: CommitmentKind, draft: EventDraft) -> str:
         time_label = f"{h12}:{m:02d}{ampm}"
     except ValueError:
         pass
+    pretty_date = _human_date(draft.local_date)
+    dur = (
+        "1-hour"
+        if draft.duration_minutes == 60
+        else f"{draft.duration_minutes}-minute"
+    )
+    if kind is CommitmentKind.AVAILABILITY:
+        if pretty_date:
+            return f"Soonest {dur} opening from {pretty_date}"
+        if draft.by_days:
+            days = "/".join(d.value for d in draft.by_days)
+            return f"Soonest {dur} opening ({days})"
+        return f"Soonest {dur} opening"
     if draft.recurring and draft.by_days:
         days = "/".join(d.value for d in draft.by_days)
-        base = f"{draft.title} every {days} at {time_label}"
-    elif draft.local_date:
-        base = f"{draft.title} on {draft.local_date} at {time_label}"
-    else:
-        base = f"{draft.title} at {time_label}"
-    if kind is CommitmentKind.AVAILABILITY:
-        return f"Check time for {base} ({draft.duration_minutes}m)"
-    return f"Add {base} ({draft.duration_minutes}m)"
+        return f"Add {draft.title} every {days} at {time_label} ({draft.duration_minutes}m)"
+    if pretty_date:
+        return f"Add {draft.title} on {pretty_date} at {time_label} ({draft.duration_minutes}m)"
+    return f"Add {draft.title} at {time_label} ({draft.duration_minutes}m)"
 
 
 async def _profile_context(
     memory: MemoryBank, user_id: str
-) -> tuple[str, dict[str, str], str | None]:
-    """Return (prompt block, fact_id → statement, care_snippet) for grounding."""
+) -> tuple[str, dict[str, str], CareProfile | None]:
+    """Return (prompt block, fact_id → statement, Care Profile) for grounding."""
     # Cap reads — full history was making schedule proposes feel slow.
     facts, care, snapshot = await asyncio.gather(
         memory.facts.list_for_user(user_id=user_id, limit=48),
@@ -327,7 +497,7 @@ async def _profile_context(
     block += "\n".join(cite_lines) if cite_lines else "(none)"
     block += "\n\nCare roles + background (do not invent ids; paraphrase if useful):\n"
     block += "\n".join(context_lines) if context_lines else "(none)"
-    return block, fact_map, care_snip
+    return block, fact_map, care
 
 
 _ID_LEAK = re.compile(
@@ -353,8 +523,6 @@ def _compact_agenda(
     for event in events[:limit]:
         start_dt, _end = None, None
         try:
-            from level_core.calendar.availability import _event_bounds
-
             start_dt, _end = _event_bounds(event, timezone_name=timezone_name)
         except Exception:  # noqa: BLE001
             continue
@@ -396,16 +564,24 @@ async def _resolve_schedule(
                     "- kind (add|availability), title, by_days (MO..SU), "
                     "local_date (YYYY-MM-DD or null), local_time (HH:MM), "
                     "duration_minutes, recurring, timezone, notes\n"
+                    "- title: 2–5 word calendar name (Hold, Coffee, Pickup). "
+                    "NEVER copy or paraphrase the user's question.\n"
+                    "- duration_minutes: ONLY if they named a length (30 min, 1 hour, …). "
+                    "If they did not, duration_minutes=60 and duration_named=false. "
+                    "Never invent 90/120/180 for a generic 'opening'.\n"
+                    "- duration_named: true only when they stated a length.\n"
+                    "- local_time: morning→09:00, afternoon→13:00, evening/night→18:00. "
+                    "If they did not name a time of day, 13:00.\n"
+                    "- If they asked for the soonest opening on/after a date, "
+                    "kind=availability and local_date = that floor date.\n"
                     "- level_message: at most 3 short complete sentences. "
-                    "For availability / 'what time works', name a specific clock-time "
-                    "gap from the calendar context. Never vague filler like "
+                    "Name weekday + month + day + times (e.g. Wed Aug 26, 8:00–9:00am). "
+                    "Never restate their question. Never vague filler like "
                     "'when you have a moment'.\n"
                     "- recommended_action: confirm|revise|decline\n"
                     "- citation_fact_ids: only ids from Citable facts\n\n"
                     "Rules: weekend asks → by_days SA,SU and local_date null. "
                     "today/tonight/this afternoon → local_date=today. "
-                    "Short errands/returns/store runs → duration_minutes ~30–45. "
-                    "Visits ~120, dinner ~90, coffee ~60 unless they said otherwise. "
                     "Never invent free times that contradict the agenda. "
                     "No flattery, no lectures, no raw [bullet:...] ids."
                 ),
@@ -417,7 +593,7 @@ async def _resolve_schedule(
                     "If this is not a schedule ask, set is_schedule_ask=false and "
                     "leave other fields empty/default.\n"
                     "If they asked what time works, answer with a concrete gap "
-                    "from that calendar.\n"
+                    "from that calendar, including the calendar date.\n"
                 ),
                 response_schema=_ScheduleResolve.model_json_schema(),
                 temperature=0.2,
@@ -621,7 +797,7 @@ async def propose_from_text(
     scan_start = day0.astimezone(timezone.utc) - timedelta(hours=1)
     scan_end = (day0 + timedelta(days=10)).astimezone(timezone.utc)
 
-    events, (profile_block, fact_map, _care_snip) = await asyncio.gather(
+    events, (profile_block, fact_map, care) = await asyncio.gather(
         _load_events_for_window(
             token=token,
             time_min=scan_start,
@@ -670,6 +846,7 @@ async def propose_from_text(
                 local_date=resolved.local_date,
                 local_time=resolved.local_time,
                 duration_minutes=resolved.duration_minutes,
+                duration_named=resolved.duration_named,
                 timezone=resolved.timezone or "America/Los_Angeles",
                 notes=resolved.notes,
                 recurring=resolved.recurring,
@@ -714,6 +891,7 @@ async def propose_from_text(
     preferred = (
         {_WEEKDAY_INDEX[d] for d in draft.by_days} if draft.by_days else None
     )
+    start_hour, end_hour = _search_hours(draft.local_time)
     free_slots = find_free_slots_nearby(
         events,
         anchor=window_start,
@@ -722,7 +900,8 @@ async def propose_from_text(
         days=2 if not draft.by_days else 4,
         max_slots=3,
         preferred_weekdays=preferred,
-        day_start_hour=8 if draft.local_date else 11,
+        day_start_hour=start_hour,
+        day_end_hour=end_hour,
     )
 
     # Availability answers must name calendar-derived free slots (not model fluff).
@@ -731,6 +910,8 @@ async def propose_from_text(
             title=draft.title,
             free_slots=free_slots,
             conflicts=conflicts,
+            care=care,
+            timezone_name=draft.timezone,
         )
     elif not level_message:
         advice = await _advise(

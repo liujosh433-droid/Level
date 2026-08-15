@@ -63,62 +63,50 @@ function AboutInner() {
 
           <h1 className={styles.title}>What Level can do</h1>
           <p className={styles.lead}>
-            Level doesn’t help caregivers find more hours — and it won’t preach balance or
-            self-care. It keeps your <span className={styles.accent}>care roles</span> alive and
-            asks, at decision time, what saying yes would crowd out — so you choose with eyes open, not
-            more guilt.
+            You’re a busy caregiver. Without Level, the week lives in your head — who you hold,
+            what a yes would crowd out, the paper still on the counter. Level holds that with you, and all
+            you need to start with is linking your calendar. 
+          
           </p>
 
           <section className={styles.section}>
-            <h2>Learns your care roles</h2>
+            <h2>You forgot. Level didn’t.</h2>
             <p>
-              Connect your calendar (and optionally paste ChatGPT Memory). Level doesn’t just
-              list events — it builds a Care Profile: child care, elder care, paid work, household
-              logistics, self &amp; recovery, and co-parent when present — with sticky windows like
-              pickup.
+              It learns your repeating care from the calendar — that pickup, that clinic, that
+              after-school run. Accidents happen - forgotten events, last-minute changes, mis-clicks. If the usual isn’t there this week, Level asks whether it was an
+              accident: <span className={styles.ui}>Put it back</span>,{" "}
+              <span className={styles.ui}>This week is different</span>, or{" "}
+              <span className={styles.ui}>Not me</span>. You still decide. Level won’t invent who
+              covers it.
             </p>
           </section>
 
           <section className={styles.section}>
-            <h2>Adjusts with your feedback</h2>
+            <h2>Names the squeeze</h2>
             <p>
-              When you tap <span className={styles.ui}>Keep</span> or{" "}
-              <span className={styles.ui}>Not me</span>, or add something in{" "}
-              <span className={styles.ui}>Tell Level more</span>, Level reshapes which roles it
-              holds. No one-size “good parent” script.
+              A new "yes" to an event that conflicts with your principles and priorities gets challenged, not quietly booked. You still
+              decide. Level guides you and helps you maintain your values despite the busy schedule.
             </p>
           </section>
 
           <section className={styles.section}>
-            <h2>Talk hands-free — and hear your day</h2>
+            <h2>Does the school chore</h2>
             <p>
-              Speak to Level while you multitask — packing bags, making lunch, or on the move.
-              Level can also speak back: tap <span className={styles.ui}>Hear my day</span> on Today
-              for a spoken briefing when you’re driving or can’t look at the screen.
+              On Contacts, save you, each kid, and each person in elder care — plus who to
+              email for them (teacher, doctor, or a type you add). Then say it: email her
+              teacher that she’s home sick. Level drafts the note, shows a preview, and you{" "}
+              <span className={styles.ui}>Run</span> the send. Upload or paste a slip the same
+              way. Institution only — never a friend text.
             </p>
           </section>
 
           <section className={styles.section}>
-            <h2>Challenges care collisions — and pushes back</h2>
+            <h2>Talks while you move</h2>
             <p>
-              Ask Level about a hard yes, or ask it to put something on your calendar. If the ask
-              would <span className={styles.accent}>crowd out a care role</span> you marked Keep,
-              Level names the squeeze instead of quietly agreeing.
-            </p>
-            <p className={styles.example}>
-              <strong>Example:</strong> You ask to stack a late Thursday networking dinner. Level
-              sees you marked Jordan’s pickup as Keep — child care — and asks how that yes doesn’t
-              cut into that window, or offers other times. You still decide; Level won’t lecture.
-            </p>
-          </section>
-
-          <section className={styles.section}>
-            <h2>Remembers so you’re ready</h2>
-            <p>
-              Tell Level once — don’t forget soccer shoes, Mom needs a quiet visit, that clinic
-              always runs late — and it surfaces those reminders when the day comes around. Past
-              experiences stick around so you’re better prepared next time, not starting from
-              scratch.
+              Speak to Level with your hands full.{" "}
+              <span className={styles.ui}>Hear my day</span> reads the briefing aloud. Tell it once
+              — shoes, a quiet visit, a clinic that runs late — and it reminds you when that day
+              comes back.
             </p>
           </section>
 

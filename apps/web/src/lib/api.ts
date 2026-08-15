@@ -130,6 +130,25 @@ export type Profile = {
   care_role_count?: number;
   conflict_summaries?: string[];
   care_graph?: CareGraph | null;
+  people?: CarePersonView[];
+};
+
+export type CareContactView = {
+  contact_id: string;
+  role: string;
+  name: string;
+  email: string;
+};
+
+export type CarePersonView = {
+  person_id: string;
+  display_name: string;
+  your_role: string;
+  their_relation: string;
+  care_role_id?: string;
+  attendance_email: string;
+  teacher_email: string;
+  contacts?: CareContactView[];
 };
 
 export type Me = {
@@ -138,6 +157,7 @@ export type Me = {
   display_name: string | null;
   google_connected: boolean;
   can_write_calendar?: boolean;
+  can_send_email?: boolean;
 };
 
 export type TodayEvent = {
@@ -179,12 +199,39 @@ export type TodayView = {
   holding?: HoldingChip[];
   week_load?: WeekRoleLoad[];
   conflict_summaries?: string[];
+  usual_gaps?: UsualGapView[];
+  proposed_usuals?: ProposedUsualView[];
+};
+
+export type UsualGapView = {
+  usual_id: string;
+  person_id: string;
+  display_name: string;
+  your_role: string;
+  their_relation: string;
+  label: string;
+  on_date: string;
+  weekday: number;
+  start_minute: number;
+  end_minute: number;
+  banner: string;
+};
+
+export type ProposedUsualView = {
+  usual_id: string;
+  person_id: string;
+  display_name: string;
+  your_role: string;
+  label: string;
+  weekday: number;
+  start_minute: number;
+  end_minute: number;
 };
 
 export type CommitmentProposal = {
   proposal_id: string;
   user_id: string;
-  kind: "add" | "availability";
+  kind: "add" | "availability" | "school_send";
   status: string;
   user_text: string;
   summary: string;
@@ -202,6 +249,10 @@ export type CommitmentProposal = {
     by_days: string[];
   };
   google_event_id?: string | null;
+  to_email?: string;
+  email_subject?: string;
+  email_body?: string;
+  cancel_event_ids?: string[];
 };
 
 export class AuthError extends Error {
@@ -436,7 +487,13 @@ export function writeTodayCache(data: TodayView): void {
 
 export async function dayCheckIn(
   message: string,
-): Promise<{ reply: string; facts_added: number; cues_added: number; today: TodayView | null }> {
+): Promise<{
+  reply: string;
+  facts_added: number;
+  cues_added: number;
+  today: TodayView | null;
+  school_proposals?: CommitmentProposal[];
+}> {
   return request(`/v1/today/check-in`, {
     method: "POST",
     body: JSON.stringify({ message }),
@@ -484,6 +541,81 @@ export async function confirmProposal(
       use_slot_start: useSlotStart ?? null,
     }),
   });
+}
+
+export async function resolveUsual(
+  usualId: string,
+  action: "put_back" | "exception" | "not_me" | "keep",
+  onDate?: string | null,
+): Promise<{ ok: boolean; google_event_id: string | null }> {
+  return request(`/v1/care/usuals/resolve`, {
+    method: "POST",
+    body: JSON.stringify({
+      usual_id: usualId,
+      action,
+      on_date: onDate ?? null,
+    }),
+  });
+}
+
+export async function savePersonContacts(
+  personId: string,
+  contacts: CareContactView[],
+): Promise<{ ok: boolean; person_id?: string | null }> {
+  return request(`/v1/care/people/contacts`, {
+    method: "POST",
+    body: JSON.stringify({ person_id: personId, contacts }),
+  });
+}
+
+export async function addCarePerson(
+  displayName: string,
+  theirRelation = "",
+  careRoleId = "child_care",
+): Promise<{ ok: boolean; person_id?: string | null }> {
+  return request(`/v1/care/people`, {
+    method: "POST",
+    body: JSON.stringify({
+      display_name: displayName,
+      their_relation: theirRelation,
+      care_role_id: careRoleId,
+    }),
+  });
+}
+
+export async function ensureSelfPerson(
+  displayName = "",
+): Promise<{ ok: boolean; person_id?: string | null }> {
+  return request(`/v1/care/people/self`, {
+    method: "POST",
+    body: JSON.stringify({ display_name: displayName }),
+  });
+}
+
+export async function submitSchoolPaper(
+  text: string,
+  file?: File | null,
+): Promise<{ proposal: CommitmentProposal | null; ask: string | null }> {
+  const body = new FormData();
+  if (text.trim()) body.append("text", text.trim());
+  if (file) body.append("file", file);
+  const res = await fetch(`${resolveApiBase()}/v1/care/school-paper`, {
+    method: "POST",
+    credentials: "include",
+    body,
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    const detail = await res.text();
+    if (res.status === 401) {
+      throw new AuthError(401, detail || "Not logged in");
+    }
+    throw new Error(`${res.status} ${res.statusText}: ${detail}`);
+  }
+  return res.json() as Promise<{
+    proposal: CommitmentProposal | null;
+    ask: string | null;
+  }>;
 }
 
 export async function declineProposal(proposalId: string): Promise<CommitmentProposal> {

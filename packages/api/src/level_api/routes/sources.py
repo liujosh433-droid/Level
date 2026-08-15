@@ -50,6 +50,7 @@ from level_core.profile.care_infer_llm import (
     enrich_care_profile_holistic,
     reconcile_exclusive_people,
 )
+from level_core.profile.people_usuals import hydrate_people_from_roles
 from level_core.profile.persist import (
     persist_care_profile_from_events,
     refresh_persisted_profile,
@@ -65,7 +66,13 @@ from level_core.profile.synthesize import (
     refresh_profile_and_manifesto,
 )
 from level_core.schemas.base import _now_utc
-from level_core.schemas.care import CareGraph, CareProfile, clean_conflict_summaries
+from level_core.calendar.school import person_contacts
+from level_core.schemas.care import (
+    CareGraph,
+    CareProfile,
+    active_care_people,
+    clean_conflict_summaries,
+)
 from level_core.schemas.profile import BulletStatus, ProfileSnapshot
 from level_core.schemas.signal import Fact, Signal, SignalSource
 
@@ -632,6 +639,24 @@ class ContradictionOut(BaseModel):
     fact_id_b: str
 
 
+class CareContactOut(BaseModel):
+    contact_id: str
+    role: str
+    name: str = ""
+    email: str = ""
+
+
+class CarePersonOut(BaseModel):
+    person_id: str
+    display_name: str
+    your_role: str = ""
+    their_relation: str = ""
+    care_role_id: str = "child_care"
+    attendance_email: str = ""
+    teacher_email: str = ""
+    contacts: list[CareContactOut] = Field(default_factory=list)
+
+
 class ProfileResponse(BaseModel):
     user_id: str
     fact_count: int
@@ -647,6 +672,37 @@ class ProfileResponse(BaseModel):
     care_role_count: int = 0
     conflict_summaries: list[str] = Field(default_factory=list)
     care_graph: CareGraph | None = None
+    people: list[CarePersonOut] = Field(default_factory=list)
+
+
+def _people_out(care: CareProfile | None) -> list[CarePersonOut]:
+    if care is None:
+        return []
+    out: list[CarePersonOut] = []
+    for person in active_care_people(care):
+        school = person.school
+        contacts = [
+            CareContactOut(
+                contact_id=c.contact_id,
+                role=c.role,
+                name=c.name,
+                email=c.email,
+            )
+            for c in person_contacts(person)
+        ]
+        out.append(
+            CarePersonOut(
+                person_id=person.person_id,
+                display_name=person.display_name,
+                your_role=person.your_role,
+                their_relation=person.their_relation,
+                care_role_id=person.care_role_id,
+                attendance_email=school.attendance_email if school else "",
+                teacher_email=school.teacher_email if school else "",
+                contacts=contacts,
+            )
+        )
+    return out
 
 
 async def _seed_care_from_agenda_fast(
@@ -737,6 +793,15 @@ async def _build_profile_response(
         memory.manifestos.get_profile_snapshot(user_id=user_id),
         sync_store.get(user_id) if sync_store is not None else asyncio.sleep(0, result=None),
     )
+    if care is not None:
+        hydrated = hydrate_people_from_roles(care)
+        if hydrated.version != care.version:
+            care = hydrated
+            invalidate_care_graph_cache(user_id)
+            try:
+                await memory.manifestos.save_care_profile(care)
+            except Exception:  # noqa: BLE001
+                pass
     # Care Profile is source of truth for role bullets — never serve a stale
     # snapshot that cloned one Memory summary onto every role.
     if care is not None and care.roles:
@@ -884,6 +949,7 @@ async def _build_profile_response(
             care.conflict_summaries if care else None
         ),
         care_graph=care_graph,
+        people=_people_out(care),
     )
 
 
@@ -1172,6 +1238,7 @@ async def profile_chat(
         care_role_count=len(care.roles),
         conflict_summaries=clean_conflict_summaries(care.conflict_summaries),
         care_graph=care_graph,
+        people=_people_out(care),
     )
     return ProfileChatResponse(reply=reply, facts_added=facts_added, profile=profile)
 

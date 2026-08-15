@@ -21,9 +21,12 @@ from level_api.services.google_sync import onboard_google_user
 from level_core.auth.google_oauth import (
     authorization_url,
     exchange_code,
+    fetch_token_scopes,
     fetch_userinfo,
     parse_oauth_state,
+    refresh_token_grant,
     token_from_credentials,
+    token_has_gmail_send,
     verify_oauth_state,
 )
 from level_core.calendar.sync_state import CalendarSyncState
@@ -46,6 +49,7 @@ class MeResponse(BaseModel):
     display_name: str | None = None
     google_connected: bool = False
     can_write_calendar: bool = False
+    can_send_email: bool = False
 
 
 class GuestRequest(BaseModel):
@@ -90,6 +94,12 @@ async def _me_payload(user_id: str) -> MeResponse:
         user = user.model_copy(update={"display_name": pretty})
         await store.upsert_user(user)
     connected = token is not None and bool(token.refresh_token or token.access_token)
+    if connected and token is not None and not token_has_gmail_send(token.scopes):
+        try:
+            token = await asyncio.to_thread(refresh_token_grant, token)
+            await store.upsert_token(token)
+        except Exception:  # noqa: BLE001
+            _logger.info("gmail_scope_refresh_skipped")
     return MeResponse(
         user_id=user.user_id,
         email=user.email,
@@ -97,6 +107,9 @@ async def _me_payload(user_id: str) -> MeResponse:
         google_connected=connected,
         can_write_calendar=(
             not connected or _token_can_write_calendar(token.scopes if token else None)
+        ),
+        can_send_email=(
+            not connected or token_has_gmail_send(token.scopes if token else None)
         ),
     )
 
@@ -136,11 +149,15 @@ async def create_guest(
 
 
 @router.get("/google/start")
-async def google_start(request: Request) -> RedirectResponse:
+async def google_start(
+    request: Request,
+    need: str | None = Query(default=None, max_length=20),
+) -> RedirectResponse:
     # Link Google onto the current session user when present.
     link_user_id = read_session_user_id(request)
+    want = "gmail" if (need or "").strip().lower() == "gmail" else None
     try:
-        url, _state = authorization_url(link_user_id=link_user_id)
+        url, _state = authorization_url(link_user_id=link_user_id, need=want)
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return RedirectResponse(url)
@@ -213,6 +230,29 @@ async def google_callback(
     await store.upsert_user(user)
 
     token = token_from_credentials(creds, user_id=user.user_id, settings=settings)
+    try:
+        live = await asyncio.to_thread(fetch_token_scopes, creds)
+        if live:
+            token = token.model_copy(update={"scopes": live})
+    except Exception:  # noqa: BLE001
+        _logger.info("oauth_live_scopes_skipped")
+    _logger.info(
+        "oauth_granted_scopes",
+        has_gmail=token_has_gmail_send(token.scopes),
+        scope_count=len(token.scopes or []),
+    )
+    prior_token = await store.get_google_token(user.user_id)
+    if prior_token:
+        updates: dict = {}
+        if not token.refresh_token and prior_token.refresh_token:
+            updates["refresh_token"] = prior_token.refresh_token
+        merged = list(
+            dict.fromkeys([*(prior_token.scopes or []), *(token.scopes or [])])
+        )
+        if merged != (token.scopes or []):
+            updates["scopes"] = merged
+        if updates:
+            token = token.model_copy(update=updates)
     await store.upsert_token(token)
 
     sync_store = get_calendar_sync_store()
@@ -242,7 +282,13 @@ async def google_callback(
 
     web = settings.web_app_url.rstrip("/")
     # Existing Google users land on Today; first-time goes through Sources onboard.
-    next_path = "/today" if already_onboarded else "/sources?connected=1"
+    # If send-mail still isn't on the grant, stay on Sources so they can retry.
+    if already_onboarded and token_has_gmail_send(token.scopes):
+        next_path = "/today"
+    elif already_onboarded:
+        next_path = "/sources?need_gmail=1"
+    else:
+        next_path = "/sources?connected=1"
     # OAuth callback stays on :8080 (registered in Google Console). Hand the
     # session to the web origin via /v1/auth/handoff so the cookie is first-party
     # on :3000 (Next rewrite) instead of stuck on the API host.

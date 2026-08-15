@@ -125,6 +125,28 @@ async def inject_event_into_agenda_cache(
         summary=cached.summary,
     )
 
+
+async def mark_events_cancelled_in_cache(
+    *,
+    user_id: str,
+    sync_store: CalendarSyncStore,
+    event_ids: list[str],
+) -> None:
+    """Drop cancelled instances from the agenda cache so Today updates immediately."""
+    if not event_ids:
+        return
+    state = await sync_store.get(user_id)
+    if state is None:
+        return
+    wanted = {eid for eid in event_ids if eid}
+    if not wanted:
+        return
+    events = {eid: ev for eid, ev in state.events.items() if eid not in wanted}
+    state = state.model_copy(
+        update={"events": events, "agenda_updated_at": _now_utc()}
+    )
+    await sync_store.upsert(state)
+
 async def ensure_calendar_watch(
     *,
     user_id: str,
@@ -234,5 +256,6 @@ __all__ = [
     "day_events_cached_or_live",
     "ensure_calendar_watch",
     "inject_event_into_agenda_cache",
+    "mark_events_cancelled_in_cache",
     "refresh_agenda_cache",
 ]

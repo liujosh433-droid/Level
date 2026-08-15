@@ -12,6 +12,12 @@ from level_core.calendar.availability import (
     find_free_slots_nearby,
 )
 from level_core.calendar.commitment_gate import propose_from_text
+from level_core.calendar.usuals import (
+    UsualGap,
+    apply_usual_resolution,
+    find_usual_gaps,
+    horizon_dates,
+)
 from level_core.calendar.event_cues import EventCueStore, build_event_cue_store
 from level_core.calendar.proposals import ProposalStore, build_proposal_store
 from level_core.calendar.sync_state import CalendarSyncStore, build_calendar_sync_store
@@ -31,4 +37,8 @@ __all__ = [
     "infer_activity_kind",
     "propose_from_text",
     "refresh_agenda_cache",
+    "UsualGap",
+    "apply_usual_resolution",
+    "find_usual_gaps",
+    "horizon_dates",
 ]

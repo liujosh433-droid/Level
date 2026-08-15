@@ -6,7 +6,7 @@ import { fetchMe } from "@/lib/api";
 import styles from "@/components/AppShell.module.css";
 
 /**
- * Persistent chrome for Today / About me / Sources / Info.
+ * Persistent chrome for Today / About me / Contacts / Sources / Info.
  * Keeps nav + page background mounted so route changes don't flash the shell.
  */
 export default function DashboardLayout({ children }: { children: ReactNode }) {

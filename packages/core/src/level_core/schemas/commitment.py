@@ -15,6 +15,7 @@ class CommitmentKind(str, Enum):
 
     ADD = "add"
     AVAILABILITY = "availability"
+    SCHOOL_SEND = "school_send"
 
 
 class ProposalStatus(str, Enum):
@@ -96,6 +97,14 @@ class CommitmentProposal(TraceableModel):
 
     google_event_id: str | None = None
     resolved_at: datetime | None = None
+
+    # School paper / sick-day — institutional send behind Hold/Run.
+    to_email: str = ""
+    email_subject: str = ""
+    email_body: str = ""
+    person_ids: list[str] = Field(default_factory=list)
+    cancel_event_ids: list[str] = Field(default_factory=list)
+    hold_on_calendar: bool = False
 
 
 __all__ = [

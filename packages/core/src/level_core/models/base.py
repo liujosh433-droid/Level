@@ -13,6 +13,15 @@ from typing import Any, Protocol
 
 
 @dataclass(frozen=True, slots=True)
+class PromptMedia:
+    """One file Gemini should see with the prompt (PDF / image / text)."""
+
+    mime_type: str
+    data: bytes
+    filename: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class GenerationRequest:
     """A single generation request to Gemini.
 
@@ -26,6 +35,7 @@ class GenerationRequest:
         max_output_tokens: Cap on response length.
         system_instruction: Optional persistent instruction (persona, tone).
         metadata: Arbitrary tags surfaced in observability spans.
+        media: Optional file parts (school slips, photos).
     """
 
     prompt: str
@@ -35,6 +45,7 @@ class GenerationRequest:
     max_output_tokens: int = 2048
     system_instruction: str | None = None
     metadata: Mapping[str, str] = field(default_factory=dict)
+    media: tuple[PromptMedia, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,4 +76,5 @@ __all__ = [
     "GeminiClient",
     "GenerationRequest",
     "GenerationResponse",
+    "PromptMedia",
 ]

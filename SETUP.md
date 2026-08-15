@@ -115,15 +115,18 @@ Child names are optional on calendar titles: Level still opens a **child care** 
 
 Note: with `LEVEL_ENV=local`, memory is in-process — restarting the API clears guest data. For persistence, set `LEVEL_ENV=cloud` + `LEVEL_VECTOR_BACKEND=firestore` (ADC via `gcloud auth application-default login`).
 
-### B. Google Calendar
+### B. Google Calendar + school-note email
 
-1. In GCP Console → **APIs & Services** → enable **Google Calendar API**.
-2. **Credentials** → Create **OAuth client ID** → Application type **Web application**.
-3. Authorized redirect URI (exact):
+1. In GCP Console → **APIs & Services** → enable **Google Calendar API** and **Gmail API**.
+2. **OAuth consent screen** → **Add or remove scopes** → include:
+   - `https://www.googleapis.com/auth/calendar.events`
+   - `https://www.googleapis.com/auth/gmail.send` (Send email — school / clinic notes)
+3. **Credentials** → Create **OAuth client ID** → Application type **Web application**.
+4. Authorized redirect URI (exact):
 
    `http://localhost:8080/v1/auth/google/callback`
 
-4. Put client id/secret in `.env`:
+5. Put client id/secret in `.env`:
 
 ```bash
 GOOGLE_OAUTH_CLIENT_ID=....apps.googleusercontent.com
@@ -132,8 +135,8 @@ GOOGLE_OAUTH_REDIRECT_URI=http://localhost:8080/v1/auth/google/callback
 LEVEL_WEB_APP_URL=http://localhost:3000
 ```
 
-5. Restart API → Sources → **Connect Google** → sync Calendar.
-6. OAuth consent screen: add your Google account as a test user if the app is in Testing.
+6. Restart API → Sources → **Connect Google** → sync Calendar. On Google’s screen, leave **Send email** checked.
+7. OAuth consent screen: add your Google account as a test user if the app is in Testing. `gmail.send` is a sensitive scope — if it isn’t listed on the consent screen, Google will connect Calendar but Level still can’t send the teacher a note.
 
 ### C. What “helpful in reality” looks like
 

@@ -100,7 +100,6 @@ function ProfileInner() {
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-
   useEffect(() => {
     let cancelled = false;
     void (async () => {

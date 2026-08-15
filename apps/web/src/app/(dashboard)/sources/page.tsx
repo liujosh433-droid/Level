@@ -38,6 +38,7 @@ function SourcesInner() {
   const [email, setEmail] = useState<string | null>(null);
   const [googleConnected, setGoogleConnected] = useState(false);
   const [canWriteCalendar, setCanWriteCalendar] = useState(true);
+  const [canSendEmail, setCanSendEmail] = useState(true);
   const [status, setStatus] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [phase, setPhase] = useState<Phase>("connect");
@@ -50,6 +51,7 @@ function SourcesInner() {
 
   useEffect(() => {
     const fromOAuth = params.get("connected") === "1";
+    const needGmail = params.get("need_gmail") === "1";
     let cancelled = false;
 
     void (async () => {
@@ -62,6 +64,12 @@ function SourcesInner() {
         setEmail(me.email);
         setGoogleConnected(me.google_connected || fromOAuth);
         setCanWriteCalendar(me.can_write_calendar !== false);
+        setCanSendEmail(me.can_send_email !== false);
+        if (needGmail && me.can_send_email === false) {
+          setStatus(
+            "Google still didn’t attach Send email. Enable the Gmail API and add gmail.send on the OAuth consent screen, then tap Allow sending school notes and leave Send email checked.",
+          );
+        }
 
         if (fromOAuth) {
           setPhase("syncing");
@@ -128,6 +136,8 @@ function SourcesInner() {
             if (cancelled) return;
             setUserId(guest.user_id);
             setGoogleConnected(Boolean(guest.google_connected));
+            setCanWriteCalendar(guest.can_write_calendar !== false);
+            setCanSendEmail(guest.can_send_email !== false);
             setPhase(guest.google_connected ? "addons" : "connect");
             setReady(true);
             return;
@@ -147,12 +157,13 @@ function SourcesInner() {
     };
   }, [params, router]);
 
-  async function connectGoogle() {
+  async function connectGoogle(need?: "gmail") {
     setBusy(true);
     setStatus(null);
     try {
       await ensureSession();
-      window.location.href = `${getApiBase()}/v1/auth/google/start`;
+      const q = need === "gmail" ? "?need=gmail" : "";
+      window.location.href = `${getApiBase()}/v1/auth/google/start${q}`;
     } catch (err) {
       setStatus(err instanceof Error ? err.message : String(err));
       setBusy(false);
@@ -231,9 +242,10 @@ function SourcesInner() {
               <div className={styles.consentCopy}>
                 <p className={styles.consentTitle}>On Google’s next screen</p>
                 <p>
-                  Check the box that gives <strong>Level</strong> access to your{" "}
-                  <strong>Calendar</strong> — then tap <strong>Continue</strong>. If it’s unchecked,
-                  sync can’t see your week.
+                  Check every box Level asks for — <strong>Calendar</strong> and{" "}
+                  <strong>sending email</strong> for school or clinic notes — then tap{" "}
+                  <strong>Continue</strong>. If sending email is unchecked, Level can see
+                  your week but can’t send the teacher a note.
                 </p>
               </div>
               <figure className={styles.consentArt}>
@@ -305,6 +317,18 @@ function SourcesInner() {
               {email ? `Calendar linked as ${email}.` : "Google Calendar is linked."} Optional
               extras below — skip anytime.
             </p>
+            {(!canWriteCalendar || !canSendEmail) && (
+              <aside className={styles.consentTip}>
+                <div className={styles.consentCopy}>
+                  <p className={styles.consentTitle}>One more Google permission</p>
+                  <p>
+                    {!canSendEmail
+                      ? "Level can see your calendar, but Google still hasn’t granted sending email. Tap the button below — on Google’s next screen, leave Send email checked."
+                      : "Calendar is read-only right now. Reconnect and allow Level to edit events."}
+                  </p>
+                </div>
+              </aside>
+            )}
 
             <div className={styles.addonList}>
               <div className={styles.addon}>
@@ -375,14 +399,18 @@ function SourcesInner() {
               >
                 Go to Today
               </button>
-              {!canWriteCalendar && (
+              {(!canWriteCalendar || !canSendEmail) && (
                 <button
                   type="button"
                   className={styles.soft}
                   disabled={busy}
-                  onClick={() => void connectGoogle()}
+                  onClick={() =>
+                    void connectGoogle(canSendEmail ? undefined : "gmail")
+                  }
                 >
-                  Update Google permissions
+                  {canSendEmail
+                    ? "Update Google permissions"
+                    : "Allow sending school notes"}
                 </button>
               )}
             </div>

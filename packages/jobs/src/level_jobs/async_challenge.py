@@ -20,6 +20,13 @@ from level_core.calendar.role_collisions import (
     synthesize_demo_collision_event,
 )
 from level_core.calendar.sync_state import build_calendar_sync_store
+from level_core.calendar.usuals import (
+    DEFAULT_TZ,
+    UsualGap,
+    find_usual_gaps,
+    gap_decision_key,
+    horizon_dates,
+)
 from level_core.config import get_settings
 from level_core.gateway.router import AgentGateway
 from level_core.memory.base import MemoryBank
@@ -79,7 +86,13 @@ async def _load_agenda_events(user_id: str) -> list[dict[str, str | None]]:
         if state is None or not state.events:
             return []
         return [
-            {"summary": e.summary, "start": e.start}
+            {
+                "id": e.id,
+                "summary": e.summary,
+                "start": e.start,
+                "end": e.end,
+                "status": e.status,
+            }
             for e in state.events.values()
             if e.summary
         ]
@@ -101,6 +114,63 @@ def _already_challenged(decisions: list[Decision], collision: RoleCollision) -> 
     return False
 
 
+def _already_gapped(decisions: list[Decision], gap: UsualGap) -> bool:
+    key = gap_decision_key(gap.usual_id, gap.on_date)
+    for d in decisions:
+        if d.status is not DecisionStatus.OPEN:
+            continue
+        if d.origin != "async_usual_gap":
+            continue
+        label = d.trigger_label or ""
+        if key in label:
+            return True
+    return False
+
+
+async def _open_usual_gap(
+    *,
+    user_id: str,
+    gap: UsualGap,
+    memory: MemoryBank,
+    conductor: object,
+) -> int:
+    key = gap_decision_key(gap.usual_id, gap.on_date)
+    decision = Decision(
+        user_id=user_id,
+        status=DecisionStatus.OPEN,
+        opened_at=datetime.now(tz=timezone.utc),
+        origin="async_usual_gap",
+        trigger_label=f"{key} {gap.banner()}",
+        written_by="async_challenge@v1",
+    )
+    await memory.decisions.create(decision)
+    user_text = (
+        f"{gap.banner()} "
+        f"Resolve: put it back, this week is different, or not me."
+    )
+    manifesto = await memory.manifestos.get_current_manifesto(user_id=user_id)
+    snippet = manifesto.statement[:500] if manifesto else ""
+    turn = await conductor.run_turn(  # type: ignore[union-attr]
+        SessionInput(
+            user_id=user_id,
+            decision_id=decision.decision_id,
+            user_text=user_text,
+            manifesto_snippet=snippet,
+        )
+    )
+    _logger.info(
+        "async_usual_gap_challenge_created",
+        user_id=user_id,
+        decision_id=decision.decision_id,
+        turn_status=turn.status.value,
+        usual_id=gap.usual_id,
+        on_date=gap.on_date.isoformat(),
+    )
+    if turn.status in (TurnStatus.COMPLETE, TurnStatus.DEGRADED, TurnStatus.BLOCKED):
+        return 1
+    return 0
+
+
 async def _process_user(
     user_id: str,
     memory: MemoryBank,
@@ -109,12 +179,12 @@ async def _process_user(
     allow_demo_synth: bool = False,
 ) -> int:
     care = await memory.manifestos.get_care_profile(user_id=user_id)
-    if care is None or not care.roles:
+    if care is None or (not care.roles and not care.people_profiles):
         _logger.info("async_challenge_skip_no_care_profile", user_id=user_id)
         return 0
 
     events = await _load_agenda_events(user_id)
-    collisions = find_role_collisions(care=care, events=events)
+    collisions = find_role_collisions(care=care, events=events) if care.roles else []
     if not collisions and allow_demo_synth:
         demo = synthesize_demo_collision_event(care)
         if demo:
@@ -152,60 +222,71 @@ async def _process_user(
                     )
                 ]
 
-    if not collisions:
-        _logger.info("async_challenge_no_collisions", user_id=user_id)
-        return 0
-
     existing = await memory.decisions.list_for_user(user_id=user_id, limit=40)
+    opened = 0
+
     collision = next(
         (c for c in collisions if not _already_challenged(existing, c)), None
     )
-    if collision is None:
-        _logger.info("async_challenge_already_covered", user_id=user_id)
-        return 0
+    if collision is not None:
+        trigger = collision.theft_message
+        decision = Decision(
+            user_id=user_id,
+            status=DecisionStatus.OPEN,
+            opened_at=datetime.now(tz=timezone.utc),
+            origin="async_role_theft",
+            trigger_label=trigger,
+            written_by="async_challenge@v1",
+        )
+        await memory.decisions.create(decision)
 
-    trigger = collision.theft_message
-    decision = Decision(
-        user_id=user_id,
-        status=DecisionStatus.OPEN,
-        opened_at=datetime.now(tz=timezone.utc),
-        origin="async_role_theft",
-        trigger_label=trigger,
-        written_by="async_challenge@v1",
-    )
-    await memory.decisions.create(decision)
+        user_text = (
+            f"I'm about to keep this on my calendar: {collision.event_summary} "
+            f"({collision.event_start.strftime('%a %b %d %H:%M UTC')}). "
+            f"Should I say yes?"
+        )
+        manifesto = await memory.manifestos.get_current_manifesto(user_id=user_id)
+        snippet = manifesto.statement[:500] if manifesto else ""
 
-    user_text = (
-        f"I'm about to keep this on my calendar: {collision.event_summary} "
-        f"({collision.event_start.strftime('%a %b %d %H:%M UTC')}). "
-        f"Should I say yes?"
-    )
-    manifesto = await memory.manifestos.get_current_manifesto(user_id=user_id)
-    snippet = manifesto.statement[:500] if manifesto else ""
+        turn = await conductor.run_turn(  # type: ignore[union-attr]
+            SessionInput(
+                user_id=user_id,
+                decision_id=decision.decision_id,
+                user_text=user_text,
+                manifesto_snippet=snippet,
+            )
+        )
 
-    turn = await conductor.run_turn(  # type: ignore[union-attr]
-        SessionInput(
+        _logger.info(
+            "async_role_theft_challenge_created",
             user_id=user_id,
             decision_id=decision.decision_id,
-            user_text=user_text,
-            manifesto_snippet=snippet,
+            turn_status=turn.status.value,
+            challenge_types=[q.challenge_type for q in turn.challenger_questions],
+            trigger=trigger[:160],
         )
-    )
+        if turn.status in (TurnStatus.COMPLETE, TurnStatus.DEGRADED, TurnStatus.BLOCKED):
+            opened += 1
 
-    _logger.info(
-        "async_role_theft_challenge_created",
-        user_id=user_id,
-        decision_id=decision.decision_id,
-        turn_status=turn.status.value,
-        challenge_types=[q.challenge_type for q in turn.challenger_questions],
-        trigger=trigger[:160],
+    today_local = datetime.now(tz=DEFAULT_TZ).date()
+    gaps = find_usual_gaps(
+        care=care,
+        events=events,
+        on_dates=horizon_dates(start=today_local, days=7),
+        tz=DEFAULT_TZ,
     )
-    if turn.status is TurnStatus.COMPLETE and turn.challenger_questions:
-        return 1
-    if turn.status in (TurnStatus.DEGRADED, TurnStatus.BLOCKED):
-        # Still counts as an opened background workflow for demo visibility.
-        return 1
-    return 0
+    gap = next((g for g in gaps if not _already_gapped(existing, g)), None)
+    if gap is not None:
+        opened += await _open_usual_gap(
+            user_id=user_id,
+            gap=gap,
+            memory=memory,
+            conductor=conductor,
+        )
+
+    if opened == 0:
+        _logger.info("async_challenge_nothing_new", user_id=user_id)
+    return opened
 
 
 def cli() -> None:

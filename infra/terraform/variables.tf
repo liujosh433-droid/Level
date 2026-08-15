@@ -47,5 +47,7 @@ variable "apis_to_enable" {
     "modelarmor.googleapis.com",
     "iam.googleapis.com",
     "iamcredentials.googleapis.com",
+    "calendar-json.googleapis.com",
+    "gmail.googleapis.com",
   ]
 }

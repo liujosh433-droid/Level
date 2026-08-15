@@ -9,12 +9,27 @@ from level_core.calendar.availability import (
     draft_window,
     find_conflicts,
     find_free_slots,
+    occurrence_windows,
 )
 from level_core.calendar.commitment_gate import (
+    _ParsedIntent,
+    _draft_from_parsed,
+    _ground_availability_reply,
+    _normalize_parsed,
+    _offline_title,
     _sanitize_message,
+    _summarize_draft,
     looks_like_schedule_ask,
 )
-from level_core.schemas.commitment import EventDraft, Weekday
+from level_core.schemas.care import (
+    CARE_ROLE_LABELS,
+    CareProfile,
+    CareRoleId,
+    CareRoleState,
+    ProtectedWindow,
+)
+from level_core.schemas.commitment import CommitmentKind, EventDraft, FreeSlot, Weekday
+from level_core.schemas.profile import BulletStatus
 
 
 def test_offline_schedule_hint_is_coarse_fallback_only() -> None:
@@ -30,8 +45,6 @@ def test_offline_schedule_hint_is_coarse_fallback_only() -> None:
 
 
 def test_offline_title_and_sanitize() -> None:
-    from level_core.calendar.commitment_gate import _offline_title
-
     assert _offline_title("short ask") == "short ask"
     assert "[bullet:" not in _sanitize_message(
         "Follow your email [bullet:df5277d55d1d4a738a80321d3a] tonight."
@@ -40,13 +53,6 @@ def test_offline_title_and_sanitize() -> None:
 
 def test_model_weekend_by_days_drive_windows_not_today() -> None:
     """AI output with by_days=SA/SU must search weekend — never pin to Tuesday."""
-    from level_core.calendar.commitment_gate import (
-        _ParsedIntent,
-        _draft_from_parsed,
-        _normalize_parsed,
-    )
-    from level_core.calendar.availability import draft_window, occurrence_windows
-
     # Shape the model is instructed to return for a weekend availability ask.
     parsed = _normalize_parsed(
         _ParsedIntent(
@@ -76,8 +82,6 @@ def test_model_weekend_by_days_drive_windows_not_today() -> None:
 
 
 def test_normalize_does_not_force_availability_onto_today() -> None:
-    from level_core.calendar.commitment_gate import _ParsedIntent, _normalize_parsed
-
     parsed = _normalize_parsed(
         _ParsedIntent(
             is_schedule_ask=True,
@@ -175,3 +179,177 @@ def test_draft_window_recurring_next_weekday() -> None:
     assert start.weekday() == 1  # Tuesday
     assert start.hour == 21 and start.minute == 30
     assert end - start == timedelta(minutes=60)
+
+
+def test_availability_copy_does_not_echo_the_question() -> None:
+    ask = (
+        "I need a book an event 2 weeks from now which day 2 weeks from now "
+        "or more is the soonest I can put in a 1 hour event"
+    )
+    parsed = _normalize_parsed(
+        _ParsedIntent(
+            is_schedule_ask=True,
+            kind="availability",
+            title=ask,
+            local_date="2026-08-26",
+            local_time="09:00",
+            duration_minutes=60,
+        ),
+        today="2026-08-12",
+        source_text=ask,
+    )
+    assert parsed.title == "1-hour hold"
+    assert "I need" not in parsed.title
+
+    summary = _summarize_draft(
+        CommitmentKind.AVAILABILITY,
+        EventDraft(
+            title=parsed.title,
+            local_date="2026-08-26",
+            local_time="09:00",
+            duration_minutes=60,
+        ),
+    )
+    assert summary == "Soonest 1-hour opening from Aug 26"
+    assert "I need" not in summary
+    assert "2026-08-26" not in summary
+
+    msg = _ground_availability_reply(
+        title=ask,
+        free_slots=[
+            FreeSlot(
+                start="2026-08-26T15:00:00+00:00",
+                end="2026-08-26T16:00:00+00:00",
+                label="Wed Aug 26, 8:00–9:00am",
+            ),
+            FreeSlot(
+                start="2026-08-26T15:30:00+00:00",
+                end="2026-08-26T16:30:00+00:00",
+                label="Wed Aug 26, 8:30–9:30am",
+            ),
+        ],
+        conflicts=[],
+    )
+    assert msg.startswith("Soonest opening: Wed Aug 26, 8:00–9:00am.")
+    assert "I need" not in msg
+    assert "Best opening for" not in msg
+
+
+def _pickup_care() -> CareProfile:
+    return CareProfile(
+        user_id="u1",
+        roles=[
+            CareRoleState(
+                role_id=CareRoleId.CHILD_CARE,
+                label=CARE_ROLE_LABELS[CareRoleId.CHILD_CARE],
+                salience=0.9,
+                status=BulletStatus.ACCEPTED,
+                people=["Nova", "Theo"],
+                protected_windows=[
+                    ProtectedWindow(
+                        label="Pickup",
+                        weekday=2,  # Wednesday
+                        start_hour=15,
+                        end_hour=16,
+                    )
+                ],
+            )
+        ],
+    )
+
+
+def test_availability_copy_names_clear_care_window() -> None:
+    msg = _ground_availability_reply(
+        title="1-hour hold",
+        free_slots=[
+            FreeSlot(
+                start="2026-08-26T20:00:00+00:00",  # 1:00pm PT
+                end="2026-08-26T21:00:00+00:00",
+                label="Wed Aug 26, 1:00–2:00pm",
+            ),
+            FreeSlot(
+                start="2026-08-26T21:00:00+00:00",
+                end="2026-08-26T22:00:00+00:00",
+                label="Wed Aug 26, 2:00–3:00pm",
+            ),
+        ],
+        conflicts=[],
+        care=_pickup_care(),
+        timezone_name="America/Los_Angeles",
+    )
+    assert msg.startswith("Soonest opening: Wed Aug 26, 1:00–2:00pm.")
+    assert "Clear of Pickup" in msg
+    assert "Nova" in msg and "Theo" in msg
+    assert "1-hour hold" not in msg
+
+
+def test_availability_copy_flags_crowded_care_window() -> None:
+    msg = _ground_availability_reply(
+        title="1-hour hold",
+        free_slots=[
+            FreeSlot(
+                start="2026-08-26T22:00:00+00:00",  # 3:00pm PT — pickup
+                end="2026-08-26T23:00:00+00:00",
+                label="Wed Aug 26, 3:00–4:00pm",
+            ),
+            FreeSlot(
+                start="2026-08-26T20:00:00+00:00",  # 1:00pm PT — clear
+                end="2026-08-26T21:00:00+00:00",
+                label="Wed Aug 26, 1:00–2:00pm",
+            ),
+        ],
+        conflicts=[],
+        care=_pickup_care(),
+        timezone_name="America/Los_Angeles",
+    )
+    assert "Soonest opening: Wed Aug 26, 3:00–4:00pm" in msg
+    assert "sits on Pickup" in msg
+    assert "Nova" in msg and "Theo" in msg
+    assert "Wed Aug 26, 1:00–2:00pm is clear of that window" in msg
+    assert "1-hour hold" not in msg
+
+
+def test_unnamed_duration_stays_one_hour() -> None:
+    parsed = _normalize_parsed(
+        _ParsedIntent(
+            is_schedule_ask=True,
+            kind="availability",
+            title="Hold",
+            local_date="2026-08-26",
+            local_time="13:00",
+            duration_minutes=180,
+            duration_named=False,
+        ),
+        today="2026-08-12",
+        source_text="when do I have an opening in the afternoon 2 weeks from now",
+    )
+    assert parsed.duration_minutes == 60
+    named = _normalize_parsed(
+        _ParsedIntent(
+            is_schedule_ask=True,
+            kind="availability",
+            title="Hold",
+            duration_minutes=180,
+            duration_named=True,
+        ),
+        today="2026-08-12",
+        source_text="book a 3 hour block",
+    )
+    assert named.duration_minutes == 180
+
+
+def test_free_slot_labels_include_weekday_and_date() -> None:
+    tz = "America/Los_Angeles"
+    day = datetime(2026, 8, 26, 15, 0, tzinfo=timezone.utc)  # 8am PT
+    slots = find_free_slots(
+        [],
+        day_start=day,
+        day_end=day + timedelta(hours=3),
+        duration=timedelta(hours=1),
+        timezone_name=tz,
+        max_slots=1,
+    )
+    assert slots
+    assert "Aug 26" in slots[0].label
+    assert "Wed" in slots[0].label
+    assert "–" in slots[0].label

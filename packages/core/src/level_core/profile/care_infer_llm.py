@@ -27,6 +27,11 @@ from level_core.schemas.care import (
     CareRoleState,
     clean_conflict_summaries,
 )
+from level_core.profile.people_usuals import (
+    attach_people_to_profile,
+    find_person_by_name,
+    merge_people_and_usuals,
+)
 from level_core.schemas.profile import BulletStatus
 from level_core.schemas.signal import Fact, FactType
 
@@ -58,6 +63,10 @@ class CarePersonAssign(BaseModel):
             "(e.g. parent, child, co-parent, spouse, sibling). Empty if unclear."
         ),
     )
+    your_role: str = Field(
+        default="",
+        description="How the caregiver stands toward them (parent, adult child, …).",
+    )
 
 
 class CarePeopleConsolidate(BaseModel):
@@ -69,6 +78,21 @@ class CarePeopleConsolidate(BaseModel):
 class CareEventAssign(BaseModel):
     summary: str = ""
     role: str = "other"
+    person: str = ""
+
+
+class UsualInferRow(BaseModel):
+    """One repeating care obligation the model believes is a usual."""
+
+    person: str = ""
+    label: str = ""
+    weekday: int | None = None
+    start_hour: int | None = None
+    end_hour: int | None = None
+    start_minute: int | None = None
+    end_minute: int | None = None
+    evidence: str = ""
+    evidence_titles: list[str] = Field(default_factory=list)
 
 
 class CareRoleInfer(BaseModel):
@@ -86,6 +110,7 @@ class CareHolisticInfer(BaseModel):
     roles: list[CareRoleInfer] = Field(default_factory=list)
     people: list[CarePersonAssign] = Field(default_factory=list)
     events: list[CareEventAssign] = Field(default_factory=list)
+    usuals: list[UsualInferRow] = Field(default_factory=list)
     conflicts: list[str] = Field(default_factory=list)
     facts: list[str] = Field(default_factory=list)
 
@@ -117,6 +142,20 @@ class WeekEventClassifyOut(BaseModel):
 
 def _norm_title(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip().lower())
+
+
+def _dated_event_lines(events: list[dict[str, str | None]], *, limit: int = 40) -> list[str]:
+    """Compact dated lines for usual inference — no title clustering."""
+    lines: list[str] = []
+    for ev in events:
+        title = (ev.get("summary") or "").strip()
+        start = (ev.get("start") or "").strip()
+        if not title or title == "(no title)" or not start:
+            continue
+        lines.append(f"{start[:16]} {title[:120]}")
+        if len(lines) >= limit:
+            break
+    return lines
 
 
 def _unique_titles(events: list[dict[str, str | None]], *, limit: int = 48) -> list[str]:
@@ -272,11 +311,27 @@ async def infer_care_holistic(
             peeps = f" people={','.join(r.people)}" if r.people else ""
             lines.append(f"- {r.role_id.value} status={st} salience={r.salience:.2f}{peeps}")
         prev_block = "\n".join(lines)
+    people_prev = "(none)"
+    if previous and previous.people_profiles:
+        plines = []
+        for person in previous.people_profiles:
+            usual_bits = [
+                f"{u.label} wd={u.weekday} status={u.status.value}"
+                for u in person.usuals[:4]
+            ]
+            plines.append(
+                f"- {person.display_name} status={person.status.value} "
+                f"your_role={person.your_role or '?'} usuals={usual_bits or '[]'}"
+            )
+        people_prev = "\n".join(plines[:12])
 
     # Shrink title count on parse/unavailable failures (MAX_TOKENS truncates JSON).
     for title_cap in (24, 14, 8):
         titles = all_titles[:title_cap]
         titles_block = "\n".join(f"- {t}" for t in titles) or "(no calendar titles)"
+        dated_block = "\n".join(
+            f"- {line}" for line in _dated_event_lines(events, limit=36)
+        ) or "(no dated events)"
         event_cap = min(len(titles), 18)
         prompt = (
             "Infer this caregiver's Care Profile from the data below.\n"
@@ -287,26 +342,29 @@ async def infer_care_holistic(
             "  Include a role only when present=true and there is real evidence.\n"
             "- people: ONE entry per human with role in "
             "{child_care, elder_care, partner_coparent}, short evidence, "
-            "also_known_as for nicknames, and relationship (how they relate to the "
-            "caregiver — e.g. parent, child, co-parent). Prefer given names "
-            "(Robert, Nova, Theo). roles.people must use those same canonical "
-            "names only — no duplicate nickname rows.\n"
+            "also_known_as for nicknames, relationship (who they are to the "
+            "caregiver), and your_role (how the caregiver stands toward them — "
+            "parent, adult child, co-parent, …). Prefer given names. "
+            "roles.people must use those same canonical names only.\n"
             f"- events: classify at most {event_cap} distinctive titles from the list into "
             "{child_care, elder_care, paid_work, self_recovery, household_logistics, "
-            "partner_coparent, other}; copy the exact title string. Prefer named people "
-            "and ambiguous titles (Meeting, Pickup, Dr.) over near-duplicates.\n"
-            "  Examples: Meeting/Call/Sync/1:1 → paid_work; Night class → other "
-            "(or paid_work if memory/career context); Therapy → self_recovery.\n"
-            "- conflicts: at most 3 actionable forward-looking sentences "
-            "(what to protect / not double-book), citing real titles or people. "
-            "Empty list is fine. Never retrospective 'indicates/previously scheduled' "
-            "observations or role_id names (paid_work). Night class is not self_recovery.\n"
-            "- facts: 1-4 first-person life statements (who you care for, constraints). "
+            "partner_coparent, other}; copy the exact title string; set person to the "
+            "canonical name when the event is for that human (else empty).\n"
+            "- usuals: repeating care obligations (pickup, clinic, after-school) with "
+            "{person, label, weekday 0=Mon..6=Sun, start_hour, end_hour, evidence, "
+            "evidence_titles[]}. Only when the dated events show a real series. "
+            "Honor Rejected usuals in previous people — do not revive them. "
+            "Keep accepted usuals even if this window is thin.\n"
+            "- conflicts: at most 3 actionable forward-looking sentences. "
+            "Empty list is fine.\n"
+            "- facts: 1-4 first-person life statements. "
             "Never list or quote calendar titles / meeting names in facts.\n"
             "Keep the JSON compact — short evidence strings.\n\n"
             f"Calendar titles:\n{titles_block}\n\n"
+            f"Dated events (for usuals):\n{dated_block}\n\n"
             f"Memory snippets:\n{facts_block}\n\n"
-            f"Previous care roles (honor Rejected — do not revive):\n{prev_block}\n"
+            f"Previous care roles (honor Rejected — do not revive):\n{prev_block}\n\n"
+            f"Previous people + usuals (honor Rejected / Keep):\n{people_prev}\n"
         )
         try:
             resp = await gemini.generate(
@@ -391,6 +449,31 @@ def _canonical_person_name(raw: str, alias_map: dict[str, str]) -> str:
     if not name:
         return ""
     return alias_map.get(name.lower(), name)
+
+
+def _with_people_profiles(
+    profile: CareProfile,
+    *,
+    inferred: CareHolisticInfer,
+    previous: CareProfile | None,
+    alias_map: dict[str, str],
+    event_person_names: dict[str, str],
+) -> CareProfile:
+    people, person_by_summary = merge_people_and_usuals(
+        previous=previous,
+        inferred=inferred,
+        alias_map=alias_map,
+        event_person_hints={},
+    )
+    for title, name in event_person_names.items():
+        person = find_person_by_name(people, name, alias_map=alias_map)
+        if person is not None:
+            person_by_summary[title] = person.person_id
+    return attach_people_to_profile(
+        profile,
+        people=people,
+        calendar_person_by_summary=person_by_summary,
+    )
 
 
 def care_profile_from_holistic(
@@ -533,6 +616,7 @@ def care_profile_from_holistic(
     # Event hints.
     catalog = list(event_titles or [])
     hints: dict[str, str] = {}
+    event_person_names: dict[str, str] = {}
     for ev in inferred.events:
         title = _match_title(ev.summary, catalog) if catalog else (ev.summary or "").strip()
         if not title:
@@ -540,9 +624,11 @@ def care_profile_from_holistic(
         if not title:
             continue
         role = _parse_role(ev.role)
-        if role is None:
-            continue
-        hints[_norm_title(title)] = role.value
+        if role is not None:
+            hints[_norm_title(title)] = role.value
+        who = _canonical_person_name(ev.person, alias_map)
+        if who:
+            event_person_names[_norm_title(title)] = who
 
     # Only the model's explicit first-person life facts — not role/calendar dumps.
     for stmt in inferred.facts[:4]:
@@ -588,6 +674,13 @@ def care_profile_from_holistic(
                 "person_relationships": person_rels or previous.person_relationships,
             }
         )
+        profile = _with_people_profiles(
+            profile,
+            inferred=inferred,
+            previous=previous,
+            alias_map=alias_map,
+            event_person_names=event_person_names,
+        )
         return reconcile_exclusive_people(profile), facts
 
     live_names = {p.lower() for r in roles for p in r.people}
@@ -605,6 +698,13 @@ def care_profile_from_holistic(
         calendar_role_by_summary=hints,
         helpers=list(previous.helpers) if previous else [],
         person_relationships=person_rels,
+    )
+    profile = _with_people_profiles(
+        profile,
+        inferred=inferred,
+        previous=previous,
+        alias_map=alias_map,
+        event_person_names=event_person_names,
     )
     return reconcile_exclusive_people(profile), facts
 
@@ -1268,6 +1368,7 @@ __all__ = [
     "CarePeopleConsolidate",
     "CarePersonAssign",
     "CareRoleInfer",
+    "UsualInferRow",
     "WeekEventClassifyOut",
     "apply_holistic_inference",
     "apply_note_to_care_profile_ai",

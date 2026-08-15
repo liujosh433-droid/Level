@@ -23,6 +23,8 @@ import {
   fetchToday,
   proposeSchedule,
   readTodayCache,
+  resolveUsual,
+  submitSchoolPaper,
   writeTodayCache,
   type CommitmentProposal,
   type TodayView,
@@ -73,7 +75,11 @@ function TodayInner() {
   const [today, setToday] = useState<TodayView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
+  const [paperText, setPaperText] = useState("");
+  const [paperFile, setPaperFile] = useState<File | null>(null);
+  const [paperFileKey, setPaperFileKey] = useState(0);
   const [busy, setBusy] = useState(false);
+  const [canSendEmail, setCanSendEmail] = useState(true);
   const [speaking, setSpeaking] = useState(false);
   const [items, setItems] = useState<ChatItem[]>([]);
   const [booting, setBooting] = useState(true);
@@ -92,6 +98,7 @@ function TodayInner() {
         const [me, data] = await Promise.all([fetchMe(), fetchToday()]);
         setUserId(me.user_id);
         setDisplayName(me.display_name);
+        setCanSendEmail(me.can_send_email !== false);
         if (!me.google_connected && !data.google_connected) {
           router.replace("/sources");
           return;
@@ -239,15 +246,27 @@ function TodayInner() {
 
       // Day reflections / tips → profile + event cues
       const check = await dayCheckIn(text);
-      setItems((prev) => [
-        ...prev,
-        {
-          id: `checkin-${Date.now()}`,
-          kind: "checkin",
-          you: text,
-          reply: check.reply,
-        },
-      ]);
+      const school = check.school_proposals ?? [];
+      if (school.length > 0) {
+        setItems((prev) => [
+          ...prev,
+          ...school.map((proposal) => ({
+            id: proposal.proposal_id,
+            kind: "proposal" as const,
+            proposal,
+          })),
+        ]);
+      } else {
+        setItems((prev) => [
+          ...prev,
+          {
+            id: `checkin-${Date.now()}`,
+            kind: "checkin",
+            you: text,
+            reply: check.reply,
+          },
+        ]);
+      }
       setDraft("");
       void refreshToday();
     } catch (err) {
@@ -275,6 +294,57 @@ function TodayInner() {
         ),
       );
       await refreshToday();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onUsual(
+    usualId: string,
+    action: "put_back" | "exception" | "not_me" | "keep",
+    onDate?: string,
+  ) {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await resolveUsual(usualId, action, onDate);
+      await refreshToday();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onSchoolPaper() {
+    const text = paperText.trim();
+    if ((!text && !paperFile) || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await submitSchoolPaper(text, paperFile);
+      if (res.proposal) {
+        setItems((prev) => [
+          ...prev,
+          { id: res.proposal!.proposal_id, kind: "proposal", proposal: res.proposal! },
+        ]);
+        setPaperText("");
+        setPaperFile(null);
+        setPaperFileKey((k) => k + 1);
+      } else if (res.ask) {
+        setItems((prev) => [
+          ...prev,
+          {
+            id: `paper-${Date.now()}`,
+            kind: "checkin",
+            you: text.slice(0, 160),
+            reply: res.ask ?? "",
+          },
+        ]);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -379,6 +449,21 @@ function TodayInner() {
         <TellLevelReply>
           <p className={styles.proposalSummary}>{item.proposal.summary}</p>
           <p>{item.proposal.level_message}</p>
+          {item.proposal.kind === "school_send" && item.proposal.to_email ? (
+            <div className={styles.emailPreview}>
+              <p>
+                <strong>To:</strong> {item.proposal.to_email}
+              </p>
+              {item.proposal.email_subject ? (
+                <p>
+                  <strong>Subject:</strong> {item.proposal.email_subject}
+                </p>
+              ) : null}
+              {item.proposal.email_body ? (
+                <pre>{item.proposal.email_body}</pre>
+              ) : null}
+            </div>
+          ) : null}
           {item.proposal.conflicts.length > 0 && (
             <ul className={styles.cites}>
               {item.proposal.conflicts.map((c) => (
@@ -395,17 +480,33 @@ function TodayInner() {
           )}
           {item.proposal.status === "pending" && (
             <div className={styles.proposalActions}>
-              {(item.proposal.kind === "add" ||
-                item.proposal.recommended_action === "confirm") && (
+              {item.proposal.kind === "add" &&
+                item.proposal.recommended_action === "confirm" && (
                 <button
                   type="button"
                   className={styles.primaryAction}
                   disabled={busy}
                   onClick={() => void onConfirm(item.proposal)}
                 >
-                  {item.proposal.kind === "availability" ? "Book this time" : "Add anyway"}
+                  Add anyway
                 </button>
               )}
+              {item.proposal.kind === "school_send" &&
+                item.proposal.status === "pending" &&
+                (canSendEmail ? (
+                <button
+                  type="button"
+                  className={styles.primaryAction}
+                  disabled={busy}
+                  onClick={() => void onConfirm(item.proposal)}
+                >
+                  Send
+                </button>
+                ) : (
+                <a href="/sources?need_gmail=1" className={styles.primaryAction}>
+                  Allow sending email on Sources
+                </a>
+                ))}
               {item.proposal.free_slots.slice(0, 3).map((slot) => (
                 <button
                   key={slot.start}
@@ -428,7 +529,11 @@ function TodayInner() {
             </div>
           )}
           {item.proposal.status === "confirmed" && (
-            <p className={styles.meta}>Added to your Google Calendar.</p>
+            <p className={styles.meta}>
+              {item.proposal.kind === "school_send"
+                ? "Sent — the school has it."
+                : "Added to your Google Calendar."}
+            </p>
           )}
           {item.proposal.status === "declined" && (
             <p className={styles.meta}>Okay — left off the calendar.</p>
@@ -467,6 +572,7 @@ function TodayInner() {
                   title="Ask Level"
                   lead="How’s the day going - or facing a hard call? Level can weigh it with you using your calendar, learned priorities, and interactions. It can also
                   book events for you!"
+                  placeholder="How’s the day going — or is someone home sick?"
                   value={draft}
                   onChange={setDraft}
                   onSubmit={onAsk}
@@ -488,6 +594,38 @@ function TodayInner() {
                   {items.length > 0 ? chatThread : null}
                 </TellLevelPanel>
               </div>
+              <RailSection title="School notes">
+                <p className={styles.meta}>
+                  Upload or paste a slip — Level holds the deadline and drafts the school email.
+                  Or tell Level someone is home sick for the attendance note. You Run the send.
+                </p>
+                <label className={styles.paperFile}>
+                  <input
+                    key={paperFileKey}
+                    type="file"
+                    accept="application/pdf,image/*,.txt"
+                    disabled={busy || !userId}
+                    onChange={(e) => setPaperFile(e.target.files?.[0] ?? null)}
+                  />
+                  <span>{paperFile ? paperFile.name : "Upload a PDF or photo"}</span>
+                </label>
+                <textarea
+                  className={styles.paperInput}
+                  rows={3}
+                  value={paperText}
+                  onChange={(e) => setPaperText(e.target.value)}
+                  placeholder="Or paste the form text…"
+                  disabled={busy || !userId}
+                />
+                <button
+                  type="button"
+                  className={styles.secondaryAction}
+                  disabled={busy || (!paperText.trim() && !paperFile)}
+                  onClick={() => void onSchoolPaper()}
+                >
+                  Hold the deadline
+                </button>
+              </RailSection>
               <div className={styles.graphBlock}>
                 <CareLoadGraph
                   graph={today?.care_graph}
@@ -512,7 +650,7 @@ function TodayInner() {
                 ) : null}
                 <h1 className={styles.title}>
                   Hi {name || "there"}
-                  {weekday ? `, happy ${weekday}` : ""}!
+                  {weekday ? `, Happy ${weekday}` : ""}!
                 </h1>
                 {today.holding && today.holding.length > 0 ? (
                   <p className={styles.holdingLine}>
@@ -541,6 +679,76 @@ function TodayInner() {
             )}
           </div>
         </div>
+
+        {today?.proposed_usuals && today.proposed_usuals.length > 0 && (
+          <div className={styles.bannerStack}>
+            {today.proposed_usuals.map((usual) => (
+              <div key={usual.usual_id} className={styles.banner}>
+                <p>
+                  <strong>Usual?</strong> {usual.label}
+                  {usual.display_name ? ` for ${usual.display_name}` : ""}
+                  {usual.your_role ? ` — you’re the ${usual.your_role}` : ""}.
+                </p>
+                <div className={styles.bannerActions}>
+                  <button
+                    type="button"
+                    className={styles.primaryAction}
+                    disabled={busy}
+                    onClick={() => void onUsual(usual.usual_id, "keep")}
+                  >
+                    Keep
+                  </button>
+                  <button
+                    type="button"
+                    className={styles.ghostAction}
+                    disabled={busy}
+                    onClick={() => void onUsual(usual.usual_id, "not_me")}
+                  >
+                    Not me
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {today?.usual_gaps && today.usual_gaps.length > 0 && (
+          <div className={styles.bannerStack}>
+            {today.usual_gaps.map((gap) => (
+              <div key={`${gap.usual_id}-${gap.on_date}`} className={styles.banner}>
+                <p>
+                  <strong>Missing usual:</strong> {gap.banner}
+                </p>
+                <div className={styles.bannerActions}>
+                  <button
+                    type="button"
+                    className={styles.primaryAction}
+                    disabled={busy}
+                    onClick={() => void onUsual(gap.usual_id, "put_back", gap.on_date)}
+                  >
+                    Put it back
+                  </button>
+                  <button
+                    type="button"
+                    className={styles.secondaryAction}
+                    disabled={busy}
+                    onClick={() => void onUsual(gap.usual_id, "exception", gap.on_date)}
+                  >
+                    This week is different
+                  </button>
+                  <button
+                    type="button"
+                    className={styles.ghostAction}
+                    disabled={busy}
+                    onClick={() => void onUsual(gap.usual_id, "not_me", gap.on_date)}
+                  >
+                    Not me
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
 
         {today?.pending_challenges && today.pending_challenges.length > 0 && (
           <div className={styles.banner}>

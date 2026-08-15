@@ -16,17 +16,22 @@ from level_api.dependencies import (
     get_proposal_store,
     get_token_store,
 )
+from level_core.auth.google_oauth import refresh_token_grant, token_has_gmail_send
 from level_core.auth.tokens import TokenStore
-from level_core.calendar.agenda_sync import inject_event_into_agenda_cache, refresh_agenda_cache
+from level_core.calendar.agenda_sync import (
+    inject_event_into_agenda_cache,
+    mark_events_cancelled_in_cache,
+    refresh_agenda_cache,
+)
 from level_core.calendar.commitment_gate import apply_draft_to_window, propose_from_text
 from level_core.calendar.proposals import ProposalStore
 from level_core.calendar.sync_state import CalendarSyncStore
 from level_core.config import get_settings
-from level_core.ingest.google_live import create_calendar_event
+from level_core.ingest.google_live import cancel_calendar_event, create_calendar_event, send_gmail
 from level_core.memory.base import MemoryBank
 from level_core.models.factory import build_gemini_client
 from level_core.observability.logger import get_logger
-from level_core.schemas.commitment import CommitmentProposal, ProposalStatus
+from level_core.schemas.commitment import CommitmentKind, CommitmentProposal, ProposalStatus
 from level_core.schemas.signal import Fact, FactType, Signal, SignalSource
 
 _logger = get_logger(__name__)
@@ -112,6 +117,17 @@ async def confirm_proposal(
     token = await tokens.get_google_token(user_id)
     if token is None:
         raise HTTPException(status_code=400, detail="Google Calendar disconnected — reconnect on Sources.")
+
+    if proposal.kind is CommitmentKind.SCHOOL_SEND:
+        return await _confirm_school_send(
+            proposal,
+            user_id=user_id,
+            token=token,
+            tokens=tokens,
+            store=store,
+            sync_store=sync_store,
+            background_tasks=background_tasks,
+        )
 
     start, end = apply_draft_to_window(
         proposal.draft, slot_start_iso=payload.use_slot_start
@@ -254,6 +270,126 @@ async def get_proposal(
     if proposal is None or proposal.user_id != user_id:
         raise HTTPException(status_code=404, detail="Proposal not found.")
     return proposal
+
+
+_GMAIL_SEND_MISSING = (
+    "Google is connected, but this account still doesn’t have Send email. "
+    "Enable the Gmail API, add gmail.send on the OAuth consent screen, then "
+    "reconnect on Sources and leave Send email checked."
+)
+
+
+async def _confirm_school_send(
+    proposal: CommitmentProposal,
+    *,
+    user_id: str,
+    token: object,
+    tokens: TokenStore,
+    store: ProposalStore,
+    sync_store: CalendarSyncStore,
+    background_tasks: BackgroundTasks,
+) -> ConfirmResponse:
+    if not (proposal.to_email or "").strip() or "@" not in proposal.to_email:
+        raise HTTPException(
+            status_code=400,
+            detail="Add the school email on this person before sending.",
+        )
+    try:
+        token = await asyncio.to_thread(refresh_token_grant, token)
+        await tokens.upsert_token(token)  # type: ignore[arg-type]
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning("gmail_grant_refresh_failed", error=str(exc))
+    scopes = getattr(token, "scopes", None)
+    if scopes and not token_has_gmail_send(scopes):
+        raise HTTPException(status_code=403, detail=_GMAIL_SEND_MISSING)
+    try:
+        await send_gmail(
+            token,  # type: ignore[arg-type]
+            to=proposal.to_email.strip(),
+            subject=proposal.email_subject or proposal.summary,
+            body=proposal.email_body or proposal.draft.notes,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        detail = str(exc)
+        if "insufficient" in detail.lower() or "scope" in detail.lower() or "403" in detail:
+            raise HTTPException(status_code=403, detail=_GMAIL_SEND_MISSING) from exc
+        raise HTTPException(status_code=502, detail=f"Email send failed: {detail}") from exc
+
+    cancelled: list[str] = []
+    for event_id in proposal.cancel_event_ids:
+        if not event_id:
+            continue
+        try:
+            await cancel_calendar_event(token, event_id=event_id)  # type: ignore[arg-type]
+            cancelled.append(event_id)
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning(
+                "school_cancel_failed",
+                user_id=user_id,
+                event_id=event_id,
+                error=str(exc),
+            )
+    if cancelled:
+        try:
+            await mark_events_cancelled_in_cache(
+                user_id=user_id, sync_store=sync_store, event_ids=cancelled
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    event_id = None
+    html_link = None
+    created: dict = {}
+    if proposal.hold_on_calendar and proposal.draft.local_date:
+        start, end = apply_draft_to_window(proposal.draft)
+        try:
+            created = await create_calendar_event(
+                token,  # type: ignore[arg-type]
+                summary=proposal.draft.title,
+                start=start,
+                end=end,
+                timezone_name=proposal.draft.timezone,
+                description=proposal.draft.notes or proposal.email_subject,
+            )
+            event_id = created.get("id")
+            html_link = created.get("htmlLink")
+            tz_name = proposal.draft.timezone or "America/Los_Angeles"
+            wall_tz = ZoneInfo(tz_name)
+            await inject_event_into_agenda_cache(
+                user_id=user_id,
+                sync_store=sync_store,
+                google_event={
+                    "id": event_id or f"level:{proposal.proposal_id}",
+                    "summary": proposal.draft.title,
+                    "status": "confirmed",
+                    "start": {
+                        "dateTime": start.astimezone(wall_tz).isoformat(timespec="seconds"),
+                        "timeZone": tz_name,
+                    },
+                    "end": {
+                        "dateTime": end.astimezone(wall_tz).isoformat(timespec="seconds"),
+                        "timeZone": tz_name,
+                    },
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("school_hold_write_failed", user_id=user_id, error=str(exc))
+
+    proposal.status = ProposalStatus.CONFIRMED
+    proposal.google_event_id = event_id
+    proposal.resolved_at = datetime.now(tz=timezone.utc)
+    proposal.touch()
+    await store.save(proposal)
+    background_tasks.add_task(
+        refresh_agenda_cache, user_id=user_id, token=token, sync_store=sync_store
+    )
+    return ConfirmResponse(
+        proposal=proposal,
+        google_event_id=event_id,
+        html_link=html_link,
+    )
 
 
 __all__ = ["router"]

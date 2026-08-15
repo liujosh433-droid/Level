@@ -15,7 +15,17 @@ from level_api.dependencies import (
     cached_registry,
     cached_settings,
 )
-from level_api.routes import auth, calendar, health, ingest, observability, sessions, sources, today
+from level_api.routes import (
+    auth,
+    calendar,
+    care_actions,
+    health,
+    ingest,
+    observability,
+    sessions,
+    sources,
+    today,
+)
 from level_api.telemetry import instrument_app
 from level_core.agents.conductor import register_all_agents
 from level_core.models.factory import build_embedding_client
@@ -83,6 +93,7 @@ def create_app() -> FastAPI:
     app.include_router(ingest.router)
     app.include_router(sources.router)
     app.include_router(today.router)
+    app.include_router(care_actions.router)
     app.include_router(calendar.router)
     app.include_router(observability.router)
     return app

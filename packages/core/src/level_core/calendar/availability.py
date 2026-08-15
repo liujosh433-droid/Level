@@ -58,10 +58,32 @@ def _overlaps(a0: datetime, a1: datetime, b0: datetime, b1: datetime) -> bool:
     return a0 < b1 and b0 < a1
 
 
+def _clock(local: datetime) -> str:
+    hour = local.strftime("%I").lstrip("0") or "12"
+    return f"{hour}:{local.strftime('%M')}{local.strftime('%p').lower()}"
+
+
+def _day_part(local: datetime) -> str:
+    return f"{local.strftime('%a')} {local.strftime('%b')} {local.day}"
+
+
 def _label_local(dt: datetime, tz_name: str) -> str:
     local = dt.astimezone(ZoneInfo(tz_name))
-    hour = local.strftime("%I").lstrip("0") or "12"
-    return f"{local.strftime('%a')} {hour}:{local.strftime('%M')}{local.strftime('%p').lower()}"
+    return f"{_day_part(local)}, {_clock(local)}"
+
+
+def _label_range(start: datetime, end: datetime, tz_name: str) -> str:
+    """One date + a time range, e.g. 'Wed Aug 26, 8:00–9:00am'."""
+    s = start.astimezone(ZoneInfo(tz_name))
+    e = end.astimezone(ZoneInfo(tz_name))
+    if s.date() != e.date():
+        return f"{_label_local(start, tz_name)}–{_label_local(end, tz_name)}"
+    sh = s.strftime("%I").lstrip("0") or "12"
+    eh = e.strftime("%I").lstrip("0") or "12"
+    sap, eap = s.strftime("%p").lower(), e.strftime("%p").lower()
+    if sap == eap:
+        return f"{_day_part(s)}, {sh}:{s.strftime('%M')}–{eh}:{e.strftime('%M')}{eap}"
+    return f"{_day_part(s)}, {sh}:{s.strftime('%M')}{sap}–{eh}:{e.strftime('%M')}{eap}"
 
 
 def _is_all_day(event: dict[str, Any]) -> bool:
@@ -162,7 +184,7 @@ def find_free_slots(
                 FreeSlot(
                     start=cursor.isoformat(),
                     end=end.isoformat(),
-                    label=f"{_label_local(cursor, timezone_name)}–{_label_local(end, timezone_name).split()[-1]}",
+                    label=_label_range(cursor, end, timezone_name),
                 )
             )
             cursor += step
@@ -173,7 +195,7 @@ def find_free_slots(
             FreeSlot(
                 start=cursor.isoformat(),
                 end=end.isoformat(),
-                label=f"{_label_local(cursor, timezone_name)}–{_label_local(end, timezone_name).split()[-1]}",
+                label=_label_range(cursor, end, timezone_name),
             )
         )
         cursor += step

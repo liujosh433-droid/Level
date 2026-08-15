@@ -19,8 +19,10 @@ from level_core.schemas.care import (
     CareRoleId,
     CareRoleState,
     ProtectedWindow,
+    active_care_people,
     active_care_roles,
     clean_conflict_summaries,
+    is_self_person,
 )
 from level_core.schemas.profile import (
     BulletCategory,
@@ -29,6 +31,8 @@ from level_core.schemas.profile import (
     ProfileBullet,
     ProfileSnapshot,
 )
+from level_core.profile.care_infer_llm import reconcile_exclusive_people
+from level_core.profile.people_usuals import hydrate_people_from_roles
 from level_core.schemas.signal import Fact, FactType
 
 _TOKEN = re.compile(r"[a-z0-9]{3,}")
@@ -849,7 +853,7 @@ def merge_people_into_care_profile(
 ) -> CareProfile:
     """Union person anchors into matching roles; create thin roles if missing."""
     if not mentions:
-        return profile
+        return hydrate_people_from_roles(profile)
     by_id = {r.role_id: r for r in profile.roles}
     changed = False
     for role_id, names in mentions.items():
@@ -873,14 +877,15 @@ def merge_people_into_care_profile(
             by_id[role_id] = existing.model_copy(update={"people": merged})
             changed = True
     if not changed:
-        return profile
-    return profile.model_copy(
+        return hydrate_people_from_roles(profile)
+    updated = profile.model_copy(
         update={
             "roles": list(by_id.values()),
             "version": profile.version + 1,
             "updated_at": datetime.now(tz=timezone.utc),
         }
     )
+    return hydrate_people_from_roles(updated)
 
 
 def classify_calendar_event(summary: str) -> CareRoleId | None:
@@ -1230,8 +1235,6 @@ def build_care_graph(
     """Care graph: caregiver roots (You + helpers) → dependents / domain loads."""
     # Prefer AI people assignment already on the profile; still enforce exclusivity.
     if profile is not None:
-        from level_core.profile.care_infer_llm import reconcile_exclusive_people
-
         profile = reconcile_exclusive_people(profile)
 
     roles = active_care_roles(profile)
@@ -1268,6 +1271,12 @@ def build_care_graph(
         return None
 
     rel_map = dict(profile.person_relationships) if profile else {}
+    self_names = {
+        p.display_name.strip().lower()
+        for p in active_care_people(profile)
+        if is_self_person(p) and p.display_name.strip()
+    }
+    self_names.update({"you", "me", "myself"})
 
     def _person_rel(name: str) -> str | None:
         if not name:
@@ -1321,6 +1330,8 @@ def build_care_graph(
         if role.role_id is CareRoleId.CHILD_CARE:
             if role.people:
                 for person in role.people[:3]:
+                    if person.strip().lower() in self_names:
+                        continue
                     nid = f"child-{person.lower()}"
                     pref = _person_rel(person)
                     _add(
@@ -1359,6 +1370,8 @@ def build_care_graph(
         elif role.role_id is CareRoleId.ELDER_CARE:
             labels = role.people[:2] or ["Elder care"]
             for person in labels:
+                if role.people and person.strip().lower() in self_names:
+                    continue
                 nid = f"elder-{person.lower().replace(' ', '-')}"
                 pref = _person_rel(person) if role.people else None
                 _add(
@@ -1670,13 +1683,14 @@ def adjust_care_profile_from_note(profile: CareProfile, note: str) -> CareProfil
                 evidence_summaries=[note.strip()[:200]],
                 people=names[:4],
             )
-    return profile.model_copy(
+    updated = profile.model_copy(
         update={
             "roles": list(by_id.values()),
             "version": profile.version + 1,
             "updated_at": datetime.now(tz=timezone.utc),
         }
     )
+    return hydrate_people_from_roles(updated)
 
 
 def infer_care_profile_heuristic(
@@ -1991,7 +2005,7 @@ def _infer_care_profile_heuristic_impl(
         updated_at=datetime.now(tz=timezone.utc),
         conflict_summaries=list(previous.conflict_summaries) if previous else [],
     )
-    return profile, unique[:8]
+    return hydrate_people_from_roles(profile), unique[:8]
 
 
 def infer_priority_facts(

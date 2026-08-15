@@ -17,8 +17,10 @@ from level_api.dependencies import (
     get_calendar_sync_store,
     get_event_cue_store,
     get_memory,
+    get_proposal_store,
     get_token_store,
 )
+from level_api.routes.care_actions import propose_sick_day_notes
 from level_api.routes.sources import (
     _bg_enrich_care,
     _seed_care_from_agenda_fast,
@@ -27,6 +29,10 @@ from level_core.auth.tokens import TokenStore
 from level_core.calendar.activity_art import activity_color, infer_activity_kind
 from level_core.calendar.agenda_sync import day_events_cached_or_live, refresh_agenda_cache
 from level_core.calendar.event_cues import EventCue, EventCueStore, match_cues_for_summary
+from level_core.calendar.proposals import ProposalStore
+from level_core.calendar.usuals import find_usual_gaps, horizon_dates
+from level_core.schemas.care import pending_usuals
+from level_core.schemas.commitment import CommitmentProposal
 from level_core.calendar.sync_state import (
     CalendarSyncStore,
     events_for_local_day,
@@ -107,6 +113,31 @@ class WeekRoleLoad(BaseModel):
     minutes: int = 0
 
 
+class UsualGapOut(BaseModel):
+    usual_id: str
+    person_id: str
+    display_name: str
+    your_role: str = ""
+    their_relation: str = ""
+    label: str
+    on_date: str
+    weekday: int
+    start_minute: int
+    end_minute: int
+    banner: str
+
+
+class ProposedUsualOut(BaseModel):
+    usual_id: str
+    person_id: str
+    display_name: str
+    your_role: str = ""
+    label: str
+    weekday: int
+    start_minute: int
+    end_minute: int
+
+
 class TodayResponse(BaseModel):
     user_id: str
     display_name: str | None = None
@@ -126,6 +157,8 @@ class TodayResponse(BaseModel):
     holding: list[HoldingChip] = Field(default_factory=list)
     week_load: list[WeekRoleLoad] = Field(default_factory=list)
     conflict_summaries: list[str] = Field(default_factory=list)
+    usual_gaps: list[UsualGapOut] = Field(default_factory=list)
+    proposed_usuals: list[ProposedUsualOut] = Field(default_factory=list)
 
 
 class DayCheckInRequest(BaseModel):
@@ -137,6 +170,7 @@ class DayCheckInResponse(BaseModel):
     facts_added: int = 0
     cues_added: int = 0
     today: TodayResponse | None = None
+    school_proposals: list[CommitmentProposal] = Field(default_factory=list)
 
 
 class _CheckInParse(BaseModel):
@@ -148,6 +182,12 @@ class _CheckInParse(BaseModel):
     matched_titles: list[str] = Field(default_factory=list)
     # When the note is about job/work, set paid_work so we can tag those events.
     care_role: str = ""
+    is_sick_day: bool = False
+    notify_contact: bool = False
+    sick_person_names: list[str] = Field(default_factory=list)
+    contact_role: str = ""
+    email_subject: str = ""
+    email_body: str = ""
 
 
 class _TomorrowLLM(BaseModel):
@@ -168,6 +208,50 @@ def _day_labels(day: datetime) -> tuple[str, str]:
 def _greeting_labels(now: datetime | None = None) -> tuple[str, str]:
     local = now or _local_now()
     return _day_labels(local)
+
+
+def _usual_views(care, agenda_events: list[dict]) -> tuple[list[UsualGapOut], list[ProposedUsualOut]]:
+    gaps_out: list[UsualGapOut] = []
+    proposed: list[ProposedUsualOut] = []
+    if care is None:
+        return gaps_out, proposed
+    today_local = _local_now().date()
+    for gap in find_usual_gaps(
+        care=care,
+        events=agenda_events,
+        on_dates=horizon_dates(start=today_local, days=7),
+    ):
+        gaps_out.append(
+            UsualGapOut(
+                usual_id=gap.usual_id,
+                person_id=gap.person_id,
+                display_name=gap.display_name,
+                your_role=gap.your_role,
+                their_relation=gap.their_relation,
+                label=gap.label,
+                on_date=gap.on_date.isoformat(),
+                weekday=gap.weekday,
+                start_minute=gap.start_minute,
+                end_minute=gap.end_minute,
+                banner=gap.banner(),
+            )
+        )
+        if len(gaps_out) >= 6:
+            break
+    for person, usual in pending_usuals(care)[:6]:
+        proposed.append(
+            ProposedUsualOut(
+                usual_id=usual.usual_id,
+                person_id=person.person_id,
+                display_name=person.display_name,
+                your_role=person.your_role,
+                label=usual.label,
+                weekday=usual.weekday,
+                start_minute=usual.start_minute,
+                end_minute=usual.end_minute,
+            )
+        )
+    return gaps_out, proposed
 
 
 def _first_name(display_name: str | None) -> str:
@@ -469,8 +553,9 @@ async def get_today(
     holding: list[HoldingChip] = []
     week_load: list[WeekRoleLoad] = []
     conflict_summaries: list[str] = []
+    agenda_events: list[dict] = []
     try:
-        agenda_events: list[dict] = [
+        agenda_events = [
             {
                 "summary": e.summary,
                 "start": e.start,
@@ -565,6 +650,19 @@ async def get_today(
     except Exception:  # noqa: BLE001
         _logger.warning("care_graph_failed", user_id=user_id)
 
+    usual_gaps: list[UsualGapOut] = []
+    proposed_usuals: list[ProposedUsualOut] = []
+    try:
+        gap_events = agenda_events if care is not None else []
+        usual_gaps, proposed_usuals = _usual_views(care, gap_events)
+        if proposed_usuals:
+            needs_review_usuals = True
+        else:
+            needs_review_usuals = False
+    except Exception:  # noqa: BLE001
+        _logger.warning("usual_gaps_failed", user_id=user_id)
+        needs_review_usuals = False
+
     return TodayResponse(
         user_id=user_id,
         display_name=display_name,
@@ -576,7 +674,9 @@ async def get_today(
         recommendations=recs,
         tomorrow=tomorrow,
         profile_ready=bool(snapshot and snapshot.bullets),
-        needs_review=bool(snapshot.needs_review) if snapshot else False,
+        needs_review=bool((snapshot.needs_review if snapshot else False) or needs_review_usuals),
+        usual_gaps=usual_gaps,
+        proposed_usuals=proposed_usuals,
         fact_count=len(facts),
         manifesto=manifesto.statement if manifesto else None,
         pending_challenges=pending,
@@ -596,6 +696,7 @@ async def day_check_in(
     tokens: TokenStore = Depends(get_token_store),
     cue_store: EventCueStore = Depends(get_event_cue_store),
     sync_store: CalendarSyncStore = Depends(get_calendar_sync_store),
+    store: ProposalStore = Depends(get_proposal_store),
 ) -> DayCheckInResponse:
     """Friendly day check-in → profile fact + optional event-linked reminder."""
     settings = get_settings()
@@ -604,9 +705,10 @@ async def day_check_in(
 
     # Today's titles help the model attach reminders to real calendar events.
     agenda_titles: list[str] = []
-    token, state = await asyncio.gather(
+    token, state, user = await asyncio.gather(
         tokens.get_google_token(user_id),
         sync_store.get(user_id),
+        tokens.get_user(user_id),
     )
     try:
         if token is not None:
@@ -657,6 +759,14 @@ async def day_check_in(
                     "self_recovery.\n"
                     "- reminder: short warm nudge shown on matching days.\n"
                     "- reply: 1 short warm sentence (complete — do not trail off).\n"
+                    "- is_sick_day: true when they say someone already on the "
+                    "care list is home sick / absent from school today.\n"
+                    "- notify_contact: true when they ask to email a saved role "
+                    "(teacher, doctor, attendance, …).\n"
+                    "- sick_person_names: names they used (copy from their words; "
+                    "empty if they said 'the kids' without naming).\n"
+                    "- contact_role: the role to email (teacher, doctor, …) or empty.\n"
+                    "Do not write email_subject or email_body — Level drafts the note.\n"
                     "JSON only."
                 ),
                 prompt=(
@@ -773,12 +883,55 @@ async def day_check_in(
     if cues_added and keywords:
         reply = f"{reply} I’ll nudge you on {keywords[0]} days."
 
+    school_proposals: list[CommitmentProposal] = []
+    if parsed.is_sick_day or parsed.notify_contact:
+        try:
+            if care is None:
+                care = await memory.manifestos.get_care_profile(user_id=user_id)
+            sick_events: list[dict[str, str | None]] = []
+            if state and state.events:
+                sick_events = [
+                    {
+                        "id": ev.id,
+                        "summary": ev.summary,
+                        "start": ev.start,
+                        "end": ev.end,
+                        "status": ev.status,
+                    }
+                    for ev in state.events.values()
+                    if ev.summary
+                ]
+            if care is not None:
+                school_proposals, ask = await propose_sick_day_notes(
+                    user_id=user_id,
+                    user_text=message,
+                    care=care,
+                    named=list(parsed.sick_person_names),
+                    events=sick_events,
+                    store=store,
+                    contact_role=parsed.contact_role or "teacher",
+                    cancel_today=parsed.is_sick_day,
+                    from_name=(
+                        ""
+                        if (sign := _first_name(user.display_name if user else None))
+                        == "there"
+                        else sign
+                    ),
+                )
+                if ask:
+                    reply = ask
+                elif school_proposals:
+                    reply = school_proposals[0].level_message or reply
+        except Exception:  # noqa: BLE001
+            _logger.warning("sick_day_propose_failed", user_id=user_id)
+
     # Reply first — full Today rebuild was adding 1–2s after Gemini already ran.
     return DayCheckInResponse(
         reply=reply,
         facts_added=facts_added,
         cues_added=cues_added,
         today=None,
+        school_proposals=school_proposals,
     )
 
 

@@ -216,7 +216,7 @@ def _pull_calendar_sync(
     """Blocking Google list + filter (run via ``asyncio.to_thread``)."""
     service = _calendar_service(token)
     now = datetime.now(tz=timezone.utc)
-    window_start, window_end = calendar_window(now)
+    window_start, window_end = calendar_window(now, days_back=42)
     raw = _list_primary_events(
         service,
         time_min=window_start.isoformat(),
@@ -345,6 +345,52 @@ async def create_calendar_event(
         description=description,
         by_days=by_days,
     )
+
+
+def _gmail_service(token: OAuthToken) -> Any:
+    creds = credentials_from_token(token)
+    return build("gmail", "v1", credentials=creds, cache_discovery=False)
+
+
+def _send_gmail_sync(
+    token: OAuthToken,
+    *,
+    to: str,
+    subject: str,
+    body: str,
+) -> dict[str, Any]:
+    import base64
+    from email.mime.text import MIMEText
+
+    message = MIMEText(body or "", "plain", "utf-8")
+    message["To"] = to
+    message["Subject"] = subject
+    raw = base64.urlsafe_b64encode(message.as_bytes()).decode("ascii")
+    service = _gmail_service(token)
+    return service.users().messages().send(userId="me", body={"raw": raw}).execute()
+
+
+async def send_gmail(
+    token: OAuthToken,
+    *,
+    to: str,
+    subject: str,
+    body: str,
+) -> dict[str, Any]:
+    """Send one institutional email. Caller must Hold/Run first."""
+    return await asyncio.to_thread(
+        _send_gmail_sync, token, to=to, subject=subject, body=body
+    )
+
+
+def _cancel_calendar_event_sync(token: OAuthToken, *, event_id: str) -> None:
+    service = _calendar_service(token)
+    service.events().delete(calendarId="primary", eventId=event_id).execute()
+
+
+async def cancel_calendar_event(token: OAuthToken, *, event_id: str) -> None:
+    """Delete one instance. Does not invent coverage."""
+    await asyncio.to_thread(_cancel_calendar_event_sync, token, event_id=event_id)
 
 
 async def fetch_day_events(
@@ -489,7 +535,7 @@ async def pull_calendar_incremental(
     token: OAuthToken,
     *,
     sync_token: str | None = None,
-    days_back: int = 14,
+    days_back: int = 42,
     days_forward: int = 28,
 ) -> IncrementalCalendarPull:
     """List primary events; with ``sync_token`` returns only deltas.
@@ -582,6 +628,7 @@ __all__ = [
     "IncrementalCalendarPull",
     "SyncTokenExpiredError",
     "calendar_window",
+    "cancel_calendar_event",
     "create_calendar_event",
     "fetch_calendar_signals",
     "fetch_day_events",
@@ -590,6 +637,7 @@ __all__ = [
     "list_primary_events_window",
     "pull_calendar",
     "pull_calendar_incremental",
+    "send_gmail",
     "stop_calendar_channel",
     "watch_primary_calendar",
 ]

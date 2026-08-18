@@ -19,6 +19,10 @@ _pending_drafts: dict[str, dict[str, Any]] = {}
 _sent_idempotency: dict[str, float] = {}
 
 
+def register_pending_draft(token: str, to: str | None) -> None:
+    _pending_drafts[token] = {"to": to, "at": time.time()}
+
+
 class DraftBody(BaseModel):
     intent: str
     contact_id: str
@@ -45,12 +49,7 @@ async def draft(body: DraftBody, store: UserStore = Depends(get_user_store)) -> 
         kid_display_name=person.display_name if person else None,
         extra_notes=body.extra_notes,
     )
-    if not drafted:
-        raise HTTPException(status_code=502, detail="agent_failed")
-    _pending_drafts[drafted.confirmation_token] = {
-        "to": contact.email,
-        "at": time.time(),
-    }
+    register_pending_draft(drafted.confirmation_token, contact.email)
     return {
         "subject": drafted.subject,
         "body": drafted.body,
@@ -77,6 +76,12 @@ async def send(
     pending = _pending_drafts.pop(body.confirmation_token, None)
     if not pending:
         raise HTTPException(status_code=400, detail="unknown_confirmation_token")
+
+    profile = dict(await store.profile.read() or {})
+    draft_meta = profile.get("pending_email_draft")
+    if isinstance(draft_meta, dict) and draft_meta.get("confirmation_token") == body.confirmation_token:
+        profile.pop("pending_email_draft", None)
+        await store.profile.write(profile)
 
     sent = await send_email(
         store,

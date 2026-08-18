@@ -6,6 +6,7 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime
 
+from level_core.calendar.google_client import build_calendar_client
 from level_core.storage.base import UserStore
 
 
@@ -25,8 +26,6 @@ async def book_event(
     calendar_id: str = "primary",
     location: str | None = None,
 ) -> BookedEvent:
-    from level_core.calendar.google_client import build_calendar_client
-
     service = await build_calendar_client(store)
     body = {
         "summary": summary,
@@ -46,3 +45,45 @@ async def book_event(
         service.events().insert(calendarId=calendar_id, body=body).execute
     )
     return BookedEvent(event_id=inserted["id"], html_link=inserted.get("htmlLink", ""))
+
+
+async def move_event(
+    store: UserStore,
+    *,
+    event_id: str,
+    start: datetime,
+    end: datetime,
+    calendar_id: str = "primary",
+) -> BookedEvent:
+    """Patch an existing event's start/end. Title and other fields stay put."""
+    service = await build_calendar_client(store)
+    body = {
+        "start": {"dateTime": start.isoformat()},
+        "end": {"dateTime": end.isoformat()},
+    }
+    updated = await asyncio.to_thread(
+        service.events()
+        .patch(calendarId=calendar_id, eventId=event_id, body=body)
+        .execute
+    )
+    return BookedEvent(event_id=updated["id"], html_link=updated.get("htmlLink", ""))
+
+
+async def delete_event(
+    store: UserStore,
+    *,
+    event_id: str,
+    calendar_id: str = "primary",
+) -> None:
+    """Delete an event from Google Calendar. 404 is treated as already gone."""
+    service = await build_calendar_client(store)
+    try:
+        await asyncio.to_thread(
+            service.events().delete(calendarId=calendar_id, eventId=event_id).execute
+        )
+    except Exception as err:
+        status = getattr(err, "status_code", None) or getattr(err, "resp", None)
+        code = getattr(status, "status", None) if status is not None and not isinstance(status, int) else status
+        if code == 404 or "404" in str(err):
+            return
+        raise

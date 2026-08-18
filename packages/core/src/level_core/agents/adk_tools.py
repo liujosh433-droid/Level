@@ -19,6 +19,7 @@ from level_core.agents import (
     summary,
     usual,
 )
+from level_core.config import get_settings
 from level_core.storage.factory import get_store
 
 TOOLS: dict[str, Any] = {
@@ -56,7 +57,7 @@ def build_level_agent() -> Any:
 
     return LlmAgent(
         name="LevelAgent",
-        model="gemini-3.5-pro",
+        model=get_settings().level_model_pro,
         description="Caregiver partner orchestrating calendar sync, usuals, priorities, reminders, and email drafting.",
         instruction=(
             "You are Level. Use the available tools to help a busy caregiver."

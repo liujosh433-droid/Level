@@ -36,7 +36,9 @@ Given a compressed rollup of the user's recurring events, propose the humans
 this user cares for. Never invent people. Prefer first-name evidence from
 event summaries; treat 'me' / 'my' as self.
 
-Do NOT re-propose anyone listed under <negatives>."""
+Do NOT re-propose anyone already listed under <known_people> - they are locked
+in by the user. Do NOT re-propose anyone listed under <negatives> - the user
+already rejected those classifications."""
 
 
 async def run(
@@ -46,9 +48,16 @@ async def run(
     self_hint: str | None = None,
 ) -> AgentResult:
     negatives = await recent_negatives(store, agent=NegativeAgent.ROLE, limit=20)
+    people = await store.people.list()
+    known = [
+        {"display_name": p.display_name, "relation": p.relation.value, "is_self": p.is_self}
+        for p in people
+        if p.status in ("kept", "proposed") and not p.is_self
+    ]
     context = {
         "rollup": calendar_rollup,
         "self_hint": self_hint,
+        "known_people": known,
         "negatives": [{"field": n.field, "value": n.value} for n in negatives],
         "generated_at": datetime.utcnow().isoformat(),
     }

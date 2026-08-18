@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import secrets
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -22,6 +24,7 @@ from zoneinfo import ZoneInfo
 
 from dateutil import parser as date_parser
 
+from level_core.calendar.google_client import build_calendar_client
 from level_core.config import get_settings
 from level_core.observability import get_logger, span
 from level_core.schemas import CachedEvent, DailyAgenda, EventTime
@@ -48,8 +51,6 @@ async def refresh_agenda(store: UserStore, *, calendar_id: str = "primary") -> R
     time_max = now + timedelta(days=settings.level_cal_days_forward)
 
     with span("calendar.refresh", user=store.user_id, calendar=calendar_id):
-        from level_core.calendar.google_client import build_calendar_client
-
         service = await build_calendar_client(store)
         events_page = await asyncio.to_thread(
             _list_events,
@@ -255,14 +256,9 @@ async def ensure_watch(store: UserStore, *, calendar_id: str = "primary") -> boo
         logger.info("calendar.watch.skipped", reason="no_public_https_url")
         return False
 
-    from level_core.calendar.google_client import build_calendar_client
-
     service = await build_calendar_client(store)
-    import secrets as _s
-    import uuid as _u
-
-    channel_id = f"level-{_u.uuid4().hex[:12]}"
-    channel_token = _s.token_urlsafe(24)
+    channel_id = f"level-{uuid.uuid4().hex[:12]}"
+    channel_token = secrets.token_urlsafe(24)
     webhook_url = f"{settings.level_public_api_url.rstrip('/')}/v1/calendar/webhook"
 
     body = {

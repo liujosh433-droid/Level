@@ -199,7 +199,8 @@ export default function ContactsPage() {
         <p className={styles.sub}>
           The people Level can email on your behalf. Kids get a teacher and a
           doctor by default &mdash; add any other role you need. On Today, say
-          &ldquo;email her teacher&rdquo; and Level drafts a preview first.
+          &ldquo;email Nova&rsquo;s teacher&rdquo; and Level drafts a preview
+          in chat. If there are two, it will ask which one.
         </p>
       </header>
 

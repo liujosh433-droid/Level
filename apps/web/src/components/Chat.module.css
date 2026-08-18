@@ -1,10 +1,13 @@
 .panel {
   display: flex;
   flex-direction: column;
+  /* Fill the parent (rail) when it constrains our height, but never
+     collapse below what the composer + one message needs. */
+  flex: 1 1 auto;
   min-height: 0;
-  flex: 0 0 auto;
   position: relative;
   z-index: 1;
+  gap: 0.65rem;
 }
 
 .head {
@@ -12,7 +15,6 @@
   align-items: flex-start;
   justify-content: space-between;
   gap: 0.65rem;
-  margin-bottom: 0.35rem;
 }
 
 .head h2 {
@@ -52,31 +54,246 @@
 }
 
 .lead {
-  margin: 0 0 0.65rem;
+  margin: 0;
   color: var(--mist);
-  font-size: 0.95rem;
+  font-size: 0.92rem;
   line-height: 1.4;
 }
 
-.composer {
-  padding: 0.85rem;
-  border-radius: var(--radius-lg);
-  background: var(--chrome);
-  border: 1px solid var(--line-strong);
-  box-shadow: 0 6px 20px rgba(22, 48, 56, 0.08);
-}
-
-.form {
+.surface {
   display: flex;
   flex-direction: column;
-  gap: 0.7rem;
+  /* Inherit the panel's height budget so the thread + composer split
+     the available space instead of piling up past the rail's max-height
+     (which was cutting the composer off on shorter viewports). */
+  flex: 1 1 auto;
+  min-height: 0;
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--surface) 94%, transparent);
+  border: 1px solid var(--line-strong);
+  box-shadow: 0 6px 20px rgba(22, 48, 56, 0.08);
+  overflow: hidden;
 }
 
-.form textarea {
+.thread {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  /* Grow to fill the surface, shrink when the rail is short. The
+     composer sits below at its natural height and stays visible. */
+  flex: 1 1 0;
+  min-height: 12rem;
+  overflow-y: auto;
+  padding: 0.95rem 0.85rem 1rem;
+  scroll-behavior: smooth;
+  scrollbar-gutter: stable;
+}
+
+.emptyHint {
+  margin: auto;
+  color: var(--mist);
+  font-size: 0.92rem;
+  text-align: center;
+  padding: 1.25rem 1rem;
+  max-width: 22rem;
+  line-height: 1.45;
+}
+
+.bubble {
+  max-width: 86%;
+  padding: 0.7rem 0.95rem;
+  border-radius: 1.05rem;
+  font-size: 0.96rem;
+  line-height: 1.45;
+  word-wrap: break-word;
+  overflow-wrap: anywhere;
+  animation: rise 0.28s ease-out both;
+}
+
+.bubble p {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.bubble p + p {
+  margin-top: 0.4rem;
+}
+
+.bubbleUser {
+  align-self: flex-end;
+  background: var(--signal);
+  color: var(--ink);
+  border-bottom-right-radius: 0.3rem;
+  box-shadow: 0 4px 12px rgba(22, 48, 56, 0.08);
+}
+
+.bubbleLevel {
+  align-self: flex-start;
+  background: var(--chrome);
+  color: var(--foam);
+  border: 1px solid var(--line);
+  border-bottom-left-radius: 0.3rem;
+}
+
+.bubbleWide {
+  max-width: 100%;
+}
+
+.draft {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  margin-top: 0.7rem;
+  padding-top: 0.7rem;
+  border-top: 1px solid var(--line);
+}
+
+.draftMeta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--mist);
+}
+
+.draftField {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.75rem;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--mist);
+}
+
+.draftField input,
+.draftField textarea {
   width: 100%;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--field);
+  color: var(--foam);
+  font-size: 0.92rem;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  font-family: inherit;
+  line-height: 1.4;
+}
+
+.draftField textarea {
   resize: vertical;
-  min-height: 5.25rem;
-  padding: 0.9rem 1rem;
+  min-height: 8rem;
+}
+
+.draftSend {
+  align-self: flex-start;
+  min-height: 2.4rem;
+  padding: 0.45rem 0.95rem;
+  border-radius: var(--radius);
+  background: var(--signal);
+  color: var(--ink);
+  font-weight: 700;
+  font-size: 0.88rem;
+}
+
+.draftSend:hover:not(:disabled) {
+  background: var(--signal-deep);
+  color: #f2f7f8;
+}
+
+.draftSend:disabled {
+  opacity: 0.55;
+}
+
+.draftSendBusy {
+  opacity: 1 !important;
+  background: var(--signal-soft);
+  color: var(--signal-deep);
+}
+
+.draftStatus {
+  min-height: 1.2rem;
+}
+
+.draftSending {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  margin: 0;
+  color: var(--signal-deep);
+  font-size: 0.9rem;
+  font-weight: 650;
+}
+
+.draftSentBanner {
+  margin: 0;
+  padding: 0.6rem 0.75rem;
+  border-radius: var(--radius);
+  background: var(--signal-soft);
+  color: var(--signal-deep);
+  font-size: 0.9rem;
+  font-weight: 650;
+}
+
+.draftError {
+  margin: 0;
+  color: var(--danger);
+  font-size: 0.85rem;
+}
+
+.bubbleTyping {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.65rem 0.9rem;
+}
+
+.waitingDots {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+  flex-shrink: 0;
+}
+
+.waitingDots i {
+  width: 0.4rem;
+  height: 0.4rem;
+  border-radius: 50%;
+  background: var(--signal-deep);
+  opacity: 0.35;
+  animation: waitingPulse 1.2s ease-in-out infinite;
+}
+
+.waitingDots i:nth-child(2) { animation-delay: 0.15s; }
+.waitingDots i:nth-child(3) { animation-delay: 0.3s; }
+
+.waitingText {
+  margin: 0;
+  color: var(--mist);
+  font-size: 0.9rem;
+  line-height: 1.3;
+  font-weight: 500;
+}
+
+.composer {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  padding: 0.7rem 0.85rem 0.85rem;
+  background: var(--chrome);
+  border-top: 1px solid var(--line);
+}
+
+.composer textarea {
+  width: 100%;
+  resize: none;
+  min-height: 3.6rem;
+  max-height: 10rem;
+  padding: 0.75rem 0.9rem;
   border: 1px solid var(--line-strong);
   border-radius: var(--radius);
   background: var(--field);
@@ -86,7 +303,7 @@
   font-size: 0.98rem;
 }
 
-.form textarea::placeholder {
+.composer textarea::placeholder {
   color: color-mix(in srgb, var(--mist) 75%, transparent);
 }
 
@@ -102,8 +319,8 @@
   justify-content: center;
   gap: 0.4rem;
   min-height: var(--touch);
-  min-width: 5.5rem;
-  padding: 0.75rem 1rem;
+  min-width: 5.25rem;
+  padding: 0.6rem 0.9rem;
   border-radius: var(--radius);
   border: 1px solid var(--line-strong);
   background: transparent;
@@ -129,7 +346,7 @@
 .submit {
   flex: 1;
   min-height: var(--touch);
-  padding: 0.75rem 1.25rem;
+  padding: 0.6rem 1.15rem;
   border-radius: var(--radius);
   background: var(--signal);
   color: var(--ink);
@@ -149,83 +366,9 @@
 .error {
   color: var(--danger);
   margin: 0;
-  font-size: 0.92rem;
-}
-
-.thread {
-  display: flex;
-  flex-direction: column;
-  gap: 0.15rem;
-  margin: 0.85rem 0 0;
-}
-
-.turn {
-  margin: 0.4rem 0 0.5rem;
-  animation: rise 0.35s ease-out both;
-}
-
-.you {
-  color: var(--mist);
-  margin: 0 0 0.55rem;
-  font-weight: 500;
-}
-
-.level {
-  padding: 0.85rem 0.95rem;
-  border-radius: var(--radius-lg);
-  background: var(--surface);
-  border: 1px solid var(--line);
-}
-
-.level p {
-  margin: 0;
-}
-
-.level p + p {
-  margin-top: 0.45rem;
-}
-
-.waiting {
-  display: flex;
-  align-items: center;
-  gap: 0.65rem;
-  margin: 0.75rem 0 0.25rem;
-  padding: 0.75rem 0.95rem;
-  border-radius: var(--radius-lg);
-  background: color-mix(in srgb, var(--surface) 88%, var(--signal) 12%);
-  border: 1px solid color-mix(in srgb, var(--line) 70%, var(--signal) 30%);
-}
-
-.waitingDots {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.28rem;
-  flex-shrink: 0;
-}
-
-.waitingDots i {
-  width: 0.4rem;
-  height: 0.4rem;
-  border-radius: 50%;
-  background: var(--signal-deep);
-  opacity: 0.35;
-  animation: waitingPulse 1.2s ease-in-out infinite;
-}
-
-.waitingDots i:nth-child(2) {
-  animation-delay: 0.15s;
-}
-
-.waitingDots i:nth-child(3) {
-  animation-delay: 0.3s;
-}
-
-.waitingText {
-  margin: 0;
-  color: var(--foam);
-  font-size: 0.95rem;
-  line-height: 1.35;
-  font-weight: 500;
+  padding: 0.5rem 0.85rem 0;
+  font-size: 0.9rem;
+  background: var(--chrome);
 }
 
 @keyframes waitingPulse {
@@ -255,5 +398,11 @@
   .waitingDots i {
     animation: none;
     opacity: 0.7;
+  }
+  .bubble {
+    animation: none;
+  }
+  .thread {
+    scroll-behavior: auto;
   }
 }

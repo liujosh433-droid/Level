@@ -24,6 +24,10 @@ export type Usual = {
   display_summary: string;
   confidence: number;
   status: "proposed" | "kept" | "not_me";
+  typical_start?: string | null;
+  typical_end?: string | null;
+  person_name?: string | null;
+  person_relation?: string | null;
 };
 
 export type Priority = {
@@ -64,11 +68,24 @@ export type TodayEvent = {
 };
 
 export type WeekLoadRow = {
-  activity_type: string;
+  bucket: string;
   label: string;
   color: string;
   count: number;
   percent: number;
+};
+
+export type MissingUsualWeek = {
+  group_id: string;
+  weekday: number;
+  date: string;
+  category: string;
+  category_label: string;
+  person_id: string;
+  person_name: string | null;
+  person_relation: string | null;
+  typical_start: string | null;
+  typical_end: string | null;
 };
 
 export type TodayResponse = {
@@ -81,6 +98,8 @@ export type TodayResponse = {
     person_id: string;
     hour_band: string;
   }[];
+  missing_usuals_week: MissingUsualWeek[];
+  missing_usuals_week_dismissed?: boolean;
   week_load: WeekLoadRow[];
 };
 

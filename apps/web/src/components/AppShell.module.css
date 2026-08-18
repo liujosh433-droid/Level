@@ -1,5 +1,12 @@
 .root {
+  display: flex;
+  align-items: stretch;
   min-height: 100dvh;
+}
+
+.main {
+  flex: 1;
+  min-width: 0;
 }
 
 .shell {

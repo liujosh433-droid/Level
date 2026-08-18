@@ -2,18 +2,24 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+from statistics import median
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException
 from level_core.agents.role import ProposedPerson
 from level_core.agents.role import run as role_run
 from level_core.agents.usual import run as usual_run
 from level_core.calendar.usuals import compute_usuals_from_events, rollup_for_role_agent
+from level_core.config import get_settings
 from level_core.schemas import (
     ActivityType,
+    CachedEvent,
     CareRelation,
     NegativeAgent,
     Priority,
+    Usual,
     UsualStatus,
 )
 from level_core.storage.base import UserStore
@@ -23,6 +29,7 @@ from level_core.storage.care_store import (
     record_negative,
     set_person_status,
     set_usual_status,
+    sync_usuals,
 )
 from pydantic import BaseModel
 
@@ -51,10 +58,94 @@ class DirectPriorityAdd(BaseModel):
 
 @router.get("")
 async def get_profile(store: UserStore = Depends(get_user_store)) -> dict[str, Any]:
-    people = [p.model_dump(mode="json") for p in await store.people.list()]
-    usuals = [u.model_dump(mode="json") for u in await store.usuals.list()]
-    priorities = [p.model_dump(mode="json") for p in await store.priorities.list()]
-    return {"people": people, "usuals": usuals, "priorities": priorities}
+    settings = get_settings()
+    people_models = await store.people.list()
+    usuals_models = await store.usuals.list()
+    priorities_models = await store.priorities.list()
+    events = await store.agenda.list()
+
+    people_by_id = {p.person_id: p for p in people_models}
+    events_by_id = {e.event_id: e for e in events}
+
+    people = [p.model_dump(mode="json") for p in people_models]
+    priorities = [p.model_dump(mode="json") for p in priorities_models]
+    usuals = [
+        _decorate_usual(u.model_dump(mode="json"), u.source_event_uids, u.person_id, events_by_id, people_by_id)
+        for u in usuals_models
+    ]
+
+    tz = ZoneInfo(settings.calendar_tz)
+    now_local = datetime.now(tz)
+    week_keys: set[tuple[int, int]] = set()
+    past_events = 0
+    for e in events:
+        if e.time.all_day:
+            continue
+        local = e.time.start.astimezone(tz)
+        if local >= now_local:
+            continue
+        past_events += 1
+        iso = local.isocalendar()
+        week_keys.add((iso.year, iso.week))
+    # Usuals are derived from past events only (future ones are plans,
+    # not evidence), so the meta counts should reflect that too.
+    usuals_meta = {
+        "days_back": settings.level_cal_days_back,
+        "weeks_observed": len(week_keys),
+        "events_scanned": past_events,
+        "min_repeats": 2,
+    }
+    return {"people": people, "usuals": usuals, "priorities": priorities, "usuals_meta": usuals_meta}
+
+
+def _decorate_usual(
+    dumped: dict[str, Any],
+    source_event_uids: list[str],
+    person_id: str,
+    events_by_id: dict[str, CachedEvent],
+    people_by_id: dict[str, Any],
+) -> dict[str, Any]:
+    """Attach human-friendly typical start/end + person label to a usual."""
+    tz = ZoneInfo(get_settings().calendar_tz)
+    starts: list[int] = []
+    durations: list[int] = []
+    for uid in source_event_uids:
+        ev = events_by_id.get(uid)
+        if not ev or ev.time.all_day:
+            continue
+        local_start = ev.time.start.astimezone(tz)
+        local_end = ev.time.end.astimezone(tz)
+        starts.append(local_start.hour * 60 + local_start.minute)
+        durations.append(max(15, int((local_end - local_start).total_seconds() // 60)))
+
+    if starts:
+        typical_start_min = int(median(starts))
+        typical_dur_min = int(median(durations))
+        dumped["typical_start"] = _fmt_hm(typical_start_min)
+        dumped["typical_end"] = _fmt_hm(typical_start_min + typical_dur_min)
+    else:
+        dumped["typical_start"] = None
+        dumped["typical_end"] = None
+
+    person = people_by_id.get(person_id)
+    if person is not None:
+        dumped["person_name"] = person.display_name
+        dumped["person_relation"] = person.relation.value
+    else:
+        dumped["person_name"] = None
+        dumped["person_relation"] = None
+    return dumped
+
+
+def _fmt_hm(total_minutes: int) -> str:
+    total_minutes = max(0, min(23 * 60 + 59, total_minutes))
+    hour_24 = (total_minutes // 60) % 24
+    minute = total_minutes % 60
+    suffix = "am" if hour_24 < 12 else "pm"
+    hour_12 = hour_24 % 12 or 12
+    if minute == 0:
+        return f"{hour_12}{suffix}"
+    return f"{hour_12}:{minute:02d}{suffix}"
 
 
 @router.post("/refresh")
@@ -80,7 +171,7 @@ async def refresh_profile(store: UserStore = Depends(get_user_store)) -> dict[st
     people = await store.people.list()
     candidates = compute_usuals_from_events(events, people)
 
-    usuals_added = 0
+    fresh_ids: set[str] = set()
     for c in candidates:
         await propose_usual(
             store,
@@ -92,9 +183,15 @@ async def refresh_profile(store: UserStore = Depends(get_user_store)) -> dict[st
             source_event_uids=list(c.source_event_uids),
             confidence=c.confidence,
         )
-        usuals_added += 1
+        fresh_ids.add(Usual.compose_id(c.person_id, c.weekday, c.hour_band))
 
-    return {"people_added": people_added, "usuals_added": usuals_added}
+    usuals_removed = await sync_usuals(store, fresh_ids)
+
+    return {
+        "people_added": people_added,
+        "usuals_added": len(candidates),
+        "usuals_removed": usuals_removed,
+    }
 
 
 @router.post("/keep_not_me")
@@ -155,6 +252,30 @@ async def add_person(
     )
     await set_person_status(store, person.person_id, "kept")
     return person.model_dump(mode="json")
+
+
+@router.delete("/priorities/{priority_id}")
+async def delete_priority(
+    priority_id: str, store: UserStore = Depends(get_user_store)
+) -> dict[str, Any]:
+    """Remove a priority the user no longer wants Level to weigh.
+
+    We delete the row (not just mark not_me) so it disappears from About Me
+    and from booking conflict checks. A negative is recorded so PriorityAgent
+    won't quietly re-extract the same sentence on the next chat turn.
+    """
+    prio = await store.priorities.get(priority_id)
+    if prio is None:
+        raise HTTPException(status_code=404, detail="priority_not_found")
+    await record_negative(
+        store,
+        agent=NegativeAgent.PRIORITY,
+        field="text",
+        value=prio.text,
+        reason="user deleted",
+    )
+    await store.priorities.delete(priority_id)
+    return {"ok": True, "priority_id": priority_id}
 
 
 @router.post("/priorities")

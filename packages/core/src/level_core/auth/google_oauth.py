@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import json
 import secrets
 from dataclasses import dataclass
 from typing import Any
@@ -99,9 +101,6 @@ def _email_from_id_token(id_token: str | None) -> str | None:
     if not id_token:
         return None
     try:
-        import base64
-        import json
-
         parts = id_token.split(".")
         if len(parts) < 2:
             return None

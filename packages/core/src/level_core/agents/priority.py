@@ -33,12 +33,21 @@ If the message is not actually a priority, return {"priority": null}.
 Do NOT re-emit priorities listed under <negatives>."""
 
 
-async def run(*, store: UserStore, message: str) -> AgentResult:
+async def run(
+    *,
+    store: UserStore,
+    message: str,
+    history: list[dict[str, str]] | None = None,
+) -> AgentResult:
     negatives = await recent_negatives(store, agent=NegativeAgent.PRIORITY, limit=20)
-    context = {"negatives": [{"field": n.field, "value": n.value} for n in negatives]}
+    context: dict[str, object] = {
+        "negatives": [{"field": n.field, "value": n.value} for n in negatives]
+    }
+    if history:
+        context["prior_turns"] = history
     spec = AgentSpec(
         name="PriorityAgent",
-        model="pro",
+        model="flash",
         system=SYSTEM,
         response_schema=PriorityAgentResponse,
         max_turns=1,

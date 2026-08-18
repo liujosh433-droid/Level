@@ -7,6 +7,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from level_core.agents.summary import run as summary_run
+from level_core.calendar.usuals import missing_usuals_today
 from level_core.config import get_settings
 from level_core.storage.base import UserStore
 
@@ -35,8 +36,6 @@ async def get_daily_summary(store: UserStore) -> str:
         f"{e.time.start.astimezone(tz).strftime('%-I:%M %p')} {e.summary}"
         for e in todays
     ]
-
-    from level_core.calendar.usuals import missing_usuals_today
 
     usuals = await store.usuals.list()
     missing = missing_usuals_today(usuals=usuals, todays_events=todays)

@@ -13,6 +13,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
+from level_core.agents.activity import run as activity_run
+from level_core.calendar.person_match import person_matches
 from level_core.observability import get_logger
 from level_core.schemas import ActivityType, CachedEvent, Reminder
 from level_core.storage.base import UserStore
@@ -35,13 +37,13 @@ async def enrich_agenda(store: UserStore) -> EnrichResult:
     classified = await _classify_unseen(store, events)
     events = await store.agenda.list()
 
+    self_id = next((p.person_id for p in people if p.is_self), None)
+
     people_matched = 0
     for event in events:
-        matches: list[str] = []
-        lower = event.summary.lower()
-        for p in people:
-            if any(name.lower() in lower for name in [p.display_name, *p.aliases]) or any(t.lower() in {n.lower() for n in [p.display_name, *p.aliases]} for t in event.attendee_tokens):
-                matches.append(p.person_id)
+        matches: list[str] = [p.person_id for p in people if person_matches(event, p)]
+        if not matches and self_id:
+            matches = [self_id]
         sorted_matches = sorted(set(matches))
         if sorted_matches != event.matched_person_ids:
             await store.agenda.upsert(
@@ -82,8 +84,6 @@ async def _classify_unseen(store: UserStore, events: list[CachedEvent]) -> int:
     unseen = [e for e in events if e.activity_type is None and e.summary]
     if not unseen:
         return 0
-
-    from level_core.agents.activity import run as activity_run
 
     ai_by_id: dict[str, ActivityType] = {}
     ai_span_by_id: dict[str, str] = {}

@@ -7,6 +7,7 @@ import base64
 from dataclasses import dataclass
 from email.message import EmailMessage
 
+from level_core.calendar.google_client import build_gmail_client
 from level_core.email.drafter import sanitize_email_text
 from level_core.storage.base import UserStore
 
@@ -25,8 +26,6 @@ async def send_email(
     body: str,
     idempotency_key: str,
 ) -> SentEmail:
-    from level_core.calendar.google_client import build_gmail_client
-
     subject = sanitize_email_text(subject)[:200]
     body = sanitize_email_text(body)
 

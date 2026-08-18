@@ -8,6 +8,7 @@ plus arbitrary structured fields. User content is scrubbed by
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 from typing import Any
 
@@ -74,8 +75,6 @@ def _configure_once() -> None:
 
 
 def _log_level_from_str(name: str) -> int:
-    import logging
-
     return getattr(logging, name.upper(), logging.INFO)
 
 

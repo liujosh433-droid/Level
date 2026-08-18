@@ -24,9 +24,14 @@ class EmailAgentResponse(BaseModel):
 SYSTEM = """You draft a short, courteous email from a caregiver to a school/doctor contact.
 
 Voice: warm but level-headed. 2-4 short paragraphs. No emojis. Do not
-fabricate specifics (dates, dosages, teacher names) beyond what the caregiver
-supplied. Sign the email with "[Your name]" placeholder for the caregiver
-to replace. Return only the requested JSON."""
+fabricate specifics (dates, dosages, teacher names) beyond what you are given.
+
+The email must be finished and ready to send:
+- Use Today's date exactly when a date is needed (never "[Current Date]" or similar).
+- Sign with the caregiver's name exactly as given (never "[Your name]" or any bracket token).
+- Never leave placeholders, template variables, or square-bracket tokens in subject or body.
+
+Return only the requested JSON."""
 
 
 async def run(
@@ -36,12 +41,16 @@ async def run(
     contact_display_name: str,
     kid_display_name: str | None = None,
     extra_notes: str = "",
+    signer_name: str = "A parent",
+    today: str = "",
 ) -> AgentResult:
     user_input = "\n".join(
         [
             f"Intent: {intent}",
             f"Recipient: {contact_display_name}",
             f"About: {kid_display_name or 'the caregiver themselves'}",
+            f"Caregiver name (sign the email with this): {signer_name}",
+            f"Today's date: {today}" if today else "",
             f"Notes: {extra_notes}" if extra_notes else "",
         ]
     ).strip()

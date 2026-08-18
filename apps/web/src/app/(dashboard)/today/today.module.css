@@ -5,13 +5,15 @@
   animation: rise 0.4s ease-out both;
 }
 
-.titleRow {
+.hero {
   display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 0.75rem 1rem;
+  flex-direction: column;
+  gap: 0.35rem;
   margin: 0 0 0.5rem;
+}
+
+.hero h1 {
+  margin: 0;
 }
 
 .dateLabel {
@@ -47,6 +49,14 @@
     grid-template-columns: minmax(0, 3fr) minmax(18rem, 2fr);
     gap: 1.75rem 2rem;
     align-items: start;
+  }
+
+  .rail {
+    position: sticky;
+    top: calc(var(--nav-h) + env(safe-area-inset-top, 0px) + 1rem);
+    max-height: calc(100vh - var(--nav-h) - env(safe-area-inset-top, 0px) - 2rem);
+    overflow-y: auto;
+    scrollbar-gutter: stable;
   }
 }
 
@@ -92,6 +102,11 @@
   border-top: 1px solid var(--line);
 }
 
+.railBlock:first-child {
+  padding-top: 0;
+  border-top: none;
+}
+
 @media (min-width: 900px) {
   .railBlock {
     padding-top: 0;
@@ -99,37 +114,114 @@
   }
 }
 
-.banner {
-  display: block;
-  margin: 0 0 0.15rem;
-  padding: 0.85rem 0 0.85rem 0.9rem;
-  border-left: 3px solid var(--warn);
-  color: var(--mist);
-  background: linear-gradient(90deg, rgba(224, 163, 90, 0.08), transparent 70%);
-  border-radius: 0 var(--radius) var(--radius) 0;
+.missing {
+  padding: 1rem 1.1rem;
+  border: 1px solid color-mix(in srgb, var(--warn) 30%, var(--line));
+  border-radius: var(--radius-lg);
+  border-top: 1px solid color-mix(in srgb, var(--warn) 30%, var(--line));
+  background: linear-gradient(180deg, rgba(224, 163, 90, 0.08), rgba(255, 255, 255, 0.55) 65%);
 }
 
-.banner ul {
+.missingHead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.missingHead h2 {
+  margin: 0 0 0.15rem;
+}
+
+.missingHint {
+  margin: 0;
+  color: var(--mist);
+  font-size: 0.85rem;
+  line-height: 1.4;
+  max-width: 34rem;
+}
+
+.missingWeek {
   list-style: none;
   padding: 0;
-  margin: 0.55rem 0 0;
+  margin: 0.4rem 0 0;
   display: flex;
   flex-direction: column;
-  gap: 0.55rem;
+  gap: 0.7rem;
 }
 
-.banner li {
+.missingDay {
   display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 0.75rem;
-  align-items: center;
-  color: var(--foam);
+  grid-template-columns: 6.5rem 1fr;
+  gap: 0.6rem;
+  align-items: baseline;
 }
 
-.bannerActions {
+@media (max-width: 640px) {
+  .missingDay {
+    grid-template-columns: 1fr;
+    gap: 0.2rem;
+  }
+}
+
+.missingDayLabel {
+  color: var(--mist);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  font-size: 0.78rem;
+  padding-top: 0.15rem;
+}
+
+.missingList {
+  list-style: none;
+  padding: 0;
+  margin: 0;
   display: flex;
-  gap: 0.4rem;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.missingRow {
+  display: flex;
+  align-items: center;
   flex-wrap: wrap;
+  gap: 0.5rem;
+  color: var(--foam);
+  font-size: 0.95rem;
+  line-height: 1.4;
+}
+
+.missingTime {
+  color: var(--mist);
+  font-variant-numeric: tabular-nums;
+  font-weight: 550;
+  min-width: 6.5rem;
+}
+
+.missingCategory {
+  color: var(--foam);
+  font-weight: 550;
+}
+
+.personChip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.3rem;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font-size: 0.82rem;
+  font-weight: 650;
+  line-height: 1.3;
+}
+
+.chipRel {
+  font-size: 0.68rem;
+  font-weight: 500;
+  opacity: 0.75;
+  text-transform: lowercase;
 }
 
 .empty {

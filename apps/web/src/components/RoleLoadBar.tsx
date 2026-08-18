@@ -15,7 +15,7 @@ export default function RoleLoadBar({ load }: { load: WeekLoadRow[] | null | und
       >
         {rows.map((r) => (
           <span
-            key={r.activity_type}
+            key={r.bucket}
             className={styles.seg}
             style={{ width: `${Math.max(r.percent, 2)}%`, background: r.color }}
             title={`${r.label}: ${r.percent}%`}
@@ -24,7 +24,7 @@ export default function RoleLoadBar({ load }: { load: WeekLoadRow[] | null | und
       </div>
       <ul className={styles.legend}>
         {rows.map((r) => (
-          <li key={r.activity_type}>
+          <li key={r.bucket}>
             <span className={styles.dot} style={{ background: r.color }} />
             <span className={styles.label}>{r.label}</span>
             <span className={styles.pct}>{r.percent}%</span>

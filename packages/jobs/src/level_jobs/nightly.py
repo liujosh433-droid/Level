@@ -10,12 +10,15 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from level_core.calendar.enrich import enrich_agenda
 from level_core.calendar.sync import ensure_watch, refresh_agenda
 from level_core.calendar.usuals import compute_usuals_from_events
+from level_core.config import get_settings
 from level_core.observability import get_logger
-from level_core.storage.care_store import propose_usual
+from level_core.schemas import Usual
+from level_core.storage.care_store import propose_usual, sync_usuals
 from level_core.storage.factory import get_store
 
 logger = get_logger("nightly")
@@ -32,6 +35,7 @@ async def _process_user(user_id: str) -> None:
         await enrich_agenda(store)
     events = await store.agenda.list()
     people = await store.people.list()
+    fresh_ids: set[str] = set()
     for c in compute_usuals_from_events(events, people):
         await propose_usual(
             store,
@@ -43,6 +47,8 @@ async def _process_user(user_id: str) -> None:
             source_event_uids=list(c.source_event_uids),
             confidence=c.confidence,
         )
+        fresh_ids.add(Usual.compose_id(c.person_id, c.weekday, c.hour_band))
+    await sync_usuals(store, fresh_ids)
 
     turns = sorted(
         await store.chat_turns.list(), key=lambda t: t.created_at, reverse=True
@@ -63,12 +69,8 @@ async def _process_user(user_id: str) -> None:
 
 async def _list_users() -> list[str]:
     """Cloud impl scans Firestore for user docs. Local impl scans .level dir."""
-    from level_core.config import get_settings
-
     settings = get_settings()
     if settings.is_local:
-        from pathlib import Path
-
         root = Path(".level/local_store")
         if not root.exists():
             return []

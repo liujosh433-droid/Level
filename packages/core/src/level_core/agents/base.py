@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -74,10 +75,13 @@ def _model_id(settings: Any, alias: str) -> str:
 
 
 def _estimate_cost(model_id: str, input_tokens: int, output_tokens: int) -> float:
-    """Rough per-token pricing for Gemini 2.5 (public list price as of 2026)."""
+    """Rough per-token pricing for Gemini 3.5 (public list price as of 2026).
+
+    Used for the daily cost cap + audit log; ~±30% precision is fine.
+    """
     if "pro" in model_id:
-        return (input_tokens / 1_000_000) * 2.50 + (output_tokens / 1_000_000) * 10.00
-    return (input_tokens / 1_000_000) * 0.15 + (output_tokens / 1_000_000) * 0.60
+        return (input_tokens / 1_000_000) * 3.00 + (output_tokens / 1_000_000) * 15.00
+    return (input_tokens / 1_000_000) * 0.30 + (output_tokens / 1_000_000) * 2.50
 
 
 def _hash_prompt(prompt: str) -> str:
@@ -167,6 +171,14 @@ async def call_agent(
                 spec=spec,
                 contents=contents,
             )
+        except QuotaExhausted as err:
+            logger.warning(
+                "agent.quota_exhausted",
+                agent=spec.name,
+                retry_after_s=err.retry_after_s,
+                trace_id=trace_id,
+            )
+            raise
         except _SafetyBlocked:
             logger.warning("agent.blocked_by_safety", agent=spec.name, trace_id=trace_id)
             return AgentResult(
@@ -273,6 +285,47 @@ class _SafetyBlocked(Exception):
     pass
 
 
+class QuotaExhausted(Exception):
+    """The Gemini backend told us to slow down (429). We bubble this up so
+    the chat handler can produce a specific, actionable reply rather than
+    silently retrying and burning more quota.
+    """
+
+    def __init__(self, retry_after_s: int | None, message: str) -> None:
+        self.retry_after_s = retry_after_s
+        super().__init__(message)
+
+
+def _parse_retry_after(err: Exception) -> int | None:
+    """Best-effort: pull the 'retry in Ns' hint out of a Gemini 429 error."""
+    text = str(err)
+    m = re.search(r"retry in ([\d.]+)s", text, re.IGNORECASE)
+    if m:
+        try:
+            return int(float(m.group(1)))
+        except ValueError:
+            return None
+    return None
+
+
+def _is_quota_error(err: Exception) -> bool:
+    code = getattr(err, "code", None) or getattr(err, "status_code", None)
+    try:
+        if code is not None and int(code) == 429:
+            return True
+    except (TypeError, ValueError):
+        pass
+    text = str(err)
+    return "RESOURCE_EXHAUSTED" in text or "429" in text[:80]
+
+
+def _vertex_fallback_model(model_id: str) -> str:
+    """Vertex Model Garden on this project has 2.5, not 3.5. Map accordingly."""
+    if "pro" in model_id and "flash" not in model_id:
+        return "gemini-2.5-pro"
+    return "gemini-2.5-flash"
+
+
 async def _invoke_with_retry(
     *, model_id: str, spec: AgentSpec, contents: list[dict[str, Any]]
 ) -> _RawResponse:
@@ -281,17 +334,46 @@ async def _invoke_with_retry(
     if is_faked(spec.name):
         return fake_call(spec.name, contents)
 
+    settings = get_settings()
     delays = [0.5, 1.5, 4.0]
     last_exc: Exception | None = None
     for attempt in range(3):
         try:
-            return await _invoke_vertex(model_id=model_id, spec=spec, contents=contents)
+            return await _invoke_vertex(
+                model_id=model_id, spec=spec, contents=contents
+            )
         except _SafetyBlocked:
             raise
         except Exception as e:
             last_exc = e
+            if _is_quota_error(e):
+                # AI Studio free tier is 20 req/day. Vertex on this project
+                # still has 2.5, so fall back once rather than 500-ing the chat.
+                if settings.google_api_key and settings.google_cloud_project:
+                    fallback = _vertex_fallback_model(model_id)
+                    logger.warning(
+                        "agent.aistudio_quota_fallback_vertex",
+                        requested=model_id,
+                        fallback=fallback,
+                        agent=spec.name,
+                    )
+                    try:
+                        return await _invoke_vertex(
+                            model_id=fallback,
+                            spec=spec,
+                            contents=contents,
+                            force_vertex=True,
+                        )
+                    except Exception as fallback_err:
+                        last_exc = fallback_err
+                        if _is_quota_error(fallback_err):
+                            raise QuotaExhausted(
+                                _parse_retry_after(fallback_err), str(fallback_err)
+                            ) from fallback_err
+                        raise
+                raise QuotaExhausted(_parse_retry_after(e), str(e)) from e
             code = getattr(e, "code", None) or getattr(e, "status_code", None)
-            if code and int(code) not in (429, 500, 502, 503, 504):
+            if code and int(code) not in (500, 502, 503, 504):
                 raise
             if attempt < 2:
                 await asyncio.sleep(delays[attempt])
@@ -299,19 +381,67 @@ async def _invoke_with_retry(
     raise last_exc
 
 
-async def _invoke_vertex(
-    *, model_id: str, spec: AgentSpec, contents: list[dict[str, Any]]
-) -> _RawResponse:
-    """Real Vertex/Gemini call. Isolated so tests can monkeypatch."""
+_client_cache: dict[tuple[str, ...], Any] = {}
+
+
+def _get_gemini_client(*, force_vertex: bool = False) -> Any:
+    """Return a process-wide cached `genai.Client`.
+
+    Rebuilding the client per request cost us ~200ms of TCP + auth handshake
+    on every LLM call. The client is thread-safe and holds a connection pool
+    to reuse across requests. Keyed by backend so both AI Studio and Vertex
+    can coexist in the same process (e.g. tests).
+    """
     from google import genai
     from google.genai import types
 
     settings = get_settings()
-    client = genai.Client(
-        vertexai=True,
-        project=settings.google_cloud_project,
-        location=settings.google_cloud_region,
+    # Never let the SDK retry 429s itself — Google's Retry-After on the
+    # free tier is ~60s, which looks like a hang in the chat UI.
+    http_options = types.HttpOptions(
+        retry_options=types.HttpRetryOptions(attempts=1)
     )
+    use_studio = bool(settings.google_api_key) and not force_vertex
+    if use_studio:
+        key = ("aistudio", settings.google_api_key)
+    else:
+        key = ("vertex", settings.google_cloud_project, settings.google_cloud_region)
+    client = _client_cache.get(key)
+    if client is None:
+        if use_studio:
+            client = genai.Client(
+                api_key=settings.google_api_key, http_options=http_options
+            )
+        else:
+            client = genai.Client(
+                vertexai=True,
+                project=settings.google_cloud_project,
+                location=settings.google_cloud_region,
+                http_options=http_options,
+            )
+        _client_cache[key] = client
+    return client
+
+
+async def _invoke_vertex(
+    *,
+    model_id: str,
+    spec: AgentSpec,
+    contents: list[dict[str, Any]],
+    force_vertex: bool = False,
+) -> _RawResponse:
+    """Real Gemini call via one of two backends.
+
+    - If GOOGLE_API_KEY is set, use the Gemini API (AI Studio). This is the
+      hackathon escape hatch when your GCP project doesn't yet have 3.5
+      enabled in Vertex Model Garden; AI Studio ships new models first.
+    - Otherwise, use Vertex AI with ADC.
+
+    Isolated so tests can monkeypatch.
+    """
+    from google.genai import types
+
+    client = _get_gemini_client(force_vertex=force_vertex)
 
     schema_json = spec.response_schema.model_json_schema()
     generation_config = types.GenerateContentConfig(

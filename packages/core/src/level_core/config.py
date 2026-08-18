@@ -33,8 +33,20 @@ class Settings(BaseSettings):
     google_cloud_region: str = "us-central1"
     level_firestore_database: str = "(default)"
 
-    level_model_pro: str = "gemini-2.5-pro"
-    level_model_flash: str = "gemini-2.5-flash"
+    # AI backend selection.
+    # Hackathon rule: Gemini 3.5 or newer, via either Gemini API (AI Studio)
+    # or Vertex AI - both count.
+    #
+    # If GOOGLE_API_KEY is set, we call the Gemini API (aistudio.google.com)
+    # directly. This is the fast path when your GCP project doesn't have 3.5
+    # enabled in Vertex Model Garden - AI Studio ships new models first and
+    # the same publisher IDs (gemini-3.5-flash / gemini-3.5-pro) work.
+    #
+    # Otherwise, we use Vertex AI with ADC (google_cloud_project + region).
+    # In that case the model must be enabled in Model Garden for the project.
+    google_api_key: str = ""
+    level_model_pro: str = "gemini-3.5-flash"
+    level_model_flash: str = "gemini-3.5-flash"
     level_model_gemma: str = "gemma-3-4b-it"
 
     level_cal_days_back: int = Field(default=14, ge=1, le=365)

@@ -1,6 +1,11 @@
 """Pydantic schemas shared across api, core, and jobs."""
 
-from level_core.schemas.activity import ALL_ACTIVITY_TYPES, ActivityType
+from level_core.schemas.activity import (
+    ALL_ACTIVITY_TYPES,
+    ActivityType,
+    Category,
+    LoadBucket,
+)
 from level_core.schemas.agenda import CachedEvent, DailyAgenda, EventTime
 from level_core.schemas.audit import AiAuditEntry
 from level_core.schemas.care import CarePerson, CareRelation, CareRoleId
@@ -27,6 +32,7 @@ __all__ = [
     "CarePerson",
     "CareRelation",
     "CareRoleId",
+    "Category",
     "ChatMessage",
     "ChatRole",
     "ChatRouterDecision",
@@ -38,6 +44,7 @@ __all__ = [
     "DailyAgenda",
     "EventTime",
     "HourBand",
+    "LoadBucket",
     "NegativeAgent",
     "NegativeFeedback",
     "Priority",

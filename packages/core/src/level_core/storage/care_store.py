@@ -30,6 +30,42 @@ def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
 
 
+async def find_person_by_name(
+    store: UserStore, name: str
+) -> CarePerson | None:
+    """Case-insensitive match on display_name OR any alias."""
+    lower = name.lower().strip()
+    if not lower:
+        return None
+    for existing in await store.people.list():
+        if existing.display_name.lower().strip() == lower:
+            return existing
+        if any(a.lower().strip() == lower for a in existing.aliases):
+            return existing
+    return None
+
+
+MIN_ALIAS_LEN = 2
+
+
+def _clean_aliases(aliases: list[str] | None) -> list[str]:
+    """Reject aliases too short to safely match (single letters like 'N' 'T')."""
+    if not aliases:
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for a in aliases:
+        stripped = a.strip()
+        if len(stripped) < MIN_ALIAS_LEN:
+            continue
+        key = stripped.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(stripped)
+    return out
+
+
 async def propose_person(
     store: UserStore,
     *,
@@ -39,20 +75,35 @@ async def propose_person(
     is_self: bool = False,
     source_span: str | None = None,
 ) -> CarePerson:
-    """Idempotent by (display_name, relation): reuses existing person if match."""
-    lower = display_name.lower().strip()
-    for existing in await store.people.list():
-        if existing.display_name.lower().strip() == lower and existing.relation == relation:
+    """Idempotent by name/alias. Never overwrites a person the user has already
+    corrected (`kept` or `not_me`). If we already proposed the person but with a
+    different relation, upgrade the row in-place instead of creating a duplicate.
+    Aliases shorter than MIN_ALIAS_LEN are dropped to prevent substring
+    false-positives ("N" matching "sync", "standup", ...).
+    """
+    safe_aliases = _clean_aliases(aliases)
+    existing = await find_person_by_name(store, display_name)
+    if existing is not None:
+        if existing.status != "proposed":
+            # User already touched this person - respect their classification.
             return existing
-        for alias in existing.aliases:
-            if alias.lower().strip() == lower:
-                return existing
+        if existing.relation == relation and existing.is_self == is_self:
+            return existing
+        return await store.people.upsert(
+            existing.model_copy(
+                update={
+                    "relation": relation,
+                    "care_role_id": role_for_relation(relation),
+                    "is_self": is_self,
+                }
+            )
+        )
     person = CarePerson(
         person_id=new_id("p"),
         display_name=display_name.strip(),
         relation=relation,
         care_role_id=role_for_relation(relation),
-        aliases=aliases or [],
+        aliases=safe_aliases,
         is_self=is_self,
         status="proposed",
         source_span=source_span,
@@ -95,6 +146,27 @@ async def propose_usual(
         status=existing.status if existing else UsualStatus.PROPOSED,
     )
     return await store.usuals.upsert(payload)
+
+
+async def sync_usuals(
+    store: UserStore, fresh_usual_ids: set[str]
+) -> int:
+    """Delete stale `proposed` usuals not in the fresh candidate set.
+
+    `kept` and `not_me` usuals are user-owned and are always preserved.
+    This is what stops stale attributions (e.g. an old Nova usual whose
+    source events now correctly point to Me) from lingering forever
+    under a different composite key.
+    """
+    removed = 0
+    for u in await store.usuals.list():
+        if u.status != UsualStatus.PROPOSED:
+            continue
+        if u.usual_id in fresh_usual_ids:
+            continue
+        await store.usuals.delete(u.usual_id)
+        removed += 1
+    return removed
 
 
 async def set_usual_status(store: UserStore, usual_id: str, status: UsualStatus) -> Usual | None:

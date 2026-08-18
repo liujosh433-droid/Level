@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends
+from level_core.calendar.enrich import enrich_agenda
 from level_core.calendar.sync import ensure_watch, refresh_agenda
 from level_core.storage.base import UserStore
 from pydantic import BaseModel, Field
@@ -42,8 +43,6 @@ async def sync(store: UserStore = Depends(get_user_store)) -> dict[str, Any]:
     result = await refresh_agenda(store)
     watch_set = await ensure_watch(store)
     if result.fingerprint_changed:
-        from level_core.calendar.enrich import enrich_agenda
-
         enrich = await enrich_agenda(store)
     else:
         enrich = None

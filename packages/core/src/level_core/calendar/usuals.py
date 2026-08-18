@@ -13,15 +13,18 @@ from dataclasses import dataclass
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from level_core.calendar.person_match import resolve_person_id
 from level_core.config import get_settings
 from level_core.schemas import (
     ActivityType,
     CachedEvent,
     CarePerson,
+    Category,
     HourBand,
     Usual,
     Weekday,
 )
+from level_core.schemas.activity import activity_category
 from level_core.schemas.usual import hour_to_band
 
 
@@ -44,20 +47,21 @@ class UsualCandidate:
 
 
 def _resolve_person(event: CachedEvent, people: list[CarePerson]) -> str | None:
-    if event.matched_person_ids:
-        return event.matched_person_ids[0]
-    lower = event.summary.lower()
-    for p in people:
-        if any(a.lower() in lower for a in [p.display_name, *p.aliases]):
-            return p.person_id
-    return None
+    return resolve_person_id(event, people)
 
 
 def compute_usuals_from_events(
     events: Iterable[CachedEvent], people: list[CarePerson]
 ) -> list[UsualCandidate]:
+    """Group past events into weekly-repeating "usuals".
+
+    Only past events count as evidence: a scheduled-but-unlived future event
+    is a plan, not a usual. Anchoring on lived history is what makes
+    "missing usuals this week" trustworthy.
+    """
     settings = get_settings()
     tz = ZoneInfo(settings.calendar_tz)
+    now = datetime.now(tz)
 
     groups: dict[
         tuple[str, Weekday, HourBand, ActivityType], list[CachedEvent]
@@ -67,10 +71,12 @@ def compute_usuals_from_events(
     for event in events:
         if event.activity_type is None:
             continue
+        local = event.time.start.astimezone(tz)
+        if local >= now:
+            continue
         person_id = _resolve_person(event, people)
         if not person_id:
             continue
-        local = event.time.start.astimezone(tz)
         weeks_observed.add(local.isocalendar().week)
         key = (person_id, Weekday(local.weekday()), hour_to_band(local.hour), event.activity_type)
         groups[key].append(event)
@@ -139,6 +145,76 @@ def missing_usuals_today(
         if (u.person_id, u.hour_band) in covered:
             continue
         out.append(MissingUsual(usual=u, expected_hour_band=u.hour_band))
+    return out
+
+
+@dataclass
+class MissingCategoryGroup:
+    """One row per (weekday, person, Category) that didn't happen this week.
+
+    Coarser than `MissingUsual` on purpose: a Nova soccer game covers a Nova
+    swim-lesson usual because both fall under Category.SPORTS, so users
+    aren't bombarded with wording differences. The Category enum lives in
+    schemas/activity.py and is a pure enum -> enum mapping over
+    ActivityType (no keyword matching on event text).
+    """
+
+    weekday: Weekday
+    person_id: str
+    category: Category
+    representative_usual_ids: tuple[str, ...]
+    typical_hour_bands: tuple[HourBand, ...]
+
+
+def missing_usuals_this_week(
+    *, usuals: list[Usual], week_events: list[CachedEvent], as_of_date=None
+) -> list[MissingCategoryGroup]:
+    """Coarse missing-usuals view for the current Mon-Sun week.
+
+    An event covers a usual if it matches (weekday, person, category) - so a
+    soccer game and a swim lesson both count as "sports covered" for that
+    person on that day. Only weekdays that have already passed (Mon..today)
+    are returned; upcoming days are excluded on purpose.
+    """
+    settings = get_settings()
+    tz = ZoneInfo(settings.calendar_tz)
+    today = as_of_date or datetime.now(tz).date()
+    today_wd = today.weekday()
+
+    covered: set[tuple[Weekday, str, Category]] = set()
+    for e in week_events:
+        local = e.time.start.astimezone(tz)
+        wd = Weekday(local.weekday())
+        cat = activity_category(e.activity_type)
+        for pid in e.matched_person_ids:
+            covered.add((wd, pid, cat))
+
+    buckets: dict[tuple[Weekday, str, Category], list[Usual]] = {}
+    for u in usuals:
+        if u.status not in ("kept", "proposed"):
+            continue
+        if int(u.weekday) > today_wd:
+            continue
+        cat = activity_category(u.activity_type)
+        if cat == Category.OTHER:
+            continue
+        key = (u.weekday, u.person_id, cat)
+        if key in covered:
+            continue
+        buckets.setdefault(key, []).append(u)
+
+    out: list[MissingCategoryGroup] = []
+    for (wd, pid, cat), group in buckets.items():
+        out.append(
+            MissingCategoryGroup(
+                weekday=wd,
+                person_id=pid,
+                category=cat,
+                representative_usual_ids=tuple(u.usual_id for u in group),
+                typical_hour_bands=tuple(sorted({u.hour_band for u in group})),
+            )
+        )
+    out.sort(key=lambda g: (int(g.weekday), g.category.value))
     return out
 
 

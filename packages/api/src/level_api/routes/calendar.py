@@ -6,7 +6,7 @@ from collections import Counter
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request
-from level_core.calendar.enrich import reclassify_all
+from level_core.calendar.enrich import enrich_agenda, reclassify_all
 from level_core.calendar.sync import refresh_agenda
 from level_core.calendar.webhook import verify_channel
 from level_core.storage.base import UserStore
@@ -65,8 +65,6 @@ async def calendar_webhook(
         raise HTTPException(status_code=401, detail="bad_channel")
 
     async def _refresh_and_enrich() -> None:
-        from level_core.calendar.enrich import enrich_agenda
-
         result = await refresh_agenda(store)
         if result.fingerprint_changed:
             await enrich_agenda(store)

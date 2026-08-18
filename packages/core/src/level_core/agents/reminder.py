@@ -43,7 +43,10 @@ Do NOT re-emit reminders listed under <negatives>."""
 
 
 async def run(
-    *, store: UserStore, message: str
+    *,
+    store: UserStore,
+    message: str,
+    history: list[dict[str, str]] | None = None,
 ) -> AgentResult:
     negatives = await recent_negatives(store, agent=NegativeAgent.REMINDER, limit=20)
     context: dict[str, Any] = {
@@ -53,6 +56,8 @@ async def run(
         ],
         "negatives": [{"field": n.field, "value": n.value} for n in negatives],
     }
+    if history:
+        context["prior_turns"] = history
     spec = AgentSpec(
         name="ReminderAgent",
         model="flash",

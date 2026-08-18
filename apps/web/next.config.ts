@@ -1,20 +1,24 @@
 import type { NextConfig } from "next";
 
-/** Backend for /v1 rewrites — keeps session cookies first-party on :3000. */
-const API_PROXY_TARGET =
-  process.env.LEVEL_API_PROXY_TARGET?.replace(/\/$/, "") || "http://127.0.0.1:8080";
+const apiTarget = process.env.LEVEL_API_PROXY_TARGET ?? "http://127.0.0.1:8080";
 
-const nextConfig: NextConfig = {
-  output: "standalone",
+const config: NextConfig = {
   reactStrictMode: true,
   async rewrites() {
+    return [{ source: "/v1/:path*", destination: `${apiTarget}/v1/:path*` }];
+  },
+  async headers() {
     return [
       {
-        source: "/v1/:path*",
-        destination: `${API_PROXY_TARGET}/v1/:path*`,
+        source: "/:path*",
+        headers: [
+          { key: "X-Content-Type-Options", value: "nosniff" },
+          { key: "X-Frame-Options", value: "DENY" },
+          { key: "Referrer-Policy", value: "no-referrer" },
+        ],
       },
     ];
   },
 };
 
-export default nextConfig;
+export default config;

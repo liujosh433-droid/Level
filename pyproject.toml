@@ -1,72 +1,69 @@
 [project]
 name = "level"
-version = "0.1.0"
-description = "Level — a warm-but-honest AI decision partner for busy caregivers."
-readme = "README.md"
+version = "2.0.0"
+description = "Level - caregiver partner (rebuilt for All Things Agentic hackathon)"
 requires-python = ">=3.12"
-authors = [{ name = "Level Team" }]
-
-# The root project pulls in every workspace member so `uv sync` at the repo
-# root installs everything at once. Individual deployables (api, jobs) declare
-# their own runtime deps in their own pyproject.toml.
-dependencies = [
-    "level-core",
-    "level-api",
-    "level-jobs",
-]
-
-[dependency-groups]
-dev = [
-    "pytest>=8.2",
-    "pytest-asyncio>=0.23",
-    "pytest-cov>=5.0",
-    "pytest-mock>=3.14",
-    "respx>=0.21",
-    "ruff>=0.6",
-    "mypy>=1.11",
-    "types-pyyaml>=6.0",
-    "httpx>=0.27",
-]
-
-[tool.uv]
-package = false
+readme = "README.md"
 
 [tool.uv.workspace]
-members = ["packages/api", "packages/core", "packages/jobs"]
+members = ["packages/core", "packages/api", "packages/jobs"]
 
 [tool.uv.sources]
 level-core = { workspace = true }
 level-api = { workspace = true }
 level-jobs = { workspace = true }
 
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=5.0",
+    "httpx>=0.27",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "types-requests>=2.32",
+]
+
 [tool.pytest.ini_options]
 minversion = "8.0"
-addopts = [
-    "-ra",
-    "--strict-markers",
-    "--strict-config",
-    "--tb=short",
-]
-testpaths = ["tests"]
+addopts = "-ra --strict-markers"
 asyncio_mode = "auto"
+testpaths = ["tests"]
 markers = [
-    "integration: end-to-end tests that wire multiple components together",
-    "cloud: tests that require real GCP credentials (skipped by default)",
+    "unit: fast in-process tests (LEVEL_ENV=local, no network)",
+    "e2e: end-to-end through FastAPI (LEVEL_ENV=local)",
+    "security: prompt-injection + auth + Firestore rules",
+    "cloud: requires GCP credentials, skipped by default",
 ]
 
-[tool.coverage.run]
-source = ["packages"]
-branch = true
-omit = [
-    "*/tests/*",
-    "*/__init__.py",
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "PL"]
+ignore = [
+    "PLR0911",
+    "PLR0912",
+    "PLR0913",
+    "PLR0915",
+    "PLR2004",
+    "PLC0415",
+    "B008",
+    "SIM102",
+    "SIM103",
+    "SIM108",
+    "SIM117",
+    "E501",
+    "PLR1714",
+    "PLW0603",
+    "UP046",
 ]
 
-[tool.coverage.report]
-exclude_lines = [
-    "pragma: no cover",
-    "if TYPE_CHECKING:",
-    "raise NotImplementedError",
-    "\\.\\.\\.",
-]
-show_missing = true
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+files = ["packages"]

@@ -1,0 +1,38 @@
+flowchart TD
+  User([Caregiver])
+  Web[Next.js dashboard\napps/web]
+  Api[FastAPI on Cloud Run\npackages/api]
+  Job[Nightly Cloud Run Job\npackages/jobs]
+  Store[(Firestore\nusers/uid/**)]
+  Vertex[Gemini 3.5\nvia Vertex AI]
+  Cal[Google Calendar API]
+  Gmail[Gmail API]
+  Browser[Browser\nWeb Speech API]
+
+  User -->|"HTTPS + cookie"| Web
+  Web -->|"/v1/*"| Api
+  Web <-->|"mic + TTS"| Browser
+
+  Api -->|"read/write"| Store
+  Api -->|"events + watch"| Cal
+  Api -->|"send"| Gmail
+  Api -->|"call_agent\n(structured JSON,\nsource_span guard,\ncost cap)"| Vertex
+
+  Cal -->|"push"| Webhook[/v1/calendar/webhook/]
+  Webhook --> Api
+
+  subgraph Agents [ADK agents]
+    Router[ChatRouterAgent]
+    Role[RoleAgent]
+    Usual[UsualAgent]
+    Activity[ActivityAgent]
+    Priority[PriorityAgent]
+    Reminder[ReminderAgent]
+    Email[EmailAgent]
+    Summary[SummaryAgent]
+  end
+  Api --> Agents
+  Agents --> Vertex
+
+  Job -->|"nightly recompute\n+ TTL + watch renew"| Store
+  Job --> Cal

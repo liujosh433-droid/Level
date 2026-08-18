@@ -1,137 +1,104 @@
-# Level — GCP setup (do this early)
+# Level - Setup guide
 
-We want real Vertex / Firestore / Model Armor running as soon as possible.
-Don't wait until demo week.
+Two paths: **local** (offline, JSON on disk, no GCP needed) and **cloud**
+(Cloud Run + Firestore + Vertex).
 
-## 1. Tools on your Mac (≈5 min)
+---
 
-```bash
-brew install --cask google-cloud-sdk
-brew install terraform
-brew install --cask docker   # only needed when we start deploying images
-```
+## Local (offline, 60 seconds)
 
-Then restart your shell (or `source ~/.zshrc`) and confirm:
+Prereqs: `node >= 20`, `python >= 3.12`. `uv` is bundled at `.tools/uv`.
 
-```bash
-gcloud --version
-terraform -version
-```
+1. `cp .env.example .env` and fill in at least:
+   - `LEVEL_ENV=local`
+   - `GOOGLE_OAUTH_CLIENT_ID` + `GOOGLE_OAUTH_CLIENT_SECRET`
+   - `LEVEL_SESSION_SECRET` (any long random string)
+2. `make install`
+3. `make dev`
+4. Open `http://127.0.0.1:3000`, click **Connect Google**.
 
-## 2. Gemini key for local smoke (today)
+Don't want to connect a real calendar? `make demo-seed` loads an Alpha/Beta
+family with 4 weeks of fake events, usuals, priorities, and a reminder.
+Then visit `/today` to see the seeded UI.
 
-1. Rotate the key that was pasted into chat: https://aistudio.google.com/apikey
-2. Create a new key.
-3. Put it in `.env` (never paste into chat):
+---
 
-```bash
-cd /Users/annamokkapati/hack/level
-cp .env.example .env
-# edit .env — set GOOGLE_API_KEY=...
-```
+## Google OAuth consent screen
 
-4. Smoke test:
-
-```bash
-uv run python scripts/smoke_gemini.py
-```
-
-## 3. GCP project + billing (as soon as credit lands)
-
-Credits take up to 72 business hours after the form. When they arrive:
-
-```bash
-gcloud auth login
-gcloud auth application-default login
-
-# Create the project (or reuse one)
-gcloud projects create project-c31bdcdc-f293-47c2-a4c --name="Level Hackathon"
-gcloud config set project project-c31bdcdc-f293-47c2-a4c
-
-# Link billing (pick the account that has the $150 credit)
-gcloud billing accounts list
-gcloud billing projects link project-c31bdcdc-f293-47c2-a4c --billing-account=XXXXXX-XXXXXX-XXXXXX
-```
-
-## 4. Terraform apply (real infra — Vertex + Firestore + Model Armor)
-
-```bash
-cd infra/terraform
-cp terraform.tfvars.example terraform.tfvars
-# edit terraform.tfvars — confirm project_id
-
-terraform init
-terraform plan
-terraform apply   # Vector Search deploy can take 20–40 min the first time
-```
-
-Then copy outputs into `.env`:
-
-```bash
-# from terraform output
-LEVEL_ENV=cloud
-LEVEL_VECTOR_INDEX_ID=...
-LEVEL_VECTOR_INDEX_ENDPOINT_ID=...
-LEVEL_VECTOR_DEPLOYED_INDEX_ID=level_signals_deployed
-LEVEL_MODEL_ARMOR_TEMPLATE_INBOUND=projects/.../templates/level-inbound
-LEVEL_MODEL_ARMOR_TEMPLATE_OUTBOUND=projects/.../templates/level-outbound
-```
-
-Re-run the smoke test in cloud mode:
-
-```bash
-LEVEL_ENV=cloud uv run python scripts/smoke_gemini.py
-```
-
-## Cost expectations while testing early
-
-| Service | While active | Notes |
-|---|---|---|
-| Vertex Vector Search endpoint | ~$30–90/mo | Biggest line item — keep up during active testing |
-| Gemini (Pro/Flash) | cents–dollars/day | Cheap at hackathon volume |
-| Firestore / Cloud Run / Storage | free-tier-ish | Negligible |
-| Model Armor | cents/call | Negligible |
-
-If you pause for >1 day and want to save money:
-
-```bash
-cd infra/terraform
-# temporarily: set enable_vector_search = false, then
-terraform apply
-```
-
-Or tear everything down: `terraform destroy`.
-
-## 5. Real parent test (Calendar + chat)
-
-Child names are optional on calendar titles: Level still opens a **child care** role from pickup/school/sports cues (shown as “your kids” until a name appears). Named nodes fill in from `Title — Name`, `Jordan's soccer`, or a Tell Level note like “my kid is Maya.”
-
-Note: with `LEVEL_ENV=local`, memory is in-process — restarting the API clears guest data. For persistence, set `LEVEL_ENV=cloud` + `LEVEL_VECTOR_BACKEND=firestore` (ADC via `gcloud auth application-default login`).
-
-### B. Google Calendar + school-note email
-
-1. In GCP Console → **APIs & Services** → enable **Google Calendar API** and **Gmail API**.
-2. **OAuth consent screen** → **Add or remove scopes** → include:
+1. GCP Console -> **APIs & Services -> Enabled APIs & Services** -> enable:
+   - Google Calendar API
+   - Gmail API
+   - Vertex AI API (cloud only)
+2. **OAuth consent screen** -> External -> add scopes:
+   - `openid`, `email`, `profile`
+   - `https://www.googleapis.com/auth/calendar`
    - `https://www.googleapis.com/auth/calendar.events`
-   - `https://www.googleapis.com/auth/gmail.send` (Send email — school / clinic notes)
-3. **Credentials** → Create **OAuth client ID** → Application type **Web application**.
-4. Authorized redirect URI (exact):
+   - `https://www.googleapis.com/auth/gmail.send`
+3. **Credentials** -> Create OAuth client -> **Web application** ->
+   Authorized redirect URIs:
+   - `http://localhost:8080/v1/auth/google/callback` (local)
+   - `https://<api-domain>/v1/auth/google/callback` (cloud)
+4. Add **test users**: `testing@devpost.com`, `cloudhackathons@google.com`,
+   plus your own email.
 
-   `http://localhost:8080/v1/auth/google/callback`
+---
 
-5. Put client id/secret in `.env`:
+## Cloud deploy (Cloud Run + Firestore + Vertex)
+
+1. `gcloud auth login` and `gcloud config set project <YOUR_PROJECT>`.
+2. Copy tfvars and fill in:
+
+   ```bash
+   cp infra/terraform/terraform.tfvars.example infra/terraform/terraform.tfvars
+   $EDITOR infra/terraform/terraform.tfvars
+   ```
+
+3. Provision infra:
+
+   ```bash
+   make tf-init && make tf-apply
+   ```
+
+   This creates Firestore, Artifact Registry, per-service SAs, IAM,
+   Cloud Run service (stub), nightly Cloud Run Job, Cloud Scheduler trigger,
+   and Secret Manager entries for `LEVEL_SESSION_SECRET` and the OAuth
+   client secret.
+
+4. Publish Firestore rules:
+
+   ```bash
+   gcloud firestore databases update --database='(default)' \
+     --location=us-central1
+   gcloud firestore security-rules deploy infra/firestore.rules
+   ```
+
+5. Build + deploy images:
+
+   ```bash
+   make deploy-api
+   make deploy-jobs
+   ```
+
+6. Grab the API URL from `terraform output api_url` and set it as
+   `LEVEL_PUBLIC_API_URL` on the API service (for calendar webhook), then
+   re-deploy.
+
+7. Update your OAuth consent screen redirect URI to match the new API URL.
+
+---
+
+## Cost guardrails
+
+- `LEVEL_DAILY_COST_CAP_USD` defaults to $2/user/day. When exceeded, the
+  agents/gate.py drops non-chat AI calls until midnight PT.
+- `LEVEL_USER_RATE_PER_HOUR` / `LEVEL_USER_RATE_PER_DAY` cap raw call
+  counts. Both stored in the audit log so `/admin/traces` shows spend.
+
+## Regenerating the architecture diagram
 
 ```bash
-GOOGLE_OAUTH_CLIENT_ID=....apps.googleusercontent.com
-GOOGLE_OAUTH_CLIENT_SECRET=...
-GOOGLE_OAUTH_REDIRECT_URI=http://localhost:8080/v1/auth/google/callback
-LEVEL_WEB_APP_URL=http://localhost:3000
+make diagram   # requires @mermaid-js/mermaid-cli
 ```
 
-6. Restart API → Sources → **Connect Google** → sync Calendar. On Google’s screen, leave **Send email** checked.
-7. Calendar push: leave `LEVEL_PUBLIC_API_URL` blank on localhost — Today pulls deltas on each load. In prod (or a tunnel to `:8080`), set it to the public `https://…` API origin so Google can POST `/v1/sources/google/webhook`.
-8. OAuth consent screen: add your Google account as a test user if the app is in Testing. `gmail.send` is a sensitive scope — if it isn’t listed on the consent screen, Google will connect Calendar but Level still can’t send the teacher a note.
-
-### C. What “helpful in reality” looks like
-
-Bring a decision you actually care about (school, job hours, custody logistics). Judge success by whether Level cites *your* calendar and chat evidence and asks a clarifying question you wouldn’t get from a generic assistant.
+Source: [`docs/architecture.mmd`](docs/architecture.mmd) -> renders to
+`docs/architecture.png`.

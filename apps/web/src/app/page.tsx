@@ -26,13 +26,8 @@ export default function HomePage() {
   }, [router]);
 
   function start() {
-    // Always walk through the pitch for new folks; welcome mints the session.
     void resolveHomeDestination().then(({ dest }) => {
-      if (dest === "/today") {
-        router.push("/today");
-        return;
-      }
-      router.push("/welcome");
+      router.push(dest === "/today" ? "/today" : "/sources");
     });
   }
 
@@ -60,15 +55,15 @@ export default function HomePage() {
       <div className={styles.inner}>
         <div className={styles.copy}>
           <p className={styles.brand}>Level</p>
-          <h1 className={styles.headline}>Steady when everything else isn’t.</h1>
+          <h1 className={styles.headline}>Steady when everything else isn&apos;t.</h1>
           <p className={styles.sub}>
-            For busy caregivers — see what saying yes would crowd out from the care roles you hold.
+            For busy caregivers &mdash; see what saying yes would crowd out from the care roles you hold.
           </p>
           <div className={styles.cta}>
             <button type="button" className={styles.primary} onClick={start}>
               Get Started
             </button>
-            <p className={styles.hint}>We’ll explain first — then a quick connect</p>
+            <p className={styles.hint}>We&apos;ll explain first &mdash; then a quick connect</p>
           </div>
         </div>
 

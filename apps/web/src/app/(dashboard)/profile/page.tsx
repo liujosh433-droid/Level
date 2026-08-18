@@ -1,275 +1,123 @@
 "use client";
 
-import { Suspense, useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
-import { AppShell } from "@/components/AppShell";
-import {
-  CareLoadGraph,
-  DashboardWorkspace,
-  TellLevelPanel,
-  TellLevelReply,
-  TellLevelYou,
-} from "@/components/dashboard";
-import {
-  AuthError,
-  confirmProposal,
-  declineProposal,
-  fetchMe,
-  fetchProfile,
-  resolveUsual,
-  reviewProfile,
-  sendChat,
-  submitSchoolPaper,
-  type CommitmentProposal,
-  type Profile,
-  type ProposedUsualView,
-} from "@/lib/api";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import Chat from "@/components/Chat";
+import { api } from "@/lib/api";
+import type { CarePerson, Priority, Usual } from "@/lib/types";
 import styles from "./profile.module.css";
-import chatStyles from "../today/today.module.css";
 
-type ChatItem =
-  | { id: string; kind: "checkin"; you: string; reply: string }
-  | { id: string; kind: "proposal"; proposal: CommitmentProposal }
-  | { id: string; kind: "paper"; you: string; reply: string };
+type ProfileResp = { people: CarePerson[]; usuals: Usual[]; priorities: Priority[] };
 
-const CARE_ROLE_LABELS: Record<string, string> = {
-  child_care: "Child care",
-  elder_care: "Elder care",
-  paid_work: "Work/Job",
-  self_recovery: "Self & recovery",
-  household_logistics: "Household logistics",
-  partner_coparent: "Co-parent / partner",
+const WEEKDAY_LABEL = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const BAND_LABEL: Record<string, string> = {
+  early_morning: "5\u20139am",
+  morning: "9am\u201312pm",
+  midday: "12\u20132pm",
+  afternoon: "2\u20135pm",
+  evening: "5\u20138pm",
+  night: "8pm\u2013late",
+  overnight: "overnight",
 };
 
-function careRoleLabel(id?: string | null): string | null {
-  if (!id) return null;
-  return CARE_ROLE_LABELS[id] ?? id.replace(/_/g, " ");
+const RELATION_LABEL: Record<string, string> = {
+  self: "you",
+  child: "child",
+  elder: "elder",
+  partner: "partner",
+  friend: "friend",
+  other: "other",
+};
+
+type Role = {
+  key: string;
+  label: string;
+  people: CarePerson[];
+};
+
+function groupByRole(people: CarePerson[]): Role[] {
+  const buckets = new Map<string, CarePerson[]>();
+  for (const person of people) {
+    const key = person.is_self ? "self" : person.relation || "other";
+    const arr = buckets.get(key) ?? [];
+    arr.push(person);
+    buckets.set(key, arr);
+  }
+  const order = ["self", "child", "elder", "partner", "friend", "other"];
+  return order
+    .filter((k) => buckets.has(k))
+    .map((k) => ({
+      key: k,
+      label:
+        k === "self"
+          ? "You"
+          : k === "child"
+            ? "Children"
+            : k === "elder"
+              ? "Elders"
+              : k === "partner"
+                ? "Partner"
+                : k === "friend"
+                  ? "Friends"
+                  : "Others",
+      people: (buckets.get(k) ?? []).sort((a, b) => a.display_name.localeCompare(b.display_name)),
+    }));
 }
 
-function usualWhoLabel(usual: ProposedUsualView): string {
-  const role = (usual.care_role_id || "").trim().toLowerCase();
-  const relation = (usual.their_relation || "").trim().toLowerCase();
-  if (
-    role === "elder_care" ||
-    relation === "elder" ||
-    relation === "adult child"
-  ) {
-    return "Elder care";
-  }
-  if (role === "child_care" || relation === "child") {
-    return "child";
-  }
-  if (relation && relation !== "adult child") {
-    return usual.their_relation || "";
-  }
-  return "";
-}
+function buildSummary(people: CarePerson[], usuals: Usual[], priorities: Priority[]): string {
+  const kept = people.filter((p) => p.status === "kept" || p.status === "proposed");
+  const kids = kept.filter((p) => !p.is_self && p.relation === "child");
+  const elders = kept.filter((p) => !p.is_self && p.relation === "elder");
+  const partner = kept.find((p) => !p.is_self && p.relation === "partner");
 
-function usualIds(usual: ProposedUsualView): string[] {
-  if (usual.usual_ids && usual.usual_ids.length > 0) {
-    return usual.usual_ids;
-  }
-  return usual.usual_id ? [usual.usual_id] : [];
-}
-
-function formatCareUpdated(iso: string): string {
-  try {
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) return iso;
-    return d.toLocaleString(undefined, {
-      month: "short",
-      day: "numeric",
-      hour: "numeric",
-      minute: "2-digit",
-    });
-  } catch {
-    return iso;
-  }
-}
-
-function ManifestoSummary({
-  text,
-  fallbackItems,
-}: {
-  text: string;
-  fallbackItems: string[];
-}) {
-  const lines = text
-    .split("\n")
-    .map((l) => l.trim())
-    .filter(Boolean);
-  let bullets = lines
-    .filter((l) => l.startsWith("•") || l.startsWith("-"))
-    .map((l) => l.replace(/^[•\-]\s*/, ""));
-  // Older paragraph-style manifesto → use priority bullets instead of one long line.
-  if (bullets.length === 0 && fallbackItems.length > 0) {
-    bullets = fallbackItems.slice(0, 3);
-  }
-  const intro =
-    lines.find((l) => !l.startsWith("•") && !l.startsWith("-") && !l.includes(" — ")) ||
-    "Right now it looks like you prioritize";
-
-  if (bullets.length === 0) {
-    return <p className={styles.manifesto}>{text}</p>;
-  }
-
-  return (
-    <div className={styles.manifesto}>
-      <p className={styles.manifestoIntro}>{intro.replace(/:$/, "")}</p>
-      <ul className={styles.manifestoList}>
-        {bullets.map((b) => (
-          <li key={b}>{b}</li>
-        ))}
-      </ul>
-    </div>
-  );
-}
-
-function ProfileInner() {
-  const router = useRouter();
-  const [userId, setUserId] = useState("");
-  const [displayName, setDisplayName] = useState<string | null>(null);
-  const [googleConnected, setGoogleConnected] = useState(false);
-  const [profile, setProfile] = useState<Profile | null>(null);
-  const [draft, setDraft] = useState("");
-  const [chat, setChat] = useState<ChatItem[]>([]);
-  const [busy, setBusy] = useState(false);
-  const [status, setStatus] = useState<string | null>(null);
-  const [canSendEmail, setCanSendEmail] = useState(true);
-  const [paperText, setPaperText] = useState("");
-  const [paperFile, setPaperFile] = useState<File | null>(null);
-  const [paperFileKey, setPaperFileKey] = useState(0);
-  const [loading, setLoading] = useState(true);
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        // Navigate paints first; identity + profile load together in the background.
-        const [me, nextProfile] = await Promise.all([fetchMe(), fetchProfile()]);
-        if (cancelled) return;
-        setUserId(me.user_id);
-        setDisplayName(me.display_name);
-        setGoogleConnected(Boolean(me.google_connected));
-        setCanSendEmail(me.can_send_email !== false);
-        setProfile(nextProfile);
-      } catch (err) {
-        if (cancelled) return;
-        if (err instanceof AuthError) {
-          router.replace("/welcome");
-          return;
-        }
-        setStatus(err instanceof Error ? err.message : String(err));
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [router]);
-
-  async function onUsual(usual: ProposedUsualView, action: "keep" | "not_me") {
-    const ids = usualIds(usual);
-    if (busy || ids.length === 0) return;
-    setBusy(true);
-    setStatus(null);
-    try {
-      for (const usualId of ids) {
-        await resolveUsual(usualId, action);
-      }
-      const next = await fetchProfile();
-      setProfile(next);
-    } catch (err) {
-      setStatus(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function keepAllUsuals() {
-    const pending = profile?.proposed_usuals ?? [];
-    const ids = pending.flatMap(usualIds);
-    if (busy || ids.length === 0) return;
-    setBusy(true);
-    setStatus(null);
-    try {
-      for (const usualId of ids) {
-        await resolveUsual(usualId, "keep");
-      }
-      const next = await fetchProfile();
-      setProfile(next);
-    } catch (err) {
-      setStatus(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function setBullet(bulletId: string, next: "accepted" | "rejected") {
-    if (!userId) return;
-    setBusy(true);
-    try {
-      const updated = await reviewProfile(
-        [{ bullet_id: bulletId, status: next }],
-        false,
-      );
-      setProfile(updated);
-    } catch (err) {
-      setStatus(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function confirmAll() {
-    if (!userId || !profile?.bullets) return;
-    setBusy(true);
-    try {
-      const pending = profile.bullets.filter((b) => b.status === "pending");
-      const updated = await reviewProfile(
-        pending.map((b) => ({ bullet_id: b.bullet_id, status: "accepted" })),
-        true,
-      );
-      setProfile(updated);
-      setStatus("Saved.");
-    } catch (err) {
-      setStatus(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  function patchProposal(proposalId: string, patch: Partial<CommitmentProposal>) {
-    setChat((prev) =>
-      prev.map((it) =>
-        it.kind === "proposal" && it.proposal.proposal_id === proposalId
-          ? { ...it, proposal: { ...it.proposal, ...patch } }
-          : it,
-      ),
+  const parts: string[] = [];
+  if (kids.length > 0) {
+    parts.push(
+      `child care for ${kids.map((k) => k.display_name).join(" and ")}`,
     );
   }
+  if (elders.length > 0) {
+    parts.push(
+      `elder support for ${elders.map((e) => e.display_name).join(" and ")}`,
+    );
+  }
+  if (partner) parts.push(`co-parenting with ${partner.display_name}`);
 
-  async function onConfirm(proposal: CommitmentProposal, slotStart?: string) {
-    if (!userId || busy) return;
+  const rhythm = usuals.filter((u) => u.status === "kept" || u.status === "proposed").length;
+  if (rhythm > 0) {
+    parts.push(`${rhythm} weekly usual${rhythm === 1 ? "" : "s"}`);
+  }
+  const prio = priorities.filter((p) => p.status === "kept").length;
+  if (prio > 0) {
+    parts.push(`${prio} priorit${prio === 1 ? "y" : "ies"} you asked me to weigh`);
+  }
+  if (parts.length === 0) {
+    return "I don\u2019t have a picture of your care load yet \u2014 re-read your calendar and tell me anything else Level should know.";
+  }
+  return `Right now Level thinks you hold ${parts.join(", ")}.`;
+}
+
+export default function ProfilePage() {
+  const [data, setData] = useState<ProfileResp | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    const p = await api.get<ProfileResp>("/v1/profile");
+    setData(p);
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  async function refresh() {
+    if (busy) return;
     setBusy(true);
     setStatus(null);
     try {
-      const email =
-        proposal.kind === "school_send"
-          ? {
-              to_email: proposal.to_email,
-              email_subject: proposal.email_subject,
-              email_body: proposal.email_body,
-            }
-          : undefined;
-      const res = await confirmProposal(proposal.proposal_id, slotStart, email);
-      setChat((prev) =>
-        prev.map((it) =>
-          it.kind === "proposal" && it.proposal.proposal_id === proposal.proposal_id
-            ? { ...it, proposal: res.proposal }
-            : it,
-        ),
-      );
+      await api.post("/v1/profile/refresh", {});
+      await load();
+      setStatus("Re-read your calendar.");
     } catch (err) {
       setStatus(err instanceof Error ? err.message : String(err));
     } finally {
@@ -277,438 +125,235 @@ function ProfileInner() {
     }
   }
 
-  async function onDecline(proposal: CommitmentProposal) {
-    if (!userId || busy) return;
+  async function keepAll(entity: "person" | "usual") {
+    if (!data || busy) return;
     setBusy(true);
     try {
-      const updated = await declineProposal(proposal.proposal_id);
-      setChat((prev) =>
-        prev.map((it) =>
-          it.kind === "proposal" && it.proposal.proposal_id === proposal.proposal_id
-            ? { ...it, proposal: updated }
-            : it,
-        ),
-      );
-    } catch (err) {
-      setStatus(err instanceof Error ? err.message : String(err));
+      const items =
+        entity === "person"
+          ? data.people.filter((p) => p.status === "proposed")
+          : data.usuals.filter((u) => u.status === "proposed");
+      for (const it of items) {
+        const id = entity === "person" ? (it as CarePerson).person_id : (it as Usual).usual_id;
+        await api.post("/v1/profile/keep_not_me", { entity, id, status: "kept" });
+      }
+      await load();
     } finally {
       setBusy(false);
     }
   }
 
-  async function onSchoolPaper() {
-    const text = paperText.trim();
-    if ((!text && !paperFile) || busy) return;
+  async function setStatusFor(entity: "person" | "usual" | "priority", id: string, status: "kept" | "not_me") {
     setBusy(true);
-    setStatus(null);
     try {
-      const res = await submitSchoolPaper(text, paperFile);
-      if (res.proposal) {
-        setChat((prev) => [
-          ...prev,
-          { id: res.proposal!.proposal_id, kind: "proposal", proposal: res.proposal! },
-        ]);
-        setPaperText("");
-        setPaperFile(null);
-        setPaperFileKey((k) => k + 1);
-      } else if (res.ask) {
-        setChat((prev) => [
-          ...prev,
-          { id: `paper-${Date.now()}`, kind: "checkin", you: text.slice(0, 160), reply: res.ask ?? "" },
-        ]);
-      }
-    } catch (err) {
-      setStatus(err instanceof Error ? err.message : String(err));
+      await api.post("/v1/profile/keep_not_me", { entity, id, status });
+      await load();
     } finally {
       setBusy(false);
     }
   }
 
-  async function onTellMore(message: string) {
-    if (!userId || busy) return;
-    setDraft("");
-    setBusy(true);
-    setStatus(null);
-    try {
-      const res = await sendChat(message, true);
-      if (res.profile) setProfile(res.profile);
-      const next: ChatItem[] = [];
-      if (res.proposal) {
-        next.push({ id: res.proposal.proposal_id, kind: "proposal", proposal: res.proposal });
-      }
-      for (const proposal of res.school_proposals ?? []) {
-        next.push({ id: proposal.proposal_id, kind: "proposal", proposal });
-      }
-      if (res.wants_paper_upload) {
-        next.push({ id: `paper-${Date.now()}`, kind: "paper", you: message, reply: res.reply });
-      } else if (next.length === 0) {
-        next.push({ id: `checkin-${Date.now()}`, kind: "checkin", you: message, reply: res.reply });
-      }
-      setChat((prev) => [...prev, ...next]);
-    } catch (err) {
-      if (err instanceof AuthError) {
-        router.replace("/welcome");
-        return;
-      }
-      setStatus(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
-    }
-  }
+  const people = data?.people ?? [];
+  const usuals = data?.usuals ?? [];
+  const priorities = data?.priorities ?? [];
+  const summary = useMemo(() => buildSummary(people, usuals, priorities), [people, usuals, priorities]);
 
-  const bullets = profile?.bullets ?? [];
-  const pendingCount = bullets.filter((b) => b.status === "pending").length;
+  const roles = groupByRole(people.filter((p) => p.status !== "not_me"));
+  const activeUsuals = usuals.filter((u) => u.status !== "not_me");
+  const activePriorities = priorities.filter((p) => p.status === "kept");
+  const pendingPeople = people.filter((p) => p.status === "proposed").length;
+  const pendingUsuals = usuals.filter((u) => u.status === "proposed").length;
 
   return (
-    <AppShell userId={userId} displayName={displayName} dashboard contentOnly>
-      <DashboardWorkspace
-        railAriaLabel="Tell Level more"
-        rail={
-          <div className={styles.railStack}>
-            <div className={styles.chatBlock}>
-              <TellLevelPanel
-                title="Ask Level"
-                lead="Priorities, a hard call, or anything else — same Level as Today. Say you need to email the school and it will draft here."
-                placeholder='“Sunday dinners are non-negotiable” or “What’s crowding this week?”'
-                value={draft}
-                onChange={setDraft}
-                onSubmit={onTellMore}
-                busy={busy}
-                disabled={!userId}
-                submitLabel="Send"
-                busyLabel="Thinking…"
-                minLength={4}
-                voiceEnabled
-                stickyInput={false}
-                onVoiceError={setStatus}
-                error={null}
-              >
-                {chat.length > 0
-                  ? chat.map((item) =>
-                      item.kind === "checkin" ? (
-                        <article key={item.id}>
-                          <TellLevelYou>{item.you}</TellLevelYou>
-                          <TellLevelReply>{item.reply}</TellLevelReply>
-                        </article>
-                      ) : item.kind === "paper" ? (
-                        <article key={item.id}>
-                          <TellLevelYou>{item.you}</TellLevelYou>
-                          <TellLevelReply>
-                            <p>{item.reply}</p>
-                            <label className={chatStyles.paperFile}>
-                              <input
-                                key={paperFileKey}
-                                type="file"
-                                accept="application/pdf,image/*,.txt"
-                                disabled={busy || !userId}
-                                onChange={(e) => setPaperFile(e.target.files?.[0] ?? null)}
-                              />
-                              <span>{paperFile ? paperFile.name : "Upload a PDF or photo"}</span>
-                            </label>
-                            <textarea
-                              className={chatStyles.paperInput}
-                              rows={3}
-                              value={paperText}
-                              onChange={(e) => setPaperText(e.target.value)}
-                              placeholder="Or paste the form text…"
-                              disabled={busy || !userId}
-                            />
+    <div className={styles.wrap}>
+      <header className={styles.header}>
+        <h1>About me</h1>
+        <p className={styles.sub}>
+          What Level has gathered about your care load. Keep what fits, dismiss what
+          doesn&apos;t &mdash; and tell Level more below.
+        </p>
+        <div className={styles.headerActions}>
+          <button className="button-ghost" onClick={refresh} disabled={busy}>
+            {busy ? "Re-reading calendar\u2026" : "Re-read calendar"}
+          </button>
+          {status ? <span className={styles.statusChip}>{status}</span> : null}
+        </div>
+      </header>
+
+      <section className={`card ${styles.summary}`}>
+        <p className={styles.summaryLead}>{summary}</p>
+        <ul className={styles.metrics}>
+          <li>
+            <span className={styles.metricValue}>{roles.reduce((n, r) => n + r.people.length, 0)}</span>
+            <span className={styles.metricLabel}>people</span>
+          </li>
+          <li>
+            <span className={styles.metricValue}>{activeUsuals.length}</span>
+            <span className={styles.metricLabel}>usuals</span>
+          </li>
+          <li>
+            <span className={styles.metricValue}>{activePriorities.length}</span>
+            <span className={styles.metricLabel}>priorities</span>
+          </li>
+        </ul>
+      </section>
+
+      <div className={styles.grid}>
+        <div className={styles.mainCol}>
+          <section className={styles.section}>
+            <div className={styles.sectionHead}>
+              <h2>Care roles</h2>
+              {pendingPeople > 0 ? (
+                <button
+                  type="button"
+                  className={styles.linkAction}
+                  onClick={() => void keepAll("person")}
+                  disabled={busy}
+                >
+                  Keep all {pendingPeople}
+                </button>
+              ) : null}
+            </div>
+            {roles.length === 0 ? (
+              <p className={styles.meta}>
+                Nothing yet. Tap &ldquo;Re-read calendar&rdquo; and Level will draft the
+                people it thinks you hold.
+              </p>
+            ) : (
+              <div className={styles.rolesStack}>
+                {roles.map((role) => (
+                  <div key={role.key} className={styles.roleGroup}>
+                    <h3>{role.label}</h3>
+                    <ul className={styles.pillList}>
+                      {role.people.map((p) => (
+                        <li
+                          key={p.person_id}
+                          className={`${styles.personPill} ${p.status === "proposed" ? styles.pending : ""}`}
+                        >
+                          <span className={styles.pillName}>{p.display_name}</span>
+                          <span className={styles.pillRelation}>
+                            {RELATION_LABEL[p.relation] ?? p.relation}
+                          </span>
+                          <div className={styles.pillActions}>
+                            {p.status === "proposed" ? (
+                              <button
+                                type="button"
+                                className={styles.keepBtn}
+                                onClick={() => void setStatusFor("person", p.person_id, "kept")}
+                                disabled={busy}
+                              >
+                                Keep
+                              </button>
+                            ) : null}
                             <button
                               type="button"
-                              className={chatStyles.secondaryAction}
-                              disabled={busy || (!paperText.trim() && !paperFile)}
-                              onClick={() => void onSchoolPaper()}
+                              className={styles.notMeBtn}
+                              onClick={() => void setStatusFor("person", p.person_id, "not_me")}
+                              disabled={busy}
+                              title="Not me / not this person"
                             >
-                              Draft the email
+                              Not me
                             </button>
-                          </TellLevelReply>
-                        </article>
-                      ) : (
-                        <article key={item.id}>
-                          <TellLevelYou>{item.proposal.user_text}</TellLevelYou>
-                          <TellLevelReply>
-                            <p className={chatStyles.proposalSummary}>{item.proposal.summary}</p>
-                            <p>{item.proposal.level_message}</p>
-                            {item.proposal.kind === "school_send" && item.proposal.status === "pending" ? (
-                              <div className={chatStyles.emailPreview}>
-                                <label className={chatStyles.emailField}>
-                                  <span>To</span>
-                                  <input
-                                    type="email"
-                                    value={item.proposal.to_email ?? ""}
-                                    onChange={(e) =>
-                                      patchProposal(item.proposal.proposal_id, {
-                                        to_email: e.target.value,
-                                      })
-                                    }
-                                    disabled={busy}
-                                  />
-                                </label>
-                                <label className={chatStyles.emailField}>
-                                  <span>Subject</span>
-                                  <input
-                                    type="text"
-                                    value={item.proposal.email_subject ?? ""}
-                                    onChange={(e) =>
-                                      patchProposal(item.proposal.proposal_id, {
-                                        email_subject: e.target.value,
-                                      })
-                                    }
-                                    disabled={busy}
-                                  />
-                                </label>
-                                <label className={chatStyles.emailField}>
-                                  <span>Message</span>
-                                  <textarea
-                                    rows={6}
-                                    value={item.proposal.email_body ?? ""}
-                                    onChange={(e) =>
-                                      patchProposal(item.proposal.proposal_id, {
-                                        email_body: e.target.value,
-                                      })
-                                    }
-                                    disabled={busy}
-                                  />
-                                </label>
-                              </div>
-                            ) : null}
-                            {item.proposal.status === "pending" ? (
-                              <div className={chatStyles.proposalActions}>
-                                {item.proposal.kind === "school_send" ? (
-                                  canSendEmail ? (
-                                    <button
-                                      type="button"
-                                      className={chatStyles.primaryAction}
-                                      disabled={busy || !(item.proposal.to_email ?? "").includes("@")}
-                                      onClick={() => void onConfirm(item.proposal)}
-                                    >
-                                      Send
-                                    </button>
-                                  ) : (
-                                    <a href="/sources?need_gmail=1" className={chatStyles.primaryAction}>
-                                      Allow sending email on Sources
-                                    </a>
-                                  )
-                                ) : item.proposal.kind === "add" ? (
-                                  <button
-                                    type="button"
-                                    className={chatStyles.primaryAction}
-                                    disabled={busy}
-                                    onClick={() => void onConfirm(item.proposal)}
-                                  >
-                                    Add anyway
-                                  </button>
-                                ) : null}
-                                <button
-                                  type="button"
-                                  className={chatStyles.ghostAction}
-                                  disabled={busy}
-                                  onClick={() => void onDecline(item.proposal)}
-                                >
-                                  Never mind
-                                </button>
-                              </div>
-                            ) : null}
-                            {item.proposal.status === "confirmed" ? (
-                              <p className={styles.meta}>
-                                {item.proposal.kind === "school_send"
-                                  ? "Sent — the school has it."
-                                  : "Added to your Google Calendar."}
-                              </p>
-                            ) : null}
-                          </TellLevelReply>
-                        </article>
-                      ),
-                    )
-                  : null}
-              </TellLevelPanel>
-            </div>
-            <div className={styles.graphBlock}>
-              <CareLoadGraph graph={profile?.care_graph} />
-            </div>
-          </div>
-        }
-      >
-        <h1 className={styles.title}>About me</h1>
-        <p className={styles.sub}>
-          What Level has gathered about you — care load, preferences, and how you like to be
-          helped — grounded only in what you’ve shared or connected.
-        </p>
-
-        {profile &&
-        (profile.care_profile_version != null || profile.care_role_count) ? (
-          <p className={styles.versionLine}>
-            Care Profile v{profile.care_profile_version ?? "—"}
-            {profile.care_role_count != null
-              ? ` · ${profile.care_role_count} role${profile.care_role_count === 1 ? "" : "s"}`
-              : ""}
-            {profile.care_updated_at
-              ? ` · updated ${formatCareUpdated(profile.care_updated_at)}`
-              : ""}
-            {typeof profile.fact_count === "number"
-              ? ` · ${profile.fact_count} facts`
-              : ""}
-          </p>
-        ) : null}
-
-        {profile?.manifesto || bullets.length > 0 ? (
-          <ManifestoSummary
-            text={profile?.manifesto || ""}
-            fallbackItems={bullets.map((b) => b.text)}
-          />
-        ) : null}
-
-        {loading ? (
-          <p className={styles.meta}>Loading about you…</p>
-        ) : bullets.length === 0 ? (
-          <p className={styles.meta}>
-            {googleConnected ? (
-              <>
-                Your calendar is connected — refresh in a moment and Level will draft what it
-                knows from your week (care roles, people, and load).
-              </>
-            ) : (
-              <>
-                Connect Google on Sources so Level can learn from your real calendar —
-                about a minute.
-              </>
-            )}
-          </p>
-        ) : (
-          <>
-            <h2 className={styles.sectionTitle}>Care load</h2>
-            <ul className={styles.list}>
-            {bullets.map((b) => (
-              <li key={b.bullet_id}>
-                <span className={styles.cat}>
-                  {careRoleLabel(b.care_role_id) || "Care role"}
-                  {b.status === "accepted" || b.status === "edited" ? " · Holding" : ""}
-                </span>
-                <p>{b.text}</p>
-                <div className={styles.row}>
-                  <button
-                    type="button"
-                    className={styles.keep}
-                    disabled={busy || b.status === "accepted" || b.status === "edited"}
-                    onClick={() => void setBullet(b.bullet_id, "accepted")}
-                  >
-                    Keep
-                  </button>
-                  <button
-                    type="button"
-                    className={styles.notMe}
-                    disabled={busy}
-                    onClick={() => void setBullet(b.bullet_id, "rejected")}
-                  >
-                    Not me
-                  </button>
-                </div>
-              </li>
-            ))}
-          </ul>
-          </>
-        )}
-
-        {bullets.length > 0 && pendingCount > 0 && (
-          <div className={styles.primaryWrap}>
-            <button
-              type="button"
-              className={styles.primary}
-              disabled={busy}
-              onClick={() => void confirmAll()}
-            >
-              Looks right
-            </button>
-          </div>
-        )}
-
-        {profile?.proposed_usuals && profile.proposed_usuals.length > 0 ? (
-          <>
-            <h2 className={styles.sectionTitle}>Usuals</h2>
-            <ul className={styles.list}>
-              {profile.proposed_usuals.map((usual) => {
-                const slots =
-                  usual.slots && usual.slots.length > 0
-                    ? usual.slots
-                    : [
-                        {
-                          usual_id: usual.usual_id,
-                          weekday: usual.weekday,
-                          start_minute: usual.start_minute,
-                          end_minute: usual.end_minute,
-                          when_label: usual.when_label,
-                        },
-                      ];
-                const who = usualWhoLabel(usual);
-                return (
-                  <li key={`${usual.person_id}:${usual.label}:${usual.usual_id}`}>
-                    <span className={styles.cat}>
-                      {usual.label || "Usual"}
-                      {who ? ` · ${who}` : ""}
-                    </span>
-                    <p>
-                      {usual.display_name
-                        ? `${usual.display_name} ${usual.label}`
-                        : usual.label}
-                    </p>
-                    <ul className={styles.usualSlots}>
-                      {slots.map((slot) => (
-                        <li key={slot.usual_id}>
-                          {slot.when_label || "Repeating"}
+                          </div>
                         </li>
                       ))}
                     </ul>
-                    <div className={styles.row}>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+
+          <section className={styles.section}>
+            <div className={styles.sectionHead}>
+              <h2>Weekly usuals</h2>
+              {pendingUsuals > 0 ? (
+                <button
+                  type="button"
+                  className={styles.linkAction}
+                  onClick={() => void keepAll("usual")}
+                  disabled={busy}
+                >
+                  Keep all {pendingUsuals}
+                </button>
+              ) : null}
+            </div>
+            {activeUsuals.length === 0 ? (
+              <p className={styles.meta}>
+                No repeating patterns yet. A few weeks of calendar history helps Level spot the rhythm.
+              </p>
+            ) : (
+              <ul className={styles.usualList}>
+                {activeUsuals.map((u) => (
+                  <li key={u.usual_id} className={`${styles.usualRow} ${u.status === "proposed" ? styles.pending : ""}`}>
+                    <div className={styles.usualBody}>
+                      <p className={styles.usualTitle}>{u.display_summary}</p>
+                      <p className={styles.usualMeta}>
+                        {WEEKDAY_LABEL[u.weekday] ?? "?"} &middot; {BAND_LABEL[u.hour_band] ?? u.hour_band}
+                      </p>
+                    </div>
+                    <div className={styles.usualActions}>
+                      {u.status === "proposed" ? (
+                        <button
+                          type="button"
+                          className={styles.keepBtn}
+                          onClick={() => void setStatusFor("usual", u.usual_id, "kept")}
+                          disabled={busy}
+                        >
+                          Keep
+                        </button>
+                      ) : null}
                       <button
                         type="button"
-                        className={styles.keep}
+                        className={styles.notMeBtn}
+                        onClick={() => void setStatusFor("usual", u.usual_id, "not_me")}
                         disabled={busy}
-                        onClick={() => void onUsual(usual, "keep")}
-                      >
-                        Keep
-                      </button>
-                      <button
-                        type="button"
-                        className={styles.notMe}
-                        disabled={busy}
-                        onClick={() => void onUsual(usual, "not_me")}
                       >
                         Not me
                       </button>
                     </div>
                   </li>
-                );
-              })}
-            </ul>
-            <div className={styles.primaryWrap}>
-              <button
-                type="button"
-                className={styles.primary}
-                disabled={busy}
-                onClick={() => void keepAllUsuals()}
-              >
-                Keep all
-              </button>
-            </div>
-          </>
-        ) : null}
+                ))}
+              </ul>
+            )}
+          </section>
 
-        {status ? <p className={styles.status}>{status}</p> : null}
-      </DashboardWorkspace>
-    </AppShell>
-  );
-}
+          {activePriorities.length > 0 && (
+            <section className={styles.section}>
+              <div className={styles.sectionHead}>
+                <h2>Priorities</h2>
+              </div>
+              <ul className={styles.priorityList}>
+                {activePriorities.map((p) => (
+                  <li key={p.priority_id} className={styles.priorityRow}>
+                    <span className={styles.weightPill}>weight {p.weight}</span>
+                    <p>{p.text}</p>
+                    <button
+                      type="button"
+                      className={styles.notMeBtn}
+                      onClick={() => void setStatusFor("priority", p.priority_id, "not_me")}
+                      disabled={busy}
+                    >
+                      Not me
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
+        </div>
 
-export default function ProfilePage() {
-  return (
-    <Suspense
-      fallback={
-        <AppShell dashboard contentOnly>
-          <p className={styles.meta}>Loading…</p>
-        </AppShell>
-      }
-    >
-      <ProfileInner />
-    </Suspense>
+        <aside className={styles.rail} aria-label="Correct Level">
+          <Chat
+            title="Correct Level"
+            lead={
+              "Tell me a priority (\u201cnever miss elder therapy\u201d), rename a person, or say something I misread \u2014 I&rsquo;ll update the profile."
+            }
+            placeholder="&ldquo;Sam is my nephew, not my child.&rdquo;"
+            onAfterReply={() => void load()}
+          />
+        </aside>
+      </div>
+    </div>
   );
 }

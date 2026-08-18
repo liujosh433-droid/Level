@@ -1,17 +1,11 @@
 [project]
 name = "level-jobs"
-version = "0.1.0"
-description = "Level's Cloud Run Jobs: ingestion connectors + async challenge generation."
+version = "2.0.0"
+description = "Level Cloud Run Jobs: nightly usual recompute + TTL + watch renew"
 requires-python = ">=3.12"
-authors = [{ name = "Level Team" }]
 dependencies = [
     "level-core",
 ]
-
-[project.scripts]
-level-async-challenge = "level_jobs.async_challenge:cli"
-level-ingest-all = "level_jobs.ingest_all:cli"
-level-retain = "level_jobs.retain:cli"
 
 [build-system]
 requires = ["hatchling"]

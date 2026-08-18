@@ -1,5 +1,4 @@
 :root {
-  /* Light, calm coastal day — same family as the home art frame. */
   --ink: #f4f9fa;
   --depth: #e7f1f3;
   --horizon: #d2e3e8;
@@ -18,24 +17,31 @@
   --chrome: rgba(244, 249, 250, 0.88);
   --radius: 6px;
   --radius-lg: 14px;
-  /* Literata: calm optical serif — steady / level-headed without feeling stiff */
-  --font-brand: "Literata", "Iowan Old Style", "Palatino Linotype", Palatino, serif;
-  --font-display: "Literata", "Iowan Old Style", "Palatino Linotype", Palatino, serif;
-  --font-body: "Source Sans 3", "Helvetica Neue", sans-serif;
+  --font-brand: var(--font-literata, "Literata"), "Iowan Old Style", "Palatino Linotype", Palatino, serif;
+  --font-display: var(--font-literata, "Literata"), "Iowan Old Style", "Palatino Linotype", Palatino, serif;
+  --font-body: var(--font-source-sans, "Source Sans 3"), "Helvetica Neue", sans-serif;
   --shell-max: 56rem;
   --pad-x: clamp(1rem, 2.8vw, 2.5rem);
   --pad-y: clamp(1rem, 3vw, 1.75rem);
   --nav-h: 3.5rem;
-  /* Sticky header height incl. safe-area — keep side rails below it */
-  --app-header-offset: calc(
-    var(--nav-h) + env(safe-area-inset-top, 0px) + 1.4rem
-  );
+  --app-header-offset: calc(var(--nav-h) + env(safe-area-inset-top, 0px) + 1.4rem);
   --bottom-nav-h: 4.25rem;
   --safe-bottom: env(safe-area-inset-bottom, 0px);
   --touch: 44px;
+
+  --ink-soft: var(--mist);
+  --ink-mute: var(--mist);
+  --paper: var(--field);
+  --paper-warm: var(--depth);
+  --card: var(--surface-strong);
+  --line-soft: var(--line);
+  --radius-sm: var(--radius);
+  --alert: var(--danger);
+  --signal-ink: var(--signal-deep);
+  --shadow: 0 1px 2px rgba(22, 48, 56, 0.05), 0 8px 24px rgba(22, 48, 56, 0.06);
+  --shadow-soft: 0 1px 0 rgba(22, 48, 56, 0.04);
 }
 
-/* Landing / welcome keep the deeper cinematic wash. */
 .themeDark {
   --ink: #0c161c;
   --depth: #142830;
@@ -103,7 +109,6 @@ body::after {
   background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
 }
 
-/* Keep landing/welcome cinematic while app pages stay bright. */
 body:has(.themeDark)::before {
   background:
     radial-gradient(ellipse 90% 60% at 78% -8%, rgba(61, 184, 160, 0.2), transparent 58%),
@@ -129,6 +134,8 @@ textarea {
 
 button {
   cursor: pointer;
+  border: none;
+  background: none;
 }
 
 button:disabled {
@@ -143,6 +150,92 @@ button:disabled {
 ::selection {
   background: rgba(45, 159, 138, 0.28);
   color: var(--foam);
+}
+
+h1,
+h2,
+h3,
+h4 {
+  font-family: var(--font-display);
+  color: var(--foam);
+  margin: 0;
+  letter-spacing: -0.01em;
+}
+
+h1 {
+  font-size: clamp(1.85rem, 5vw, 2.45rem);
+  font-weight: 600;
+  line-height: 1.15;
+}
+
+h2 {
+  font-size: clamp(1.15rem, 2.8vw, 1.3rem);
+  font-weight: 550;
+}
+
+h3 {
+  font-size: 1.02rem;
+  font-weight: 600;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  padding: 1rem 1.15rem;
+  box-shadow: 0 1px 0 rgba(22, 48, 56, 0.04);
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.12rem 0.55rem;
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--mist);
+  border: 1px solid var(--line);
+  font-size: 0.78rem;
+}
+
+.pill--signal {
+  background: var(--signal-soft);
+  color: var(--signal-deep);
+  border-color: color-mix(in srgb, var(--signal) 35%, var(--line));
+}
+
+.button-primary,
+.button-ghost {
+  min-height: 2.5rem;
+  padding: 0.45rem 0.9rem;
+  border-radius: var(--radius);
+  font-weight: 650;
+  font-size: 0.92rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  transition: background 0.15s ease, transform 0.15s ease, color 0.15s ease;
+}
+
+.button-primary {
+  background: var(--signal);
+  color: var(--ink);
+}
+
+.button-primary:hover:not(:disabled) {
+  background: var(--signal-deep);
+  color: #f2f7f8;
+}
+
+.button-ghost {
+  background: transparent;
+  color: var(--mist);
+  border: 1px solid var(--line-strong);
+}
+
+.button-ghost:hover:not(:disabled) {
+  color: var(--foam);
+  background: var(--surface);
 }
 
 @keyframes wash {

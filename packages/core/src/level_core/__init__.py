@@ -1,12 +1,7 @@
-"""Level core library.
+"""Level core domain package.
 
-Contains everything that isn't a deployable surface: agents, memory bank,
-guardrails, model clients, observability, bias taxonomy, identity, and the
-Agent Gateway. Both the API (`level_api`) and the Cloud Run Jobs
-(`level_jobs`) depend on this package.
+Everything in this package is import-safe (no side effects) and works in
+both LEVEL_ENV=local (JSON files) and LEVEL_ENV=cloud (Firestore + Vertex).
 """
 
-from level_core.config import Settings, get_settings
-
-__all__ = ["Settings", "get_settings"]
-__version__ = "0.1.0"
+__version__ = "2.0.0"

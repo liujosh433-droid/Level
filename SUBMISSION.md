@@ -1,95 +1,130 @@
-# Devpost submission — draft
+# Level - All Things Agentic Hackathon submission
 
-Working copy of the text we'll paste into the Devpost submission form. Keep this in sync with what we actually built. Final version submitted by 2026-08-31 5:00 PM PT.
+**Track:** Collaborative Partner
+**Live demo:** _fill me in after deploy_
+**Repo:** _fill me in with your GitHub URL_
+**Demo video (YouTube):** _fill me in after recording_
+**Judge access:** `testing@devpost.com` and `cloudhackathons@google.com` are
+listed as OAuth test users and (if the repo is private) invited as GitHub
+collaborators.
 
----
+## What it is
 
-## Project title
+A caregiver partner for busy parents and multi-generational households.
+Level reads your Google Calendar, learns which humans you care for, notices
+your usual weekly rhythm, tracks your priorities, drafts school emails, and
+speaks a short summary of your day when your hands are full.
 
-**Level — see what saying yes crowds out from the care roles you hold.**
+## Mandatory stack (checklist)
 
-## Short tagline (140 chars)
+| Requirement | Where |
+|---|---|
+| Gemini 3.5 (or newer) via Vertex AI | [`packages/core/src/level_core/agents/base.py`](packages/core/src/level_core/agents/base.py) `_invoke_vertex()` |
+| Google Agent Development Kit (ADK) | [`packages/core/src/level_core/agents/adk_tools.py`](packages/core/src/level_core/agents/adk_tools.py) `build_level_agent()` |
+| Google Cloud infrastructure | Cloud Run API, Cloud Run Job, Firestore, Vertex AI, Gmail, Calendar, Secret Manager, Cloud Trace, Cloud Scheduler - all provisioned in [`infra/terraform`](infra/terraform) |
 
-Multi-agent care-role partner (Gemini 3.5 + ADK): mutates a Care Profile from messy calendar/chat data and challenges care collisions before you commit.
+## Agents
 
-## Category
+| Agent | Model | Purpose |
+|---|---|---|
+| [`ChatRouterAgent`](packages/core/src/level_core/agents/chat_router.py) | flash | Classify chat message into path + intent |
+| [`RoleAgent`](packages/core/src/level_core/agents/role.py) | pro | Propose care_people from calendar rollup |
+| [`UsualAgent`](packages/core/src/level_core/agents/usual.py) | flash | Disambiguate tied weekly patterns |
+| [`ActivityAgent`](packages/core/src/level_core/agents/activity.py) | flash | Assign activity_type to unseen events (cached forever per event) |
+| [`PriorityAgent`](packages/core/src/level_core/agents/priority.py) | pro | Structured extract of chat-stated priorities |
+| [`ReminderAgent`](packages/core/src/level_core/agents/reminder.py) | flash | Structured extract of chat reminders (person + activity) |
+| [`EmailAgent`](packages/core/src/level_core/agents/email.py) | flash | Draft school-style email (human-in-the-loop send) |
+| [`SummaryAgent`](packages/core/src/level_core/agents/summary.py) | flash | 2-3 sentence Hear-my-day summary |
 
-**The Collaborative Partner**
+Every call goes through [`call_agent()`](packages/core/src/level_core/agents/base.py)
+which enforces Pydantic structured output, `<user_input>` fence,
+`source_span` echo-back hallucination guard, retry+backoff, per-user rate
+limit, daily cost cap, and writes an
+[`AiAuditEntry`](packages/core/src/level_core/schemas/audit.py).
 
-## Inspiration
+## Rubric mapping
 
-Modern AI helps busy people say yes faster. Caregivers don’t need more hours invented — they need to see **which care role a yes would crowd out** before they commit. Research on the triple bind, sandwich caregiving, and mental load says the unit of analysis is competing roles under scarce degrees of freedom — not inbox zero.
+### Innovation & Operational Utility (40%)
 
-Level is the friend who won’t let a late networking dinner quietly erase Thursday pickup you marked Keep.
+- **Actively mutates data**: Level writes calendar events with a private
+  `origin=level` tag ([`schedule/book.py`](packages/core/src/level_core/schedule/book.py))
+  and sends Gmail messages ([`email/gmail_client.py`](packages/core/src/level_core/email/gmail_client.py)).
+- **Messy unstructured input**: caregiver calendars are the target -
+  first-name attendee tokens, ambiguous summaries, weekly patterns that
+  break during school holidays.
+- **Adapts to the user**: Not-me clicks land in
+  [`negatives/`](packages/core/src/level_core/schemas/negative.py) and get
+  injected into the *next* agent prompt as few-shot "do not propose this
+  again." No fine-tuning required.
 
-## What it does
+### Architectural Discipline & Tech Stack (30%)
 
-Level ingests messy personal signals — Google Calendar, voice-memo transcripts, notes — into a Memory Bank and **mutates a Care Profile** (child care, elder care, paid work, self & recovery, household logistics, co-parent). Users correct with Keep / Not me.
+- **Separation of concerns**: 7 single-purpose agents. Extraction agents
+  run at `temperature=0` and cap at 1 turn; generative agents (Email,
+  Summary) at 0.4 and cap at 3 turns.
+- **State management**: dual storage backend
+  ([`storage/factory.py`](packages/core/src/level_core/storage/factory.py))
+  with the same repo interface over local JSON or Firestore. Optimistic
+  concurrency via `version` field.
+- **Failure tolerance**: schema failure returns the agent's safe default
+  and logs `hallucinated=true`; `source_span` mismatch drops individual
+  fields; 3x retry with exponential backoff on 429/500; gate drops
+  non-chat AI when daily cost cap is hit.
+- **Failure isolation**: Gmail send and Calendar write both require a
+  `confirmation_token` returned by the preceding draft/find call - no
+  agent can autonomously mutate external state.
 
-When the user brings a decision — or the background job spots a collision — specialized agents run:
+### Demo & Production Readiness (30%)
 
-- **Framer** restates the decision precisely (Gemini 3.5 Pro)
-- **Retriever** pins care-role facts + vector evidence; loads Care Profile via Agent Gateway (Gemini 3.5 Flash)
-- **Challenger** prefers **`role_theft`** challenges (user-facing: care collisions) grounded in sticky windows (Gemini 3.5 Pro + outbound citation guardrails; Conductor retries once on bad output)
-- **Judge** scores cognitive biases in the framing (Gemini 3.5 Flash)
+- **Architecture diagram**: [`docs/architecture.png`](docs/architecture.png)
+  (source [`docs/architecture.mmd`](docs/architecture.mmd)).
+- **Reproducible setup**: [SETUP.md](SETUP.md) has both local and cloud
+  paths; `make demo-seed` gives judges a populated UI without needing a
+  real calendar.
+- **Proof of action**: [/admin/traces](apps/web/src/app/(dashboard)/admin/traces/page.tsx)
+  is a live agent trace view refreshing every 3 seconds - the demo video
+  uses it to show real Gemini calls happening.
+- **Google Cloud visible**: video shows the Cloud Run URL,
+  `gcloud run services logs read`, and Firestore console mutations.
 
-**Continuous Action:** `async_challenge` finds events that crowd out confirmed care windows and opens an unsolicited care-collision Decision — no human until they open Today.
+## Bonus contributions (+ up to 1.0)
 
-## How we built it
+- **+0.2** Gemma via Vertex as a fallback classifier when Gemini quota is
+  exhausted. Set `LEVEL_MODEL_GEMMA=gemma-3-4b-it`; falls in
+  [`agents/activity.py`](packages/core/src/level_core/agents/activity.py).
+- **+0.2** dev.to writeup: `docs/writeup-devto.md` (draft included -
+  publish before the deadline with the `#AllThingsAgenticHackathon` tag).
+- **+0.2** Social post: `docs/social-post.md` (X / LinkedIn draft with the
+  required hashtag).
 
-**Stack:** Python 3.12, Google ADK, Gemini 3.5 (Pro / Flash / Live) via Vertex AI, FastAPI, Next.js 15, Firestore, Vertex AI Vector Search, Cloud Run + Cloud Run Jobs, Cloud Scheduler, Model Armor, Cloud Storage, Secret Manager, OpenTelemetry → Cloud Trace + Cloud Logging, Terraform.
+## Demo video plan (<= 4 min)
 
-**Architecture** (see repo README for full diagram): three async loops.
+Scene-by-scene script in
+[the rebuild plan](.cursor/plans/rebuild_level_c285e8fa.plan.md) section
+4.1. Highlights:
 
-1. **Ingestion loop** — Cloud Scheduler triggers Cloud Run Jobs every 15 min to pull deltas from Google APIs. Signals flow through Model Armor (inbound), the `IngestNormalizer` agent, and land in Firestore + Vector Search.
-2. **Session loop** — User opens a session; the `Conductor` (an ADK `SequentialAgent`) runs Framer → Retriever → Challenger → Judge. Each turn is written to Firestore and streamed to the web UI via Firestore `onSnapshot`.
-3. **Learning loop** — Nightly + post-session, a Cloud Run Job aggregates bias events into the persistent Bias Profile and regenerates the Manifesto.
+1. Connect Google -> Firestore fills with `agenda_cache/` docs (Proof of
+   action #1: unedited).
+2. `/profile` shows AI-proposed people + usuals; click Not-me and watch
+   `/admin/traces` log the negative + next `RoleAgent` call skipping it
+   (feedback loop demo).
+3. Chat "book me gym Tuesday morning" -> streaming reply -> confirm ->
+   Google Calendar shows new event tagged `origin=level` (Proof of action
+   #2: data mutation).
+4. Chat "I forgot Beta's soccer shoes" -> reminder appears on today's
+   soccer event as a chip (structured match demo).
+5. Contacts -> "Draft email to Ms. Rivera, sick today" -> edit -> send ->
+   Gmail Sent (Proof of action #3).
+6. "Hear my day" voice; Cloud Run logs + Cloud Trace showing full agent
+   chain in one trace.
 
-**Enterprise-grade components** (built even though our category is Collaborative Partner, for architectural depth): Agent Registry, Agent Runtime, Memory Bank, Agent Identity (per-agent SAs), Agent Gateway (in-process policy router), Model Armor (inbound + outbound), Agent Observability (OTel-instrumented with reasoning-chain traces).
+## Data privacy notes
 
-## Challenges we ran into
-
-*(fill in as we go)*
-
-## Accomplishments we're proud of
-
-*(fill in as we go)*
-
-## What we learned
-
-*(fill in as we go)*
-
-## What's next for Level
-
-- Broader ingestion connectors (WhatsApp export, Notion, iMessage)
-- Group decision mode (co-parents, family caregivers)
-- Long-horizon reflection: "this decision from 3 months ago — what actually happened, and what does that teach us?"
-
-## Built with
-
-`google-adk` `gemini-3.5-pro` `gemini-3.5-flash` `gemini-3.5-flash-live` `vertex-ai` `vertex-vector-search` `model-armor` `firestore` `cloud-run` `cloud-run-jobs` `cloud-scheduler` `cloud-storage` `secret-manager` `cloud-trace` `cloud-logging` `opentelemetry` `terraform` `fastapi` `next.js` `pydantic` `structlog`
-
-## Try it out
-
-- **Live URL:** *(Cloud Run URL — added after deploy)*
-- **Public code repo:** *(GitHub URL — added when repo pushed)*
-- **Demo video:** *(YouTube URL — added after recording)*
-- **Testing instructions:** No login required — landing page includes a "Try the demo caregiver profile" button that runs a full session against a seeded user with pre-ingested demo signals. Judges can also click "Connect Google" for a real OAuth flow if they want to try their own data. From the repo: `make demo-judge` prints Continuous Action proof (ingest → Care Profile version bump → async care-collision Decision → retention prune); open Today for the Care collision banner and Profile for `Care Profile vN`.
-- **Access for judges:** Public URL, no restrictions. GitHub repo is public. `testing@devpost.com` and `cloudhackathons@google.com` are added as collaborators as a courtesy.
-
-## Video pitch (4-minute outline)
-
-*(finalize week 3)*
-
-- **0:00–0:20** — Problem: "modern AI is a yes-man." Show a canonical AI conversation where the assistant agrees with everything.
-- **0:20–0:40** — Level's twist: warm-but-honest decision partner that cites your own past. Show the Level UI.
-- **0:40–2:30** — Live demo: real Cloud Run URL, real Gemini 3.5, real session on a "should I switch my kid's school" decision. Show the Challenger asking a hard question citing an ingested email from three weeks prior. Show the Judge's bias observations updating the Bias Profile in real time via Firestore `onSnapshot`.
-- **2:30–3:30** — Architecture proof: Cloud Trace reasoning chain of the session we just ran; Cloud Run dashboard showing the api + jobs services; Firestore console showing the persisted decision and bias events; Model Armor blocking a synthetic prompt-injection attempt during ingestion.
-- **3:30–4:00** — Roadmap + close.
-
-## Disclosures
-
-- No pre-existing code was incorporated into this Project. Every line was written during the Submission Period (2026-08-03 to 2026-08-31).
-- Standard open-source frameworks and libraries were used (Google ADK, Vertex AI Python SDK, FastAPI, Next.js, Pydantic, structlog, OpenTelemetry, Terraform).
-- AI coding assistants (Cursor / Gemini) were used during development.
-- All third-party API integrations (Google Calendar, Gmail) are used in accordance with Google API Terms and use standard OAuth consent flows.
+- Raw calendar event descriptions never leave the API. Only stable
+  first-name tokens make it into `agenda_cache.attendee_tokens`.
+- Emails, phone numbers, and street addresses are stripped from every
+  prompt via [`agents/pii.py`](packages/core/src/level_core/agents/pii.py).
+- OAuth secrets live in Secret Manager, mounted as env vars at Cloud Run
+  runtime.
+- `DELETE /v1/me` wipes the entire per-user Firestore subtree and revokes
+  the Google token.

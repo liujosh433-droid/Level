@@ -12,10 +12,6 @@
     var(--pad-x);
 }
 
-.wide {
-  --shell-max: 72rem;
-}
-
 .dashboard {
   --shell-max: 96rem;
 }

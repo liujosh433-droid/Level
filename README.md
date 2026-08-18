@@ -1,219 +1,89 @@
 # Level
 
-**See what saying yes crowds out from the care roles you hold.**
+Caregiver partner for busy parents and multi-generational households.
+Reads your Google Calendar, learns your usual weekly rhythm, tracks your
+priorities, drafts school emails, and speaks a short summary of your day.
 
-Level is a multi-agent system (Google ADK + Gemini 3.5) for busy caregivers. It ingests messy calendar and chat signals, **mutates a Care Profile** (child care, elder care, paid work, self & recovery, household logistics, co-parent), and challenges **care collisions** — warmly, with citations — instead of helping you say yes faster. A background job opens unsolicited challenges when new events collide with sticky care windows.
+Built for the [All Things Agentic Hackathon](https://allthingsagentichackathon.devpost.com/)
+in the **Collaborative Partner** track.
 
-> Built for the [All Things Agentic Hackathon](https://allthingsagentichackathon.devpost.com/) — **Collaborative Partner** track.
+## Stack (hackathon mandatory checklist)
 
----
-
-## Table of contents
-
-1. [What Level does](#what-level-does)
-2. [Architecture](#architecture)
-3. [Spin-up: local development](#spin-up-local-development)
-4. [Spin-up: cloud deployment](#spin-up-cloud-deployment)
-5. [Testing](#testing)
-6. [Repo layout](#repo-layout)
-7. [Hackathon compliance](#hackathon-compliance)
-
----
-
-## What Level does
-
-General assistants optimize *your* time. Level models **competing care roles** under scarce degrees of freedom and asks what saying yes would crowd out.
-
-| Signal type | Source | What we extract |
-|---|---|---|
-| Calendar events | Google Calendar API / fixtures | Care roles, protected windows (pickup), load |
-| Voice memos | Transcripts (fixtures / upload path) | Preferences, strain language |
-| Level chat | Today / About me | Priorities, Keep / Not me, what you hold |
-
-Knowledge loop mutates a **Care Profile**; users confirm with Keep / Not me. Session loop:
-
-```
-Framer  →  Retriever  →  Challenger  →  Judge
-  ↓          ↓             ↓             ↓
-restates   pins care     role_theft    bias events
-decision   facts +       questions     on framing
-           Care Profile
-```
-
-**Continuous Action:** `level-async-challenge` finds collisions against confirmed windows and opens an unsolicited care-collision Decision visible on Today.
-
-**Retention:** `level-retain` prunes stale EVENT facts (90d TTL) and soft-caps facts/user at 150 — never deletes Keep’d care pins or recently cited evidence. GCS cold archive is a scale-up path (see `ARCHITECTURE.md`).
-
----
+- **Gemini 3.5 (Pro + Flash) via Vertex AI** - all agents call
+  `packages/core/src/level_core/agents/base.py::call_agent`.
+- **Google Agent Development Kit (ADK)** - each agent is an ADK tool; see
+  `packages/core/src/level_core/agents/*.py`.
+- **Google Cloud** - Cloud Run (API), Cloud Run Jobs (nightly), Firestore
+  (state), Vertex AI (model host), Gmail API, Calendar API.
 
 ## Architecture
 
-```
-                    ┌────────────────────────────────────────────────┐
-                    │                    Level                       │
-                    └────────────────────────────────────────────────┘
-                                            │
-        ┌───────────────────────────────────┼───────────────────────────────────┐
-        │                                   │                                   │
-   ┌────▼─────┐                    ┌────────▼────────┐                    ┌─────▼─────┐
-   │   Web    │                    │      API        │                    │   Jobs    │
-   │ Next.js  │◀────HTTPS + WS────▶│    FastAPI      │                    │ Cloud Run │
-   │ Cloud Run│                    │    Cloud Run    │                    │   Jobs    │
-   └──────────┘                    └────────┬────────┘                    └─────┬─────┘
-                                            │                                   │
-                                            │           ┌───────────────────────┘
-                                            │           │  scheduled ingestion
-                                            ▼           ▼
-                              ┌────────────────────────────────────┐
-                              │           Conductor                │
-                              │       (Sequential ADK agent)       │
-                              │                                    │
-                              │  Framer ▶ Retriever ▶ Challenger   │
-                              │             ▶ Judge                │
-                              └────────┬───────────────────────────┘
-                                       │
-              ┌────────────────────────┼────────────────────────┐
-              ▼                        ▼                        ▼
-      ┌───────────────┐        ┌───────────────┐        ┌───────────────┐
-      │  Agent        │        │  Agent        │        │  Model Armor  │
-      │  Registry     │        │  Gateway      │        │  (inbound +   │
-      │  (Firestore)  │        │  (policy      │        │   outbound)   │
-      └───────────────┘        │   router)     │        └───────────────┘
-                               └───────┬───────┘
-                                       │
-                        ┌──────────────┼──────────────┐
-                        ▼              ▼              ▼
-                ┌───────────────┐ ┌──────────┐ ┌────────────────┐
-                │  Firestore    │ │  Vertex  │ │  Vertex AI     │
-                │  (Memory Bank │ │  Vector  │ │  Gemini 3.5    │
-                │   structured) │ │  Search  │ │  Pro/Flash/Live│
-                └───────────────┘ └──────────┘ └────────────────┘
+![architecture](docs/architecture.png)
 
-               ── every call instrumented via OpenTelemetry → Cloud Trace ──
-```
+Mermaid source: [`docs/architecture.mmd`](docs/architecture.mmd).
 
-Three asynchronous loops power the system:
+## 60-second local start
 
-- **Ingestion loop** — Cloud Scheduler kicks Cloud Run Jobs every 15 min to pull deltas from Google APIs. Each raw signal passes through Model Armor (PII scrub, prompt-injection block), gets normalized into structured facts by the `IngestNormalizer` agent, embedded into Vertex Vector Search, and indexed in Firestore.
-- **Session loop** — The user opens a session (text or Gemini Live voice). The FastAPI service orchestrates the Framer → Retriever → Challenger → Judge chain in a single ADK `SequentialAgent`. Each turn is written to Firestore in real time so the UI can subscribe via `onSnapshot`.
-- **Learning loop** — After each session, a background Cloud Run Job aggregates the Judge's bias observations into the user's persistent Bias Profile and updates their "Manifesto" — a self-rewriting statement of what the user says they value, which Level uses to challenge future decisions against past commitments.
-
-See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the deep dive (data model, failure modes, backpressure, agent contracts).
-
----
-
-## Spin-up: local development
-
-**Prerequisites:**
-- Python 3.12
-- [`uv`](https://docs.astral.sh/uv/) (`brew install uv` on macOS)
-- A [Google AI Studio API key](https://aistudio.google.com/apikey) — free tier is enough for local iteration
+Prereqs: `node >= 20`, `python >= 3.12`. A bundled `uv` binary lives at
+`.tools/uv` so no global install is needed.
 
 ```bash
-git clone <this-repo> level && cd level
+cp .env.example .env
+# Fill in GOOGLE_OAUTH_CLIENT_ID + GOOGLE_OAUTH_CLIENT_SECRET
+# (see SETUP.md for OAuth consent-screen instructions).
 
-make env         # copies .env.example → .env
-$EDITOR .env     # set GOOGLE_API_KEY to your AI Studio key
-
-make install     # uv sync — installs core, api, jobs and dev deps
-make test        # runs the pytest suite (uses fakes; no cloud needed)
-make api         # starts the FastAPI service at http://localhost:8080
-
-# in another terminal:
-make web-install # once
-make web         # Next.js at http://localhost:3000
-
-# optional — seed the demo caregiver narrative (calls Gemini):
-make seed
-
-# judge-facing Continuous Action proof (ingest → Care Profile → async care collision → retain):
-make demo-judge
+make install
+make dev
+# API on http://127.0.0.1:8080, web on http://127.0.0.1:3000
 ```
 
-By default `LEVEL_ENV=local` uses in-memory fakes for Firestore and Vector Search so you can build and test without any GCP setup. Set `LEVEL_ENV=cloud` and provide `gcloud auth application-default login` credentials to hit real services.
+Open `http://127.0.0.1:3000`, click **Connect Google**, and Level will
+start syncing your calendar. `LEVEL_ENV=local` writes state to
+`.level/local_store/` - no GCP needed for demo.
 
----
-
-## Spin-up: cloud deployment
-
-**One-time setup** (assumes you have the $150 hackathon credit applied to a billing account):
+Want to poke around without connecting a real calendar?
 
 ```bash
-export PROJECT=project-c31bdcdc-f293-47c2-a4c
-export REGION=us-central1
-
-gcloud projects create $PROJECT
-gcloud config set project $PROJECT
-gcloud services enable \
-  aiplatform.googleapis.com \
-  firestore.googleapis.com \
-  run.googleapis.com \
-  cloudbuild.googleapis.com \
-  cloudscheduler.googleapis.com \
-  secretmanager.googleapis.com \
-  cloudtrace.googleapis.com
-
-make gcloud-auth
-make tf-init && make tf-apply       # provisions Firestore, IAM, Vector Search, Cloud Run
-make deploy-api                     # builds + deploys API to Cloud Run
-make deploy-jobs                    # builds + deploys ingestion jobs
+make demo-seed   # Alpha/Beta family with 4 weeks of fake events + usuals
 ```
 
-After `tf-apply` completes, the Vertex Vector Search index endpoint ID is written to Terraform outputs. Put it in `.env` as `LEVEL_VECTOR_INDEX_ENDPOINT_ID`.
+## Cloud deploy
 
-The deployed API URL will be printed by `deploy-api`. That URL goes into the Devpost submission.
-
----
-
-## Testing
+See [SETUP.md](SETUP.md). One-liner once terraform is applied:
 
 ```bash
-make test           # fast — uses fakes, no network
-make test-cov       # + coverage
-make check          # lint + type-check + test (what CI runs)
+make deploy-api && make deploy-jobs
 ```
 
-Test taxonomy:
-- **Unit** (`tests/unit/`) — schemas, guardrails, single agents against fake models
-- **Integration** (`tests/integration/`) — full conductor flow against fake memory + fake model, asserts the shape of the produced turns and bias observations
-- **Cloud** (marked `@pytest.mark.cloud`, skipped by default) — smoke tests against real Vertex AI + Firestore, run in CI on staging
+## Test
 
----
+```bash
+make test          # unit + security + e2e (all offline)
+make test-e2e-web  # Playwright smoke against local dev
+```
+
+Coverage target: 85% on `packages/core`, 75% on `packages/api`.
+
+## Hackathon submission
+
+See [SUBMISSION.md](SUBMISSION.md) for the rubric mapping, agent list,
+demo video, and judge access instructions.
 
 ## Repo layout
 
 ```
-level/
-├── README.md                       # this file
-├── ARCHITECTURE.md                 # deep-dive: loops, state, failure modes
-├── COMPLIANCE.md                   # rules-to-component mapping (living doc)
-├── SUBMISSION.md                   # Devpost submission text draft
-├── pyproject.toml                  # uv workspace root
-├── Makefile                        # every dev/deploy command
-├── packages/
-│   ├── core/                       # shared library: agents, memory, guardrails, models
-│   ├── api/                        # FastAPI, Cloud Run service
-│   └── jobs/                       # Cloud Run Jobs (ingestion + async challenge)
-├── apps/
-│   └── web/                        # Next.js UI (session + landing)
-├── scripts/                        # smoke_gemini, seed_demo_data, seed_bias_taxonomy
-├── tests/                          # unit + integration
-├── infra/
-│   ├── terraform/                  # every GCP resource, reproducible
-│   └── cloudbuild-*.yaml           # Cloud Build pipelines
-└── docs/
-    └── diagrams/architecture.svg   # rendered version of the ASCII diagram above
+apps/web           Next.js 15 dashboard (Today / Profile / Contacts / Sources / About)
+packages/api       FastAPI on Cloud Run
+packages/core      Domain: agents, calendar, care, schedule, email, storage, voice
+packages/jobs      Cloud Run Jobs: nightly usuals + TTL + watch renewal
+infra/terraform    GCP resources
+infra/firestore.rules   Per-user isolation
+docs/architecture.mmd   Architecture diagram source
+tests/unit         Fast offline tests
+tests/security     Prompt-injection corpus + auth + Firestore rules
+tests/e2e          Full API flow with LEVEL_ENV=local
 ```
 
----
+## License
 
-## Hackathon compliance
-
-Full component-by-component mapping is in [`COMPLIANCE.md`](./COMPLIANCE.md). Highlights:
-
-- **Mandatory Gemini 3.5+** — Vertex AI Gemini 3.5 Pro (reasoning), Flash (routing), Live (voice)
-- **Mandatory Google Agent Framework** — Google ADK for every agent
-- **Mandatory Google Cloud service** — Cloud Run, Firestore, Cloud Storage, Cloud Scheduler, Vertex AI, Secret Manager (6 services)
-- **Category** — Collaborative Partner (with Fortified Enterprise Fleet architectural components layered in for bonus points)
-- **Rubric alignment** — Multi-agent Nexus + Evolving Knowledge Engine + Unlikely Hero (single caregivers)
-- **Bonus components** — Agent Registry, Agent Runtime, Memory Bank, Agent Identity, Agent Gateway, Model Armor, Agent Observability — all present
+MIT - see [LICENSE](LICENSE).

@@ -1,0 +1,259 @@
+.panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 0 0 auto;
+  position: relative;
+  z-index: 1;
+}
+
+.head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.65rem;
+  margin-bottom: 0.35rem;
+}
+
+.head h2 {
+  font-family: var(--font-display);
+  font-size: clamp(1.1rem, 2.6vw, 1.25rem);
+  font-weight: 550;
+  margin: 0;
+}
+
+.headBtn {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-height: 2.5rem;
+  padding: 0.45rem 0.9rem;
+  border-radius: var(--radius);
+  font-weight: 700;
+  font-size: 0.88rem;
+  background: var(--signal);
+  color: var(--ink);
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.headBtn:hover:not(:disabled) {
+  background: var(--signal-deep);
+  color: #f2f7f8;
+}
+
+.headBtn:disabled {
+  opacity: 0.5;
+}
+
+.headIcon {
+  flex-shrink: 0;
+  display: block;
+}
+
+.lead {
+  margin: 0 0 0.65rem;
+  color: var(--mist);
+  font-size: 0.95rem;
+  line-height: 1.4;
+}
+
+.composer {
+  padding: 0.85rem;
+  border-radius: var(--radius-lg);
+  background: var(--chrome);
+  border: 1px solid var(--line-strong);
+  box-shadow: 0 6px 20px rgba(22, 48, 56, 0.08);
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+.form textarea {
+  width: 100%;
+  resize: vertical;
+  min-height: 5.25rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--field);
+  color: var(--foam);
+  line-height: 1.45;
+  font-family: inherit;
+  font-size: 0.98rem;
+}
+
+.form textarea::placeholder {
+  color: color-mix(in srgb, var(--mist) 75%, transparent);
+}
+
+.row {
+  display: flex;
+  gap: 0.55rem;
+  align-items: stretch;
+}
+
+.voiceBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  min-height: var(--touch);
+  min-width: 5.5rem;
+  padding: 0.75rem 1rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--line-strong);
+  background: transparent;
+  color: var(--foam);
+  font-weight: 600;
+}
+
+.voiceBtn[aria-pressed="true"] {
+  border-color: var(--signal);
+  color: var(--signal);
+  background: var(--signal-soft);
+}
+
+.voiceBtn:disabled {
+  opacity: 0.45;
+}
+
+.micIcon {
+  flex-shrink: 0;
+  display: block;
+}
+
+.submit {
+  flex: 1;
+  min-height: var(--touch);
+  padding: 0.75rem 1.25rem;
+  border-radius: var(--radius);
+  background: var(--signal);
+  color: var(--ink);
+  font-weight: 700;
+  transition: background 0.15s ease, transform 0.15s ease;
+}
+
+.submit:hover:not(:disabled) {
+  background: var(--signal-deep);
+  color: #f2f7f8;
+}
+
+.submit:disabled {
+  opacity: 0.45;
+}
+
+.error {
+  color: var(--danger);
+  margin: 0;
+  font-size: 0.92rem;
+}
+
+.thread {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  margin: 0.85rem 0 0;
+}
+
+.turn {
+  margin: 0.4rem 0 0.5rem;
+  animation: rise 0.35s ease-out both;
+}
+
+.you {
+  color: var(--mist);
+  margin: 0 0 0.55rem;
+  font-weight: 500;
+}
+
+.level {
+  padding: 0.85rem 0.95rem;
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  border: 1px solid var(--line);
+}
+
+.level p {
+  margin: 0;
+}
+
+.level p + p {
+  margin-top: 0.45rem;
+}
+
+.waiting {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  margin: 0.75rem 0 0.25rem;
+  padding: 0.75rem 0.95rem;
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--surface) 88%, var(--signal) 12%);
+  border: 1px solid color-mix(in srgb, var(--line) 70%, var(--signal) 30%);
+}
+
+.waitingDots {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+  flex-shrink: 0;
+}
+
+.waitingDots i {
+  width: 0.4rem;
+  height: 0.4rem;
+  border-radius: 50%;
+  background: var(--signal-deep);
+  opacity: 0.35;
+  animation: waitingPulse 1.2s ease-in-out infinite;
+}
+
+.waitingDots i:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.waitingDots i:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+.waitingText {
+  margin: 0;
+  color: var(--foam);
+  font-size: 0.95rem;
+  line-height: 1.35;
+  font-weight: 500;
+}
+
+@keyframes waitingPulse {
+  0%,
+  100% {
+    opacity: 0.28;
+    transform: translateY(0);
+  }
+  40% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .waitingDots i {
+    animation: none;
+    opacity: 0.7;
+  }
+}

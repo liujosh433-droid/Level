@@ -1,109 +1,93 @@
-"""Entry point for the Level FastAPI service on Cloud Run."""
+"""FastAPI app for Level.
+
+Routes are namespaced under /v1. Every mutating route requires the signed
+session cookie (see deps.require_user).
+"""
 
 from __future__ import annotations
 
-import os
-from contextlib import asynccontextmanager
-from collections.abc import AsyncIterator
+import uuid
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from level_core.config import get_settings
+from level_core.observability import get_logger
 
-from level_api.bootstrap import seed_local_demo
-from level_api.dependencies import (
-    cached_memory,
-    cached_registry,
-    cached_settings,
-)
 from level_api.routes import (
+    admin,
     auth,
     calendar,
-    care_actions,
     chat,
-    health,
-    ingest,
-    observability,
+    contacts,
+    email,
+    healthz,
+    me,
     profile,
-    sessions,
+    reminders,
+    schedule,
     sources,
     today,
 )
-from level_api.telemetry import instrument_app
-from level_core.agents.conductor import register_all_agents
-from level_core.models.factory import build_embedding_client
-from level_core.observability.logger import bind_context, get_logger
 
-_logger = get_logger(__name__)
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncIterator[None]:  # noqa: ARG001
-    """Startup + shutdown hooks."""
-    settings = cached_settings()
-    _logger.info(
-        "startup",
-        env=settings.env.value,
-        project=settings.gcp_project,
-        service=settings.service_name,
-    )
-    bind_context(service=settings.service_name)
-
-    registry = cached_registry()
-    await register_all_agents(registry, settings)
-
-    if settings.is_cloud:
-        settings.assert_cloud_ready()
-    elif os.getenv("LEVEL_SEED_DEMO", "").lower() in {"1", "true", "yes"}:
-        # Opt-in only — never auto-seed Maya/demo facts into a real local user.
-        await seed_local_demo(
-            memory=cached_memory(),
-            embedder=build_embedding_client(settings),
-            settings=settings,
-        )
-
-    yield
-
-    _logger.info("shutdown")
+logger = get_logger(__name__)
 
 
 def create_app() -> FastAPI:
+    settings = get_settings()
+
     app = FastAPI(
         title="Level API",
-        version="0.1.0",
-        description="Warm-but-honest AI decision partner for busy caregivers.",
-        lifespan=lifespan,
+        version="2.0.0",
+        docs_url="/docs" if settings.is_local else None,
+        redoc_url=None,
+        openapi_url="/openapi.json" if settings.is_local else None,
     )
-    instrument_app(app)
-    settings = cached_settings()
-    origins = [
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ]
-    web = (settings.web_app_url or "").rstrip("/")
-    if web and web not in origins:
-        origins.append(web)
+
+    origins = ["*"] if settings.is_local else [settings.level_web_app_url]
     app.add_middleware(
         CORSMiddleware,
         allow_origins=origins,
         allow_credentials=True,
-        allow_methods=["*"],
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["*"],
     )
-    app.include_router(health.router)
-    app.include_router(auth.router)
-    app.include_router(sessions.router)
-    app.include_router(ingest.router)
-    app.include_router(sources.router)
-    app.include_router(profile.router)
-    app.include_router(today.router)
-    app.include_router(chat.router)
-    app.include_router(care_actions.router)
-    app.include_router(calendar.router)
-    app.include_router(observability.router)
+
+    @app.middleware("http")
+    async def _security_headers(request: Request, call_next):  # type: ignore[no-untyped-def]
+        trace_id = request.headers.get("x-cloud-trace-context") or uuid.uuid4().hex
+        request.state.trace_id = trace_id
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["X-Trace-Id"] = trace_id
+        return response
+
+    app.include_router(healthz.router, prefix="/v1")
+    app.include_router(auth.router, prefix="/v1/auth")
+    app.include_router(calendar.router, prefix="/v1/calendar")
+    app.include_router(chat.router, prefix="/v1")
+    app.include_router(contacts.router, prefix="/v1/contacts")
+    app.include_router(email.router, prefix="/v1/email")
+    app.include_router(me.router, prefix="/v1/me")
+    app.include_router(profile.router, prefix="/v1/profile")
+    app.include_router(reminders.router, prefix="/v1/reminders")
+    app.include_router(schedule.router, prefix="/v1/schedule")
+    app.include_router(sources.router, prefix="/v1/sources")
+    app.include_router(today.router, prefix="/v1/today")
+    app.include_router(admin.router, prefix="/v1/admin")
+
+    @app.exception_handler(Exception)
+    async def _fallback(request: Request, exc: Exception) -> JSONResponse:
+        logger.exception(
+            "api.unhandled",
+            path=request.url.path,
+            trace_id=getattr(request.state, "trace_id", ""),
+        )
+        return JSONResponse(status_code=500, content={"error": "internal_error"})
+
     return app
 
 
 app = create_app()
-
-
-__all__ = ["app", "create_app"]

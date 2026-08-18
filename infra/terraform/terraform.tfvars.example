@@ -1,5 +1,7 @@
-project_id            = "project-c31bdcdc-f293-47c2-a4c"
-region                = "us-central1"
-env                   = "dev"
-enable_vector_search  = true   # early real testing — ~$30–90/mo while up
-enable_model_armor    = true
+project_id                 = "your-gcp-project-id"
+region                     = "us-central1"
+web_app_url                = "https://level.example.com"
+public_api_url             = "https://api.level.example.com"
+session_secret             = "generate-a-long-random-string"
+google_oauth_client_id     = "your-oauth-client-id.apps.googleusercontent.com"
+google_oauth_client_secret = "your-oauth-client-secret"

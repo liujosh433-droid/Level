@@ -1,23 +1,15 @@
-import { AuthError, fetchMe, type Me } from "@/lib/api";
+import { api, ApiError } from "./api";
+import type { WhoAmI } from "./types";
 
-export type HomeDest = "/today" | "/sources" | "/welcome";
+export type HomeDestination = "/today" | "/sources" | "/welcome";
 
-/** Where a visitor should land based on the current session cookie. */
-export async function resolveHomeDestination(): Promise<{
-  dest: HomeDest;
-  me: Me | null;
-}> {
+export async function resolveHomeDestination(): Promise<{ dest: HomeDestination }> {
   try {
-    const me = await fetchMe();
-    if (me.google_connected) {
-      return { dest: "/today", me };
-    }
-    // Session exists but Calendar isn't linked yet.
-    return { dest: "/sources", me };
+    const me = await api.get<WhoAmI>("/v1/me");
+    if (me.google_connected) return { dest: "/today" };
+    return { dest: "/sources" };
   } catch (err) {
-    if (err instanceof AuthError) {
-      return { dest: "/welcome", me: null };
-    }
-    return { dest: "/welcome", me: null };
+    if (err instanceof ApiError && err.status === 401) return { dest: "/welcome" };
+    return { dest: "/welcome" };
   }
 }

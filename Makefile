@@ -1,127 +1,93 @@
-.DEFAULT_GOAL := help
+.PHONY: help install dev api web test test-unit test-security test-e2e test-e2e-web \
+        lint format tf-init tf-plan tf-apply deploy-api deploy-jobs \
+        demo-seed demo-reset diagram clean
 
-PROJECT ?= project-c31bdcdc-f293-47c2-a4c
-REGION  ?= us-central1
+UV ?= .tools/uv
+PY_DIRS := packages tests
 
-# Prefer the project-local uv binary (checked into .tools/) so shells without
-# a global `uv` on PATH still work. Fall back to PATH.
-UV := $(shell if [ -x .tools/uv ]; then echo .tools/uv; else echo uv; fi)
+help:
+	@echo "Level - caregiver partner (v2)"
+	@echo ""
+	@echo "  make install         install python + node deps"
+	@echo "  make dev             run api :8080 and web :3000 together"
+	@echo "  make api             run FastAPI only"
+	@echo "  make web             run Next.js only"
+	@echo "  make test            unit + security + e2e (fast, LEVEL_ENV=local)"
+	@echo "  make test-e2e-web    Playwright smoke against local dev servers"
+	@echo "  make lint            ruff + mypy"
+	@echo "  make format          ruff format"
+	@echo "  make diagram         render docs/architecture.png from .mmd"
+	@echo "  make demo-seed       populate .level with Alpha/Beta demo data"
+	@echo "  make demo-reset      wipe demo user + ai_audit for fresh recording"
+	@echo "  make tf-init/plan/apply    terraform in infra/terraform"
+	@echo "  make deploy-api      build + deploy FastAPI to Cloud Run"
+	@echo "  make deploy-jobs     build + deploy nightly Cloud Run Job"
 
-.PHONY: help
-help: ## Show this help
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
-		awk 'BEGIN{FS=":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
-
-# -----------------------------------------------------------------------------
-# Dev environment
-# -----------------------------------------------------------------------------
-.PHONY: install
-install: ## Install all Python deps via uv workspaces
-	$(UV) sync --all-extras --group dev
-
-.PHONY: env
-env: ## Bootstrap .env from .env.example if missing
-	@test -f .env || (cp .env.example .env && echo "Created .env — fill in GOOGLE_API_KEY")
-
-.PHONY: smoke
-smoke: ## Live Gemini smoke test (needs GOOGLE_API_KEY in .env)
-	$(UV) run python scripts/smoke_gemini.py
-
-# -----------------------------------------------------------------------------
-# Quality gates
-# -----------------------------------------------------------------------------
-.PHONY: fmt
-fmt: ## Auto-format with ruff
-	$(UV) run ruff format packages tests
-	$(UV) run ruff check --fix packages tests
-
-.PHONY: lint
-lint: ## Lint (ruff + mypy)
-	$(UV) run ruff check packages tests
-	$(UV) run ruff format --check packages tests
-	$(UV) run mypy packages
-
-.PHONY: test
-test: ## Run the full test suite
-	$(UV) run pytest -x
-
-.PHONY: test-cov
-test-cov: ## Tests + coverage report
-	$(UV) run pytest --cov --cov-report=term-missing --cov-report=html
-
-.PHONY: check
-check: lint test ## Lint + test (what CI runs)
-
-# -----------------------------------------------------------------------------
-# Local run
-# -----------------------------------------------------------------------------
-.PHONY: api
-api: ## Run the FastAPI service locally
-	$(UV) run uvicorn level_api.main:app --reload --host 0.0.0.0 --port 8080
-
-.PHONY: job-async-challenge
-job-async-challenge: ## Run the async challenge Cloud Run Job locally
-	$(UV) run python -m level_jobs.async_challenge
-
-.PHONY: job-ingest
-job-ingest: ## Run the ingest_all job locally (fixture demo signals)
-	LEVEL_INGEST_FIXTURES=1 LEVEL_JOB_USER_IDS=demo-parent $(UV) run python -m level_jobs.ingest_all
-
-.PHONY: job-retain
-job-retain: ## Run retention prune (TTL + soft cap)
-	LEVEL_JOB_USER_IDS=demo-parent $(UV) run python -m level_jobs.retain
-
-.PHONY: demo-judge
-demo-judge: ## Continuous Action proof: ingest → Care Profile → async challenge → retain
-	LEVEL_ENV=local LEVEL_DEMO=1 LEVEL_INGEST_FIXTURES=1 LEVEL_JOB_USER_IDS=demo-parent \
-		$(UV) run python scripts/demo_continuous_action.py
-
-.PHONY: seed-demo
-seed-demo: ## Opt-in local Memory seed (LEVEL_SEED_DEMO=1) for pitch rehearsals
-	LEVEL_ENV=local LEVEL_SEED_DEMO=1 $(UV) run python -c "import asyncio; from level_api.bootstrap import seed_local_demo; from level_api.dependencies import cached_memory, cached_settings; from level_core.models.factory import build_embedding_client; s=cached_settings(); asyncio.run(seed_local_demo(memory=cached_memory(), embedder=build_embedding_client(s), settings=s))"
-
-.PHONY: web
-web: ## Run the Next.js web app locally
-	cd apps/web && npm run dev
-
-.PHONY: web-install
-web-install: ## Install Next.js deps
+install:
+	$(UV) sync --all-packages --group dev
 	cd apps/web && npm install
 
-# -----------------------------------------------------------------------------
-# Cloud (require gcloud auth + billing enabled)
-# -----------------------------------------------------------------------------
-.PHONY: gcloud-auth
-gcloud-auth: ## Log in gcloud CLI and application-default creds
-	gcloud auth login
-	gcloud auth application-default login
-	gcloud config set project $(PROJECT)
+dev:
+	@echo "Starting api :8080 and web :3000 ..."
+	@$(MAKE) -j 2 api web
 
-.PHONY: tf-init
-tf-init: ## terraform init
+api:
+	LEVEL_ENV=local $(UV) run --package level-api uvicorn level_api.main:app --host 127.0.0.1 --port 8080 --reload
+
+web:
+	cd apps/web && npm run dev
+
+test: test-unit test-security test-e2e
+
+test-unit:
+	LEVEL_ENV=local $(UV) run --package level-api pytest tests/unit
+
+test-security:
+	LEVEL_ENV=local $(UV) run --package level-api pytest tests/security
+
+test-e2e:
+	LEVEL_ENV=local $(UV) run --package level-api pytest tests/e2e
+
+test-e2e-web:
+	cd apps/web && npx playwright test
+
+lint:
+	$(UV) run ruff check $(PY_DIRS)
+	$(UV) run mypy
+
+format:
+	$(UV) run ruff format $(PY_DIRS)
+	$(UV) run ruff check --fix $(PY_DIRS)
+
+diagram:
+	@which mmdc >/dev/null || npm i -g @mermaid-js/mermaid-cli
+	mmdc -i docs/architecture.mmd -o docs/architecture.png -b transparent
+
+demo-seed:
+	LEVEL_ENV=local $(UV) run --package level-jobs python -m level_jobs.demo_seed
+
+demo-reset:
+	rm -rf .level/local_store/demo-user
+	@echo "Demo user wiped."
+
+tf-init:
 	cd infra/terraform && terraform init
 
-.PHONY: tf-plan
-tf-plan: ## terraform plan
-	cd infra/terraform && terraform plan -var="project_id=$(PROJECT)" -var="region=$(REGION)"
+tf-plan:
+	cd infra/terraform && terraform plan
 
-.PHONY: tf-apply
-tf-apply: ## terraform apply (creates all GCP resources)
-	cd infra/terraform && terraform apply -var="project_id=$(PROJECT)" -var="region=$(REGION)"
+tf-apply:
+	cd infra/terraform && terraform apply
 
-.PHONY: deploy-api
-deploy-api: ## Build + deploy the API to Cloud Run
-	gcloud builds submit --config=infra/cloudbuild-api.yaml --substitutions=_REGION=$(REGION)
+deploy-api:
+	gcloud builds submit --tag $$GOOGLE_CLOUD_REGION-docker.pkg.dev/$$GOOGLE_CLOUD_PROJECT/level/api:latest packages/api
+	gcloud run deploy level-api --image $$GOOGLE_CLOUD_REGION-docker.pkg.dev/$$GOOGLE_CLOUD_PROJECT/level/api:latest --region $$GOOGLE_CLOUD_REGION --allow-unauthenticated
 
-.PHONY: deploy-jobs
-deploy-jobs: ## Build + deploy Cloud Run Jobs
-	gcloud builds submit --config=infra/cloudbuild-jobs.yaml --substitutions=_REGION=$(REGION)
+deploy-jobs:
+	gcloud builds submit --tag $$GOOGLE_CLOUD_REGION-docker.pkg.dev/$$GOOGLE_CLOUD_PROJECT/level/jobs:latest packages/jobs
+	gcloud run jobs deploy level-nightly --image $$GOOGLE_CLOUD_REGION-docker.pkg.dev/$$GOOGLE_CLOUD_PROJECT/level/jobs:latest --region $$GOOGLE_CLOUD_REGION
 
-# -----------------------------------------------------------------------------
-# Housekeeping
-# -----------------------------------------------------------------------------
-.PHONY: clean
-clean: ## Remove caches and build artifacts
-	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
-	rm -rf .pytest_cache .mypy_cache .ruff_cache htmlcov .coverage coverage.xml
-	rm -rf packages/*/build packages/*/dist packages/*/*.egg-info
+clean:
+	rm -rf .venv apps/web/node_modules apps/web/.next
+	find . -type d -name __pycache__ -exec rm -rf {} +
+	find . -type d -name .pytest_cache -exec rm -rf {} +

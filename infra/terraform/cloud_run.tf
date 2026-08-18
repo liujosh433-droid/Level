@@ -1,43 +1,19 @@
-# ---------------------------------------------------------------------------
-# Artifact Registry (container images for api / jobs / web)
-# ---------------------------------------------------------------------------
-
-resource "google_artifact_registry_repository" "level" {
-  project       = var.project_id
-  location      = var.region
-  repository_id = "level"
-  description   = "Container images for Level API, jobs, and web."
-  format        = "DOCKER"
-  labels        = local.labels
-
-  depends_on = [google_project_service.apis]
-}
-
-# ---------------------------------------------------------------------------
-# Cloud Run — API service (placeholder image; real deploy via Cloud Build)
-# ---------------------------------------------------------------------------
-# We declare the service skeleton so IAM + URL exist early. The first real
-# image is pushed by `make deploy` / Cloud Build. Until then we point at a
-# public hello image so the service can be created without a local build.
-
 resource "google_cloud_run_v2_service" "api" {
   name     = "level-api"
   location = var.region
-  project  = var.project_id
-  labels   = local.labels
   ingress  = "INGRESS_TRAFFIC_ALL"
 
   template {
-    service_account = google_service_account.agents["api"].email
+    service_account = google_service_account.api.email
+    max_instance_request_concurrency = 40
 
     scaling {
       min_instance_count = 0
-      max_instance_count = 3
+      max_instance_count = 4
     }
 
     containers {
-      # Replaced on first `make deploy`. Placeholder keeps terraform apply clean.
-      image = "us-docker.pkg.dev/cloudrun/container/hello"
+      image = "${var.region}-docker.pkg.dev/${var.project_id}/level/api:latest"
 
       env {
         name  = "LEVEL_ENV"
@@ -52,8 +28,38 @@ resource "google_cloud_run_v2_service" "api" {
         value = var.region
       }
       env {
+        name  = "LEVEL_WEB_APP_URL"
+        value = var.web_app_url
+      }
+      env {
+        name  = "LEVEL_PUBLIC_API_URL"
+        value = var.public_api_url
+      }
+      env {
         name  = "LEVEL_OTEL_EXPORTER"
-        value = "gcp"
+        value = "cloud"
+      }
+      env {
+        name  = "GOOGLE_OAUTH_CLIENT_ID"
+        value = var.google_oauth_client_id
+      }
+      env {
+        name = "GOOGLE_OAUTH_CLIENT_SECRET"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.oauth_client_secret.secret_id
+            version = "latest"
+          }
+        }
+      }
+      env {
+        name = "LEVEL_SESSION_SECRET"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.session_secret.secret_id
+            version = "latest"
+          }
+        }
       }
 
       resources {
@@ -61,6 +67,8 @@ resource "google_cloud_run_v2_service" "api" {
           cpu    = "1"
           memory = "512Mi"
         }
+        cpu_idle          = true
+        startup_cpu_boost = true
       }
 
       ports {
@@ -70,77 +78,17 @@ resource "google_cloud_run_v2_service" "api" {
   }
 
   depends_on = [
-    google_project_service.apis,
+    google_project_service.enabled,
     google_artifact_registry_repository.level,
-    google_service_account.agents,
+    google_secret_manager_secret_version.session_secret_v1,
+    google_secret_manager_secret_version.oauth_client_secret_v1,
   ]
-
-  lifecycle {
-    ignore_changes = [
-      # Image + env are mutated by Cloud Build / deploy.sh after first apply.
-      template[0].containers[0].image,
-      client,
-      client_version,
-    ]
-  }
 }
 
 resource "google_cloud_run_v2_service_iam_member" "api_public" {
-  project  = var.project_id
-  location = var.region
+  project  = google_cloud_run_v2_service.api.project
+  location = google_cloud_run_v2_service.api.location
   name     = google_cloud_run_v2_service.api.name
   role     = "roles/run.invoker"
   member   = "allUsers"
-}
-
-# ---------------------------------------------------------------------------
-# Cloud Run Job — async challenge / ingest workers
-# ---------------------------------------------------------------------------
-
-resource "google_cloud_run_v2_job" "async_challenge" {
-  name     = "level-async-challenge"
-  location = var.region
-  project  = var.project_id
-  labels   = local.labels
-
-  template {
-    template {
-      service_account = google_service_account.agents["jobs"].email
-      timeout         = "900s"
-      max_retries     = 1
-
-      containers {
-        image = "us-docker.pkg.dev/cloudrun/container/hello"
-
-        env {
-          name  = "LEVEL_ENV"
-          value = "cloud"
-        }
-        env {
-          name  = "GOOGLE_CLOUD_PROJECT"
-          value = var.project_id
-        }
-
-        resources {
-          limits = {
-            cpu    = "1"
-            memory = "1Gi"
-          }
-        }
-      }
-    }
-  }
-
-  depends_on = [
-    google_project_service.apis,
-    google_service_account.agents,
-  ]
-
-  lifecycle {
-    ignore_changes = [
-      template[0].template[0].containers[0].image,
-      client,
-      client_version,
-    ]
-  }
 }

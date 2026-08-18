@@ -158,7 +158,8 @@
   font-weight: 600;
   font-size: 1rem;
   border: none;
-  transition: transform 0.18s ease, background 0.18s ease, color 0.18s ease, border-color 0.18s ease;
+  transition: transform 0.18s ease, background 0.18s ease, color 0.18s ease,
+    border-color 0.18s ease;
 }
 
 .primary {
@@ -203,15 +204,16 @@
 .artFrame {
   border-radius: calc(var(--radius-lg) + 6px);
   padding: 0.35rem;
-  background:
-    radial-gradient(ellipse 80% 70% at 50% 45%, #f7fbfc 0%, #e8f1f3 100%);
+  background: radial-gradient(ellipse 80% 70% at 50% 45%, #f7fbfc 0%, #e8f1f3 100%);
   animation: bob 5.5s ease-in-out infinite;
+  overflow: hidden;
 }
 
 .people {
   width: 100%;
   height: auto;
   display: block;
+  border-radius: var(--radius-lg);
 }
 
 .orb {
@@ -348,6 +350,17 @@
   50% {
     transform: scale(1.3);
     opacity: 1;
+  }
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
   }
 }
 

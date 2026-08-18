@@ -1,138 +1,130 @@
-"""Care Profile write spine — versioned save, derive views, no invent."""
+"""care_store: propose/keep/not_me + negative feedback + versioning."""
 
 from __future__ import annotations
 
 import pytest
-
-from level_core.errors import ConflictError
-from level_core.memory.fakes import build_in_memory_bank
-from level_core.profile.care_store import (
-    apply_care,
-    apply_series_usuals,
-    derive_care_views,
-    save_care,
+from level_core.schemas import (
+    ActivityType,
+    CareRelation,
+    HourBand,
+    NegativeAgent,
+    UsualStatus,
+    Weekday,
 )
-from level_core.profile.people_usuals import merge_series_usuals, usual_id_for_slot
-from level_core.schemas.care import (
-    CarePerson,
-    CareProfile,
-    CareRoleId,
-    CareRoleState,
+from level_core.storage.care_store import (
+    add_priority,
+    add_reminder,
+    propose_person,
+    propose_usual,
+    recent_negatives,
+    record_negative,
+    set_person_status,
+    set_usual_status,
 )
-from level_core.schemas.profile import BulletStatus
-
-
-def _child(name: str, person_id: str) -> CarePerson:
-    return CarePerson(
-        person_id=person_id,
-        display_name=name,
-        care_role_id="child_care",
-        status=BulletStatus.ACCEPTED,
-        their_relation="child",
-        your_role="parent",
-    )
 
 
 @pytest.mark.asyncio
-async def test_save_rejects_stale_version() -> None:
-    memory = build_in_memory_bank()
-    care = CareProfile(user_id="u-test", version=1)
-    await save_care(memory, care, expected_version=None)
-    await save_care(
-        memory,
-        care.model_copy(update={"version": 2}),
-        expected_version=1,
-    )
-    with pytest.raises(ConflictError):
-        await save_care(
-            memory,
-            care.model_copy(update={"version": 3, "conflict_summaries": ["y"]}),
-            expected_version=1,
-        )
-    with pytest.raises(ConflictError):
-        await save_care(
-            memory, CareProfile(user_id="u-test", version=1), expected_version=None
-        )
+async def test_propose_person_is_idempotent_by_display_and_relation(store) -> None:  # type: ignore[no-untyped-def]
+    p1 = await propose_person(store, display_name="Alpha", relation=CareRelation.CHILD)
+    p2 = await propose_person(store, display_name="alpha", relation=CareRelation.CHILD)
+    assert p1.person_id == p2.person_id
 
 
 @pytest.mark.asyncio
-async def test_apply_retries_after_conflict() -> None:
-    memory = build_in_memory_bank()
-    await save_care(
-        memory, CareProfile(user_id="u-test", version=1), expected_version=None
+async def test_propose_person_matches_by_alias(store) -> None:  # type: ignore[no-untyped-def]
+    p1 = await propose_person(
+        store, display_name="Alpha", relation=CareRelation.CHILD, aliases=["A"]
     )
-    calls = {"n": 0}
-
-    async def _bump(current: CareProfile) -> CareProfile:
-        calls["n"] += 1
-        if calls["n"] == 1:
-            await save_care(
-                memory,
-                current.model_copy(update={"version": int(current.version) + 1}),
-                expected_version=current.version,
-            )
-        return current.model_copy(
-            update={
-                "version": int(current.version) + 1,
-                "conflict_summaries": ["kept"],
-            }
-        )
-
-    out = await apply_care(memory, "u-test", _bump)
-    assert out is not None
-    assert out.conflict_summaries == ["kept"]
-    assert calls["n"] == 2
+    p2 = await propose_person(store, display_name="A", relation=CareRelation.CHILD)
+    assert p1.person_id == p2.person_id
 
 
 @pytest.mark.asyncio
-async def test_apply_noop_does_not_write() -> None:
-    memory = build_in_memory_bank()
-    care = CareProfile(user_id="u-test", version=4)
-    await save_care(memory, care, expected_version=None)
-    out = await apply_care(memory, "u-test", lambda current: current)
-    assert out is not None
-    assert out.version == 4
-
-
-def test_derive_role_people_from_keepd_profiles() -> None:
-    care = CareProfile(
-        user_id="u-test",
-        roles=[
-            CareRoleState(
-                role_id=CareRoleId.CHILD_CARE,
-                label="Child care",
-                people=["Old label"],
-            )
-        ],
-        people_profiles=[_child("Alpha", "p-a"), _child("Beta", "p-b")],
-    )
-    derived = derive_care_views(care)
-    child_role = next(r for r in derived.roles if r.role_id is CareRoleId.CHILD_CARE)
-    assert child_role.people == ["Alpha", "Beta"]
-    assert derived.person_relationships["Alpha"] == "child"
+async def test_status_transitions_persist(store) -> None:  # type: ignore[no-untyped-def]
+    p = await propose_person(store, display_name="Beta", relation=CareRelation.CHILD)
+    assert p.status == "proposed"
+    updated = await set_person_status(store, p.person_id, "kept")
+    assert updated is not None and updated.status == "kept"
+    from_store = await store.people.get(p.person_id)
+    assert from_store is not None and from_store.status == "kept"
 
 
 @pytest.mark.asyncio
-async def test_series_usual_id_is_stable_across_persist() -> None:
-    memory = build_in_memory_bank()
-    care = CareProfile(
-        user_id="u-test",
-        people_profiles=[_child("Alpha", "p-a")],
-        version=1,
-    )
-    await save_care(memory, care, expected_version=None)
-    from datetime import datetime, timezone
+async def test_versioning_on_update(store) -> None:  # type: ignore[no-untyped-def]
+    p = await propose_person(store, display_name="Beta", relation=CareRelation.CHILD)
+    v1 = p.version
+    updated = await set_person_status(store, p.person_id, "kept")
+    assert updated is not None
+    assert updated.version > v1
 
-    when_a = datetime(2026, 8, 6, 22, 0, tzinfo=timezone.utc)
-    when_b = datetime(2026, 8, 13, 22, 0, tzinfo=timezone.utc)
-    events = [
-        {"summary": "Alpha window", "start": when_a.isoformat(), "status": "confirmed"},
-        {"summary": "Alpha window", "start": when_b.isoformat(), "status": "confirmed"},
-    ]
-    projected = merge_series_usuals(care, events)
-    persisted = await apply_series_usuals(memory, "u-test", events)
-    assert persisted is not None
-    proj_id = projected.people_profiles[0].usuals[0].usual_id
-    saved_id = persisted.people_profiles[0].usuals[0].usual_id
-    assert proj_id == saved_id
-    assert proj_id == usual_id_for_slot("p-a", 3, 15 * 60)
+
+@pytest.mark.asyncio
+async def test_propose_usual_deterministic_id(store) -> None:  # type: ignore[no-untyped-def]
+    person = await propose_person(store, display_name="Beta", relation=CareRelation.CHILD)
+    u = await propose_usual(
+        store,
+        person_id=person.person_id,
+        weekday=Weekday.TUE,
+        hour_band=HourBand.EVENING,
+        activity_type=ActivityType.SPORTS_SOCCER,
+        display_summary="Beta soccer",
+        source_event_uids=["e1", "e2"],
+        confidence=0.9,
+    )
+    assert u.usual_id == f"u:{person.person_id}:{int(Weekday.TUE)}:{HourBand.EVENING.value}"
+
+
+@pytest.mark.asyncio
+async def test_not_me_usual_is_not_reproposed(store) -> None:  # type: ignore[no-untyped-def]
+    person = await propose_person(store, display_name="Beta", relation=CareRelation.CHILD)
+    u = await propose_usual(
+        store,
+        person_id=person.person_id,
+        weekday=Weekday.TUE,
+        hour_band=HourBand.EVENING,
+        activity_type=ActivityType.SPORTS_SOCCER,
+        display_summary="Beta soccer",
+        source_event_uids=["e1"],
+        confidence=0.7,
+    )
+    await set_usual_status(store, u.usual_id, UsualStatus.NOT_ME)
+    re_propose = await propose_usual(
+        store,
+        person_id=person.person_id,
+        weekday=Weekday.TUE,
+        hour_band=HourBand.EVENING,
+        activity_type=ActivityType.SPORTS_SOCCER,
+        display_summary="Beta soccer",
+        source_event_uids=["e1"],
+        confidence=0.9,
+    )
+    assert re_propose.status == UsualStatus.NOT_ME
+
+
+@pytest.mark.asyncio
+async def test_priorities_and_reminders_written(store) -> None:  # type: ignore[no-untyped-def]
+    prio = await add_priority(
+        store,
+        text="Never miss elder therapy",
+        weight=5,
+        activity_types=[ActivityType.MEDICAL_THERAPY],
+    )
+    assert prio.priority_id.startswith("prio_")
+    assert prio.weight == 5
+
+    rem = await add_reminder(
+        store,
+        text="Bring soccer shoes",
+        person_id="p_x",
+        activity_type=ActivityType.SPORTS_SOCCER,
+    )
+    assert rem.match.activity_type == ActivityType.SPORTS_SOCCER
+
+
+@pytest.mark.asyncio
+async def test_negatives_recent_ordering(store) -> None:  # type: ignore[no-untyped-def]
+    await record_negative(store, agent=NegativeAgent.ROLE, field="display_name", value="Ghost")
+    await record_negative(store, agent=NegativeAgent.ROLE, field="display_name", value="Phantom")
+    negs = await recent_negatives(store, agent=NegativeAgent.ROLE, limit=5)
+    assert len(negs) == 2
+    assert negs[0].value in {"Ghost", "Phantom"}

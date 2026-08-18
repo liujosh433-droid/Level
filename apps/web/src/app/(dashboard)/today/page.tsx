@@ -1,898 +1,160 @@
 "use client";
 
-import { CSSProperties, Suspense, useEffect, useRef, useState } from "react";
-import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { ActivityIcon } from "@/components/ActivityIcon";
-import { AppShell } from "@/components/AppShell";
-import {
-  DashboardWorkspace,
-  RailSection,
-  TellLevelPanel,
-  TellLevelReply,
-  TellLevelYou,
-} from "@/components/dashboard";
-import {
-  AuthError,
-  confirmProposal,
-  declineProposal,
-  fetchMe,
-  fetchToday,
-  readTodayCache,
-  resolveUsual,
-  sendChat,
-  submitSchoolPaper,
-  writeTodayCache,
-  type CommitmentProposal,
-  type TodayView,
-  type Turn,
-} from "@/lib/api";
+import { useCallback, useEffect, useState } from "react";
+import Chat from "@/components/Chat";
+import EventCard from "@/components/EventCard";
+import RemindersPanel from "@/components/RemindersPanel";
+import RoleLoadBar from "@/components/RoleLoadBar";
+import { api, ApiError } from "@/lib/api";
+import type { TodayResponse, WhoAmI } from "@/lib/types";
 import styles from "./today.module.css";
 
-type ChatItem =
-  | { id: string; kind: "turn"; turn: Turn }
-  | { id: string; kind: "proposal"; proposal: CommitmentProposal }
-  | { id: string; kind: "checkin"; you: string; reply: string }
-  | { id: string; kind: "paper"; you: string; reply: string };
+export default function TodayPage() {
+  const [who, setWho] = useState<WhoAmI | null>(null);
+  const [data, setData] = useState<TodayResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [needsConnect, setNeedsConnect] = useState(false);
+  const [remindersTick, setRemindersTick] = useState(0);
 
-function buildDayScript(view: TodayView): string {
-  const name = view.greeting_name || "there";
-  const parts: string[] = [
-    `Hi ${name}. Here's your Level briefing for ${view.weekday_label}.`,
-  ];
-  if (view.events.length === 0) {
-    parts.push("Your calendar looks clear today.");
-  } else {
-    parts.push(
-      `You have ${view.events.length} thing${view.events.length === 1 ? "" : "s"} on the calendar.`,
-    );
-    for (const ev of view.events.slice(0, 8)) {
-      const when = ev.when_label || "Sometime today";
-      // "At …," + period gives the synthesizer a clearer event boundary than "8:00 AM: …"
-      let line = `At ${when}, ${ev.summary}.`;
-      if (ev.cues?.length) {
-        line += ` Remember: ${ev.cues.join(". ")}.`;
-      }
-      parts.push(line);
-    }
-  }
-  if (view.recommendations?.length) {
-    parts.push(
-      `From what we know about you: ${view.recommendations.slice(0, 2).join(" ")}`,
-    );
-  }
-  parts.push("You've got this — one honest step at a time.");
-  // Ellipsis between beats → a short spoken pause (space alone smushes events together).
-  return parts.join(" ... ");
-}
-
-function TodayInner() {
-  const router = useRouter();
-  const [userId, setUserId] = useState("");
-  const [displayName, setDisplayName] = useState<string | null>(null);
-  const [today, setToday] = useState<TodayView | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [draft, setDraft] = useState("");
-  const [paperText, setPaperText] = useState("");
-  const [paperFile, setPaperFile] = useState<File | null>(null);
-  const [paperFileKey, setPaperFileKey] = useState(0);
-  const [busy, setBusy] = useState(false);
-  const [canSendEmail, setCanSendEmail] = useState(true);
-  const [speaking, setSpeaking] = useState(false);
-  const [items, setItems] = useState<ChatItem[]>([]);
-  const [booting, setBooting] = useState(true);
-  const speakGenRef = useRef(0);
-  const speakTimerRef = useRef<number | null>(null);
-
-  useEffect(() => {
-    const cached = readTodayCache();
-    if (cached) {
-      setToday(cached);
-      if (cached.display_name) setDisplayName(cached.display_name);
-      setBooting(false);
-    }
-    void (async () => {
-      try {
-        const [me, data] = await Promise.all([fetchMe(), fetchToday()]);
-        setUserId(me.user_id);
-        setDisplayName(me.display_name);
-        setCanSendEmail(me.can_send_email !== false);
-        if (!me.google_connected && !data.google_connected) {
-          router.replace("/sources");
-          return;
-        }
-        setToday(data);
-        writeTodayCache(data);
-        if (data.display_name) setDisplayName(data.display_name);
-      } catch (err) {
-        if (err instanceof AuthError) {
-          router.replace("/welcome");
-          return;
-        }
-        setError(err instanceof Error ? err.message : String(err));
-      } finally {
-        setBooting(false);
-      }
-    })();
-  }, [router]);
-
-  function refreshToday() {
-    return fetchToday()
-      .then((data) => {
-        setToday(data);
-        writeTodayCache(data);
-        if (data.display_name) setDisplayName(data.display_name);
-      })
-      .catch(() => undefined);
-  }
-
-  // Care graph builds in the background after Google connect — soft-poll a few times.
-  useEffect(() => {
-    if (!today?.google_connected) return;
-    if (today.care_graph && today.care_graph.nodes.length > 0) return;
-    let cancelled = false;
-    const delays = [2500, 6000, 12000];
-    const timers = delays.map((ms) =>
-      window.setTimeout(() => {
-        if (!cancelled) void refreshToday();
-      }, ms),
-    );
-    return () => {
-      cancelled = true;
-      for (const t of timers) window.clearTimeout(t);
-    };
-  }, [today?.google_connected, today?.care_graph?.nodes?.length]);
-
-  function clearSpeakTimer() {
-    if (speakTimerRef.current != null) {
-      window.clearTimeout(speakTimerRef.current);
-      speakTimerRef.current = null;
-    }
-  }
-
-  function stopSpeaking() {
-    speakGenRef.current += 1;
-    clearSpeakTimer();
-    if (typeof window !== "undefined" && window.speechSynthesis) {
-      window.speechSynthesis.onvoiceschanged = null;
-      // Chrome sometimes ignores cancel while "paused"; resume first.
-      try {
-        window.speechSynthesis.resume();
-      } catch {
-        /* ignore */
-      }
-      window.speechSynthesis.cancel();
-    }
-    setSpeaking(false);
-  }
-
-  function speakDay() {
-    if (!today) return;
-    if (typeof window === "undefined" || !window.speechSynthesis) {
-      setError("Spoken briefing isn’t supported in this browser — try Chrome or Safari.");
-      return;
-    }
-    if (speaking) {
-      stopSpeaking();
-      return;
-    }
-    const script = buildDayScript(today);
-    const gen = ++speakGenRef.current;
-
-    const start = () => {
-      if (gen !== speakGenRef.current) return;
-      const utter = new SpeechSynthesisUtterance(script);
-      utter.rate = 1.02;
-      utter.pitch = 1;
-      const voices = window.speechSynthesis.getVoices();
-      const preferred =
-        voices.find(
-          (v) => /en(-|_)US/i.test(v.lang) && /natural|enhanced|premium/i.test(v.name),
-        ) ||
-        voices.find((v) => /en(-|_)US/i.test(v.lang)) ||
-        voices.find((v) => v.lang.startsWith("en"));
-      if (preferred) utter.voice = preferred;
-      utter.onend = () => {
-        if (gen === speakGenRef.current) setSpeaking(false);
-      };
-      utter.onerror = () => {
-        if (gen === speakGenRef.current) setSpeaking(false);
-      };
-      setSpeaking(true);
-      window.speechSynthesis.cancel();
-      window.speechSynthesis.speak(utter);
-    };
-
-    // Chrome often loads voices asynchronously.
-    if (window.speechSynthesis.getVoices().length === 0) {
-      window.speechSynthesis.onvoiceschanged = () => {
-        window.speechSynthesis.onvoiceschanged = null;
-        start();
-      };
-      clearSpeakTimer();
-      speakTimerRef.current = window.setTimeout(start, 250);
-      return;
-    }
-    start();
-  }
-
-  useEffect(() => {
-    return () => {
-      speakGenRef.current += 1;
-      clearSpeakTimer();
-      if (typeof window !== "undefined" && window.speechSynthesis) {
-        window.speechSynthesis.cancel();
-      }
-    };
-  }, []);
-
-  async function onAsk(text: string) {
-    if (!userId || !text.trim() || busy) return;
-    setBusy(true);
-    setError(null);
+  const load = useCallback(async () => {
+    setLoading(true);
     try {
-      const res = await sendChat(text);
-      const next: ChatItem[] = [];
-      if (res.proposal) {
-        next.push({
-          id: res.proposal.proposal_id,
-          kind: "proposal",
-          proposal: res.proposal,
-        });
-      }
-      for (const proposal of res.school_proposals ?? []) {
-        next.push({ id: proposal.proposal_id, kind: "proposal", proposal });
-      }
-      if (res.wants_paper_upload) {
-        next.push({
-          id: `paper-${Date.now()}`,
-          kind: "paper",
-          you: text,
-          reply: res.reply,
-        });
-      } else if (next.length === 0) {
-        next.push({
-          id: `checkin-${Date.now()}`,
-          kind: "checkin",
-          you: text,
-          reply: res.reply,
-        });
-      }
-      setItems((prev) => [...prev, ...next]);
-      setDraft("");
-      void refreshToday();
-    } catch (err) {
-      if (err instanceof AuthError) {
-        router.replace("/welcome");
+      const me = await api.get<WhoAmI>("/v1/me");
+      setWho(me);
+      if (!me.google_connected) {
+        setNeedsConnect(true);
+        setData(null);
         return;
       }
-      setError(err instanceof Error ? err.message : String(err));
+      const today = await api.get<TodayResponse>("/v1/today");
+      setData(today);
+      setNeedsConnect(false);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        setNeedsConnect(true);
+      }
     } finally {
-      setBusy(false);
+      setLoading(false);
     }
-  }
+  }, []);
 
-  function patchProposal(proposalId: string, patch: Partial<CommitmentProposal>) {
-    setItems((prev) =>
-      prev.map((it) =>
-        it.kind === "proposal" && it.proposal.proposal_id === proposalId
-          ? { ...it, proposal: { ...it.proposal, ...patch } }
-          : it,
-      ),
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  if (loading) {
+    return <p className={styles.meta}>Loading today&hellip;</p>;
+  }
+  if (needsConnect) {
+    return (
+      <section className={styles.empty}>
+        <h1>Connect Google to get started</h1>
+        <p className={styles.meta}>
+          Level reads your calendar so it can spot what&apos;s usual and what&apos;s missing.
+        </p>
+        <a className="button-primary" href="/v1/auth/google/start">
+          Connect Google
+        </a>
+      </section>
     );
   }
 
-  async function onConfirm(proposal: CommitmentProposal, slotStart?: string) {
-    if (!userId || busy) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const email =
-        proposal.kind === "school_send"
-          ? {
-              to_email: proposal.to_email,
-              email_subject: proposal.email_subject,
-              email_body: proposal.email_body,
-            }
-          : undefined;
-      const res = await confirmProposal(proposal.proposal_id, slotStart, email);
-      setItems((prev) =>
-        prev.map((it) =>
-          it.kind === "proposal" && it.proposal.proposal_id === proposal.proposal_id
-            ? { ...it, proposal: res.proposal }
-            : it,
-        ),
-      );
-      await refreshToday();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function onUsual(
-    usualId: string,
-    action: "put_back" | "exception" | "not_me" | "keep",
-    onDate?: string,
-  ) {
-    if (busy) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await resolveUsual(usualId, action, onDate);
-      await refreshToday();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function onSchoolPaper() {
-    const text = paperText.trim();
-    if ((!text && !paperFile) || busy) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await submitSchoolPaper(text, paperFile);
-      if (res.proposal) {
-        setItems((prev) => [
-          ...prev,
-          { id: res.proposal!.proposal_id, kind: "proposal", proposal: res.proposal! },
-        ]);
-        setPaperText("");
-        setPaperFile(null);
-        setPaperFileKey((k) => k + 1);
-      } else if (res.ask) {
-        setItems((prev) => [
-          ...prev,
-          {
-            id: `paper-${Date.now()}`,
-            kind: "checkin",
-            you: text.slice(0, 160),
-            reply: res.ask ?? "",
-          },
-        ]);
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function onDecline(proposal: CommitmentProposal) {
-    if (!userId || busy) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const updated = await declineProposal(proposal.proposal_id);
-      setItems((prev) =>
-        prev.map((it) =>
-          it.kind === "proposal" && it.proposal.proposal_id === proposal.proposal_id
-            ? { ...it, proposal: updated }
-            : it,
-        ),
-      );
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  const name = today?.greeting_name?.trim() || null;
-  const weekday = today?.weekday_label?.trim() || null;
-
-  const hearDayButton = today ? (
-    <button
-      type="button"
-      className={speaking ? styles.speakOn : styles.speak}
-      onClick={speakDay}
-      aria-pressed={speaking}
-      aria-label={speaking ? "Stop hearing your day" : "Hear Level describe your day"}
-    >
-      <svg
-        className={styles.speakIcon}
-        viewBox="0 0 24 24"
-        width="16"
-        height="16"
-        aria-hidden="true"
-      >
-        {speaking ? (
-          <path fill="currentColor" d="M6.5 6.5h11v11h-11z" />
-        ) : (
-          <>
-            <path
-              fill="currentColor"
-              d="M3 9v6h4l5 4V5L7 9H3zm13.5 3a4.5 4.5 0 0 0-2.3-3.9v7.8A4.4 4.4 0 0 0 16.5 12z"
-            />
-            <path
-              fill="currentColor"
-              d="M16.2 4.1v2.1a6.9 6.9 0 0 1 0 11.6v2.1a9 9 0 0 0 0-15.8z"
-            />
-          </>
-        )}
-      </svg>
-      {speaking ? "Stop" : "Hear my day"}
-    </button>
-  ) : null;
-
-  const chatThread = items.map((item) =>
-    item.kind === "turn" ? (
-      <article key={item.id} className={styles.turn}>
-        {item.turn.user_text && <TellLevelYou>{item.turn.user_text}</TellLevelYou>}
-        {item.turn.challenger_questions.map((q, i) => (
-          <TellLevelReply key={i}>
-            <p>{q.question}</p>
-            {q.citations.length > 0 && (
-              <ul className={styles.cites}>
-                {q.citations.map((c) => (
-                  <li key={c.fact_id}>{c.quote}</li>
-                ))}
-              </ul>
-            )}
-          </TellLevelReply>
-        ))}
-        {(item.turn.status === "degraded" || item.turn.status === "blocked") && (
-          <TellLevelReply>
-            <p className={styles.admit}>
-              {item.turn.status === "blocked"
-                ? "I blocked that reply — it didn’t pass Level’s safety check. Try rephrasing, or ask again in a moment."
-                : "I couldn’t finish a grounded challenge this turn (retrieval or the model glitched). Your care roles are still saved — try again."}
-            </p>
-            {item.turn.degradation_reason ? (
-              <p className={styles.admitDetail}>{item.turn.degradation_reason}</p>
-            ) : null}
-          </TellLevelReply>
-        )}
-      </article>
-    ) : item.kind === "checkin" ? (
-      <article key={item.id} className={styles.turn}>
-        <TellLevelYou>{item.you}</TellLevelYou>
-        <TellLevelReply>{item.reply}</TellLevelReply>
-      </article>
-    ) : item.kind === "paper" ? (
-      <article key={item.id} className={styles.turn}>
-        <TellLevelYou>{item.you}</TellLevelYou>
-        <TellLevelReply>
-          <p>{item.reply}</p>
-          <label className={styles.paperFile}>
-            <input
-              key={paperFileKey}
-              type="file"
-              accept="application/pdf,image/*,.txt"
-              disabled={busy || !userId}
-              onChange={(e) => setPaperFile(e.target.files?.[0] ?? null)}
-            />
-            <span>{paperFile ? paperFile.name : "Upload a PDF or photo"}</span>
-          </label>
-          <textarea
-            className={styles.paperInput}
-            rows={3}
-            value={paperText}
-            onChange={(e) => setPaperText(e.target.value)}
-            placeholder="Or paste the form text…"
-            disabled={busy || !userId}
-          />
-          <button
-            type="button"
-            className={styles.secondaryAction}
-            disabled={busy || (!paperText.trim() && !paperFile)}
-            onClick={() => void onSchoolPaper()}
-          >
-            Draft the email
-          </button>
-        </TellLevelReply>
-      </article>
-    ) : (
-      <article key={item.id} className={styles.turn}>
-        <TellLevelYou>{item.proposal.user_text}</TellLevelYou>
-        <TellLevelReply>
-          <p className={styles.proposalSummary}>{item.proposal.summary}</p>
-          <p>{item.proposal.level_message}</p>
-          {item.proposal.kind === "school_send" ? (
-            <div className={styles.emailPreview}>
-              {item.proposal.status === "pending" ? (
-                <>
-                  <label className={styles.emailField}>
-                    <span>To</span>
-                    <input
-                      type="email"
-                      value={item.proposal.to_email ?? ""}
-                      onChange={(e) =>
-                        patchProposal(item.proposal.proposal_id, { to_email: e.target.value })
-                      }
-                      disabled={busy}
-                    />
-                  </label>
-                  <label className={styles.emailField}>
-                    <span>Subject</span>
-                    <input
-                      type="text"
-                      value={item.proposal.email_subject ?? ""}
-                      onChange={(e) =>
-                        patchProposal(item.proposal.proposal_id, {
-                          email_subject: e.target.value,
-                        })
-                      }
-                      disabled={busy}
-                    />
-                  </label>
-                  <label className={styles.emailField}>
-                    <span>Message</span>
-                    <textarea
-                      rows={6}
-                      value={item.proposal.email_body ?? ""}
-                      onChange={(e) =>
-                        patchProposal(item.proposal.proposal_id, { email_body: e.target.value })
-                      }
-                      disabled={busy}
-                    />
-                  </label>
-                </>
-              ) : (
-                <>
-                  <p>
-                    <strong>To:</strong> {item.proposal.to_email}
-                  </p>
-                  {item.proposal.email_subject ? (
-                    <p>
-                      <strong>Subject:</strong> {item.proposal.email_subject}
-                    </p>
-                  ) : null}
-                  {item.proposal.email_body ? (
-                    <pre>{item.proposal.email_body}</pre>
-                  ) : null}
-                </>
-              )}
-            </div>
-          ) : null}
-          {item.proposal.conflicts.length > 0 && (
-            <ul className={styles.cites}>
-              {item.proposal.conflicts.map((c) => (
-                <li key={`${c.summary}-${c.start}`}>Conflict: {c.label}</li>
-              ))}
-            </ul>
-          )}
-          {item.proposal.citations.length > 0 && (
-            <ul className={styles.cites}>
-              {item.proposal.citations.map((c) => (
-                <li key={c.fact_id}>{c.quote}</li>
-              ))}
-            </ul>
-          )}
-          {item.proposal.status === "pending" && (
-            <div className={styles.proposalActions}>
-              {item.proposal.kind === "add" &&
-                item.proposal.recommended_action === "confirm" && (
-                <button
-                  type="button"
-                  className={styles.primaryAction}
-                  disabled={busy}
-                  onClick={() => void onConfirm(item.proposal)}
-                >
-                  Add anyway
-                </button>
-              )}
-              {item.proposal.kind === "school_send" &&
-                item.proposal.status === "pending" &&
-                (canSendEmail ? (
-                <button
-                  type="button"
-                  className={styles.primaryAction}
-                  disabled={
-                    busy ||
-                    !(item.proposal.to_email ?? "").includes("@")
-                  }
-                  onClick={() => void onConfirm(item.proposal)}
-                >
-                  Send
-                </button>
-                ) : (
-                <a href="/sources?need_gmail=1" className={styles.primaryAction}>
-                  Allow sending email on Sources
-                </a>
-                ))}
-              {item.proposal.free_slots.slice(0, 3).map((slot) => (
-                <button
-                  key={slot.start}
-                  type="button"
-                  className={styles.secondaryAction}
-                  disabled={busy}
-                  onClick={() => void onConfirm(item.proposal, slot.start)}
-                >
-                  Use {slot.label}
-                </button>
-              ))}
-              <button
-                type="button"
-                className={styles.ghostAction}
-                disabled={busy}
-                onClick={() => void onDecline(item.proposal)}
-              >
-                Never mind
-              </button>
-            </div>
-          )}
-          {item.proposal.status === "confirmed" && (
-            <p className={styles.meta}>
-              {item.proposal.kind === "school_send"
-                ? "Sent — the school has it."
-                : "Added to your Google Calendar."}
-            </p>
-          )}
-          {item.proposal.status === "declined" && (
-            <p className={styles.meta}>Okay — left off the calendar.</p>
-          )}
-        </TellLevelReply>
-      </article>
-    ),
-  );
+  const dateLabel = data
+    ? new Date(data.date).toLocaleDateString([], {
+        weekday: "long",
+        month: "short",
+        day: "numeric",
+      })
+    : null;
+  const greetingName = who?.email?.split("@")[0] ?? "there";
+  const weekday = data
+    ? new Date(data.date).toLocaleDateString([], { weekday: "long" })
+    : null;
 
   return (
-    <AppShell userId={userId} displayName={displayName} dashboard contentOnly>
-      <DashboardWorkspace
-        railAriaLabel="Reminders and ask Level"
-        rail={
-          <>
-            <RailSection title="Reminders">
-              {booting || !today ? (
-                <p className={styles.meta}>Loading reminders…</p>
-              ) : today.recommendations.length > 0 ? (
-                <ul className={styles.reminders}>
-                  {today.recommendations.map((r) => (
-                    <li key={r}>{r}</li>
-                  ))}
-                </ul>
-              ) : (
-                <p className={styles.meta}>
-                  Nothing specific for today’s events yet. Tell Level something once (like forgetting
-                  soccer shoes) and it’ll remind you when that day comes up.
-                </p>
-              )}
-            </RailSection>
-
-            <div className={styles.railStack}>
-              <div className={styles.chatBlock}>
-                <TellLevelPanel
-                  title="Ask Level"
-                  lead="Ask about the day, book something, or say you need to email the school — Level drafts it here when you ask."
-                  placeholder="How’s the day going — or should I email the teacher?"
-                  value={draft}
-                  onChange={setDraft}
-                  onSubmit={onAsk}
-                  busy={busy}
-                  busyLabel="Thinking…"
-                  busyHints={[
-                    "Looking at your calendar…",
-                    "Weighing decisions and priorities…",
-                    "Checking your care load…",
-                    "Putting an honest answer together…",
-                  ]}
-                  disabled={!userId || booting}
-                  voiceEnabled
-                  stickyInput={false}
-                  onVoiceError={setError}
-                  error={error}
-                  headerActions={hearDayButton}
-                >
-                  {items.length > 0 ? chatThread : null}
-                </TellLevelPanel>
-              </div>
-            </div>
-          </>
-        }
-      >
-        <div className={styles.titleRow}>
-          <div className={styles.titleBlock}>
-            {booting || !today ? (
-              <p className={styles.bootMsg}>Loading your day…</p>
-            ) : (
-              <>
-                {today.date_label ? (
-                  <p className={styles.dateLabel}>{today.date_label}</p>
-                ) : null}
-                <h1 className={styles.title}>
-                  Hi {name || "there"}
-                  {weekday ? `, Happy ${weekday}` : ""}!
-                </h1>
-              </>
-            )}
-          </div>
-        </div>
-
-        {today?.usual_gaps && today.usual_gaps.length > 0 && (
-          <div className={styles.bannerStack}>
-            {today.usual_gaps.map((gap) => (
-              <div key={`${gap.usual_id}-${gap.on_date}`} className={styles.banner}>
-                <p>
-                  {gap.banner}
-                </p>
-                <div className={styles.bannerActions}>
-                  <button
-                    type="button"
-                    className={styles.primaryAction}
-                    disabled={busy}
-                    onClick={() => void onUsual(gap.usual_id, "put_back", gap.on_date)}
-                  >
-                    Put it back
-                  </button>
-                  <button
-                    type="button"
-                    className={styles.secondaryAction}
-                    disabled={busy}
-                    onClick={() => void onUsual(gap.usual_id, "exception", gap.on_date)}
-                  >
-                    This week is different
-                  </button>
-                  <button
-                    type="button"
-                    className={styles.ghostAction}
-                    disabled={busy}
-                    onClick={() => void onUsual(gap.usual_id, "not_me", gap.on_date)}
-                  >
-                    Not me
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {today?.pending_challenges && today.pending_challenges.length > 0 && (
-          <div className={styles.banner}>
-            <p>
-              <strong>Care collision:</strong>{" "}
-              {today.pending_challenges[0].trigger_label}
-            </p>
-            {today.pending_challenges[0].question ? (
-              <p style={{ marginTop: "0.4rem" }}>{today.pending_challenges[0].question}</p>
-            ) : null}
-            <button
-              type="button"
-              className={styles.linkish}
-              style={{ marginTop: "0.5rem" }}
-              onClick={() => {
-                const ch = today.pending_challenges![0];
-                if (ch.question) {
-                  setItems((prev) => [
-                    {
-                      id: `pending-${ch.decision_id}`,
-                      kind: "turn",
-                      turn: {
-                        turn_id: `pending-${ch.decision_id}`,
-                        status: "complete",
-                        challenger_questions: [
-                          {
-                            question: ch.question!,
-                            challenge_type: ch.challenge_type || "role_theft",
-                            citations: [],
-                          },
-                        ],
-                      },
-                    },
-                    ...prev.filter((i) => i.id !== `pending-${ch.decision_id}`),
-                  ]);
-                }
-              }}
-            >
-              Open challenge →
-            </button>
-          </div>
-        )}
-
-        {today?.needs_review && (
-          <p className={styles.banner}>
-            Level drafted your care roles — take 30 seconds to confirm what you hold.{" "}
-            <Link href="/profile">Open About me →</Link>
+    <div className={styles.wrap}>
+      <div className={styles.titleRow}>
+        <div>
+          {dateLabel && <p className={styles.dateLabel}>{dateLabel}</p>}
+          <h1>
+            Hi {greetingName}
+            {weekday ? `, happy ${weekday}` : ""}!
+          </h1>
+          <p className={styles.sub}>
+            {data?.today.length
+              ? `${data.today.length} on your calendar today.`
+              : "Your calendar is clear today."}
           </p>
-        )}
+          <RoleLoadBar load={data?.week_load} />
+        </div>
+      </div>
 
-        <section className={styles.block}>
-          <h2>On your calendar</h2>
-          {booting || !today ? (
-            <p className={styles.meta}>Loading calendar…</p>
-          ) : today.events.length === 0 ? (
-            <p className={styles.meta}>Nothing on the calendar for today.</p>
-          ) : (
-            <ul className={styles.events}>
-              {today.events.map((ev) => {
-                const color = ev.color || "#8aa4b0";
-                return (
-                  <li
-                    key={ev.id || `${ev.summary}-${ev.start}`}
-                    className={styles.eventCard}
-                    data-kind={ev.activity_kind}
-                    style={{ ["--event-color" as string]: color } as CSSProperties}
-                  >
-                    <div className={styles.eventArt} aria-hidden>
-                      <ActivityIcon kind={ev.activity_kind} className={styles.eventIcon} />
-                    </div>
-                    <div className={styles.eventBody}>
-                      <div className={styles.eventMeta}>
-                        <span className={styles.when}>{ev.when_label}</span>
-                        <span className={styles.kindChip}>{ev.activity_kind}</span>
-                      </div>
-                      <span className={styles.eventTitle}>{ev.summary}</span>
-                      {ev.cues?.length > 0 && (
-                        <ul className={styles.eventCues}>
-                          {ev.cues.map((c) => (
-                            <li key={c}>{c}</li>
-                          ))}
-                        </ul>
-                      )}
-                    </div>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
+      {data?.missing_usuals && data.missing_usuals.length > 0 && (
+        <section className={styles.banner}>
+          <strong>Missing today</strong>
+          <ul>
+            {data.missing_usuals.map((m) => (
+              <li key={m.usual_id}>
+                <span>{m.display_summary}</span>
+                <div className={styles.bannerActions}>
+                  <button className="button-ghost">Put it back</button>
+                  <button className="button-ghost">This week is different</button>
+                </div>
+              </li>
+            ))}
+          </ul>
         </section>
+      )}
 
-        {today?.tomorrow && (
-          <section className={`${styles.block} ${styles.tomorrow}`}>
-            <div className={styles.tomorrowHead}>
-              <div>
-                <h2>Tomorrow</h2>
-                <p className={styles.tomorrowDate}>
-                  {today.tomorrow.weekday_label}
-                  {today.tomorrow.date_label ? ` · ${today.tomorrow.date_label}` : ""}
-                </p>
-              </div>
-              <span className={styles.countChip}>
-                {today.tomorrow.events.length === 0
-                  ? "Clear"
-                  : `${today.tomorrow.events.length} event${
-                      today.tomorrow.events.length === 1 ? "" : "s"
-                    }`}
-              </span>
-            </div>
-
-            {today.tomorrow.events.length === 0 ? (
-              <p className={styles.meta}>Nothing on the calendar yet.</p>
-            ) : (
-              <ul className={styles.tomorrowEvents}>
-                {today.tomorrow.events.map((ev) => (
-                  <li
-                    key={ev.id || `t-${ev.summary}-${ev.start}`}
-                    style={{ ["--event-color" as string]: ev.color || "#8aa4b0" }}
-                  >
-                    <span className={styles.tomDot} aria-hidden="true" />
-                    <span className={styles.when}>{ev.when_label}</span>
-                    <div className={styles.tomBody}>
-                      <span className={styles.tomTitle}>{ev.summary}</span>
-                      {ev.cues?.[0] ? (
-                        <span className={styles.tomCue}>{ev.cues[0]}</span>
-                      ) : null}
-                    </div>
+      <div className={styles.workspace}>
+        <div className={styles.mainCol}>
+          <section className={styles.block}>
+            <h2>Today</h2>
+            {data?.today.length ? (
+              <ul className={styles.list}>
+                {data.today.map((e) => (
+                  <li key={e.event_id}>
+                    <EventCard event={e} />
                   </li>
                 ))}
               </ul>
-            )}
-
-            {today.tomorrow.remember.length > 0 && (
-              <div className={styles.tipRow}>
-                <p className={styles.tipLabel}>Remember</p>
-                <ul className={styles.tipChips}>
-                  {today.tomorrow.remember.map((r) => (
-                    <li key={r}>{r}</li>
-                  ))}
-                </ul>
-              </div>
+            ) : (
+              <p className={styles.meta}>Nothing on the calendar.</p>
             )}
           </section>
-        )}
-      </DashboardWorkspace>
-    </AppShell>
-  );
-}
 
-export default function TodayPage() {
-  return (
-    <Suspense fallback={<AppShell contentOnly><p className={styles.meta}>Loading…</p></AppShell>}>
-      <TodayInner />
-    </Suspense>
+          <section className={`${styles.block} ${styles.tomorrow}`}>
+            <h2>Tomorrow</h2>
+            {data?.tomorrow.length ? (
+              <ul className={styles.list}>
+                {data.tomorrow.map((e) => (
+                  <li key={e.event_id}>
+                    <EventCard event={e} />
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className={styles.meta}>Nothing on the calendar yet.</p>
+            )}
+          </section>
+        </div>
+
+        <aside className={styles.rail} aria-label="Reminders and ask Level">
+          <section className={styles.railBlock}>
+            <RemindersPanel key={remindersTick} onChange={load} />
+          </section>
+          <section className={styles.railBlock}>
+            <Chat
+              lead="Ask about your day, book a time, or draft an email &mdash; and Level will draft here."
+              placeholder='"What&rsquo;s crowding this week?" or "email Alpha&rsquo;s teacher, sick today"'
+              onAfterReply={() => {
+                setRemindersTick((n) => n + 1);
+                void load();
+              }}
+            />
+          </section>
+        </aside>
+      </div>
+    </div>
   );
 }

@@ -1,88 +1,50 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-# Python setuptools build dirs at repo root (do not ignore apps/web/src/lib).
-/lib/
-/lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
-
-# uv
-.venv/
-.uv/
-
-# Test / coverage
-.coverage
-.coverage.*
-htmlcov/
-.tox/
-.nox/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.hypothesis/
-coverage.xml
-*.cover
-
-# Environments
+# Environments and credentials
 .env
 .env.*
 !.env.example
-.envrc
-
-# Local OAuth tokens (never commit)
 .level/
-
-# Node / Next.js
-node_modules/
-.next/
-out/
-.turbo/
-*.tsbuildinfo
-
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-.DS_Store
-
-# OS
-Thumbs.db
-
-# Terraform
 *.tfstate
 *.tfstate.*
+*.tfstate.backup
 .terraform/
 .terraform.lock.hcl
-*.tfvars
-!*.tfvars.example
-crash.log
-crash.*.log
-
-# GCP
 service-account*.json
-*-key.json
-gcloud-credentials/
+*.pem
 
-# Local artifacts
-tmp/
-scratch/
-*.log
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Node / Next
+node_modules/
+.next/
+.turbo/
+out/
+.vercel/
+playwright-report/
+test-results/
+
+# Tooling caches
+.DS_Store
 .tools/
+*.tsbuildinfo
+
+# Terraform vars can contain project ids, service accounts, and secrets
+infra/terraform/terraform.tfvars
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# Local bundled tools stay usable but their caches don't need version-control

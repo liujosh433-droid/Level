@@ -1,135 +1,262 @@
-.title {
-  font-family: var(--font-display);
-  font-size: clamp(1.85rem, 5vw, 2.45rem);
-  font-weight: 600;
-  letter-spacing: -0.02em;
-  margin: 0 0 0.45rem;
-  line-height: 1.15;
+.wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 1.35rem;
+  max-width: 60rem;
+  margin: 0 auto;
+  animation: rise 0.4s ease-out both;
 }
 
-.page {
-  max-width: 52rem;
-  margin: 0 auto;
+.header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.header h1 {
+  margin: 0;
 }
 
 .sub {
   color: var(--mist);
-  margin: 0 0 1.15rem;
-  max-width: none;
+  margin: 0;
+  max-width: 44rem;
   line-height: 1.5;
+}
+
+.status {
+  margin: 0;
+  color: var(--signal-deep);
+  font-weight: 600;
+  font-size: 0.9rem;
 }
 
 .meta {
   color: var(--mist);
-  margin: 0 0 1.15rem;
+  margin: 0;
 }
 
-.list {
+.section {
+  padding-top: 1.1rem;
+  border-top: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.sectionTitle {
+  font-family: var(--font-display);
+  font-size: clamp(1.2rem, 2.8vw, 1.4rem);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--signal-deep);
+  margin: 0;
+}
+
+.personList {
   list-style: none;
-  margin: 0 0 1.35rem;
   padding: 0;
+  margin: 0;
   display: flex;
   flex-direction: column;
   gap: 0.85rem;
 }
 
-.list li {
-  padding: 0.95rem 1rem;
-  border-radius: var(--radius-lg);
-  border: 1px solid var(--line);
+.personCard {
   background: var(--surface);
-}
-
-.cat {
-  display: block;
-  font-family: var(--font-display);
-  font-size: 1.05rem;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-  color: var(--foam, inherit);
-}
-
-.row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.55rem;
-  margin-top: 0.65rem;
-}
-
-.field {
-  min-height: var(--touch);
-  padding: 0.45rem 0.65rem;
-  border-radius: var(--radius);
   border: 1px solid var(--line);
-  background: var(--panel, #fff);
-  color: inherit;
-  font: inherit;
-}
-
-.addPerson,
-.addRole {
+  border-radius: var(--radius-lg);
+  padding: 1rem 1.15rem;
   display: flex;
-  flex-wrap: wrap;
-  gap: 0.45rem;
-  margin: 0.55rem 0 0;
-  align-items: center;
+  flex-direction: column;
+  gap: 0.85rem;
+  box-shadow: var(--shadow-soft);
 }
 
-.addPerson .field,
-.addRole .field {
-  flex: 1 1 8rem;
-  min-width: 7rem;
+.personHead {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+}
+
+.personName {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--foam);
+}
+
+.personRel {
+  margin: 0.1rem 0 0;
+  color: var(--mist);
+  font-size: 0.82rem;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.personActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.savedBadge {
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+  background: var(--signal-soft);
+  color: var(--signal-deep);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.contactRows {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
 }
 
 .contactRow {
   display: grid;
-  grid-template-columns: minmax(7.5rem, 10.5rem) minmax(0, 1fr);
-  gap: 0.45rem;
-  margin: 0.75rem 0 0;
+  grid-template-columns: minmax(9rem, 10rem) minmax(10rem, 1fr) minmax(12rem, 1.4fr) minmax(8rem, 10rem) auto;
+  gap: 0.55rem;
+  align-items: end;
+  padding: 0.65rem 0.75rem;
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.55);
+  border: 1px solid var(--line);
 }
 
-.contactRow .field {
+@media (max-width: 720px) {
+  .contactRow {
+    grid-template-columns: 1fr 1fr;
+  }
+  .field:nth-child(3),
+  .field:nth-child(4) {
+    grid-column: span 2;
+  }
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.fieldLabel {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--mist);
+  font-weight: 600;
+}
+
+.field input,
+.field select {
+  min-height: var(--touch);
+  padding: 0.45rem 0.65rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--line-strong);
+  background: var(--field);
+  color: var(--foam);
+  font: inherit;
+  font-size: 0.95rem;
   min-width: 0;
   width: 100%;
 }
 
-.email {
-  grid-column: 1 / -1;
-}
-
-.save {
-  display: inline-flex;
+.kindPicker {
+  display: grid;
+  grid-template-columns: 2rem 1fr;
   align-items: center;
-  justify-content: center;
-  min-height: var(--touch);
-  padding: 0.65rem 1.1rem;
+  gap: 0.4rem;
+  padding: 0.1rem 0.25rem 0.1rem 0.55rem;
   border-radius: var(--radius);
-  font-weight: 600;
-  border: 1px solid rgba(45, 159, 138, 0.4);
-  background: rgba(45, 159, 138, 0.12);
-  color: #1f7a68;
-  min-width: 6.5rem;
+  border: 1px solid var(--line-strong);
+  background: var(--field);
+  min-height: var(--touch);
 }
 
-.save:disabled {
-  opacity: 0.5;
+.kindPicker select {
+  border: none;
+  background: transparent;
+  min-height: auto;
+  padding: 0.3rem 0.2rem;
+  font-size: 0.95rem;
+  color: var(--foam);
 }
 
-.status {
-  margin: 0.75rem 0 0;
-  color: var(--signal);
-  font-weight: 600;
+.kindIcon {
+  font-size: 1.1rem;
+  line-height: 1;
+  color: var(--signal-deep);
 }
 
-.section {
-  margin: 0 0 1.65rem;
+.removeBtn {
+  align-self: end;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 50%;
+  color: var(--mist);
+  font-size: 1.2rem;
+  line-height: 1;
+  transition: background 0.12s ease, color 0.12s ease;
+  justify-self: end;
 }
 
-.sectionTitle {
-  font-family: var(--font-display);
-  font-size: clamp(1.2rem, 2.8vw, 1.45rem);
-  font-weight: 550;
-  letter-spacing: -0.02em;
-  color: var(--signal);
-  margin: 0 0 0.65rem;
+.removeBtn:hover {
+  background: rgba(196, 77, 77, 0.1);
+  color: var(--danger);
+}
+
+.addRowBtn {
+  align-self: flex-start;
+  padding: 0.35rem 0.75rem;
+  border-radius: var(--radius);
+  color: var(--signal-deep);
+  font-weight: 700;
+  font-size: 0.85rem;
+  background: var(--signal-soft);
+}
+
+.addRowBtn:hover {
+  background: color-mix(in srgb, var(--signal) 25%, var(--surface));
+}
+
+.addPerson {
+  display: flex;
+  gap: 0.55rem;
+  align-items: center;
+  margin-top: 0.3rem;
+  flex-wrap: wrap;
+}
+
+.addPerson input {
+  flex: 1 1 14rem;
+  min-height: var(--touch);
+  padding: 0.5rem 0.75rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--line-strong);
+  background: var(--field);
+  color: var(--foam);
+  font-family: inherit;
+  font-size: 0.95rem;
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }

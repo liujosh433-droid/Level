@@ -34,8 +34,8 @@ const HOW = [
   },
   {
     icon: "chat",
-    title: "Optional: ChatGPT Memory",
-    body: "If ChatGPT already remembers your family, work, or caregiving constraints, paste that Memory summary so Level can start with real context — not a full chat export.",
+    title: "Tell Level in chat",
+    body: "Priorities, who’s in your care, what a week should look like — say it in Level. Keep / Not me on About me does the rest.",
   },
 ] as const;
 

@@ -131,6 +131,7 @@ export type Profile = {
   conflict_summaries?: string[];
   care_graph?: CareGraph | null;
   people?: CarePersonView[];
+  proposed_usuals?: ProposedUsualView[];
 };
 
 export type CareContactView = {
@@ -217,16 +218,28 @@ export type UsualGapView = {
   banner: string;
 };
 
+export type ProposedUsualSlotView = {
+  usual_id: string;
+  weekday: number;
+  start_minute: number;
+  end_minute: number;
+  when_label?: string;
+};
+
 export type ProposedUsualView = {
   usual_id: string;
   person_id: string;
   display_name: string;
   your_role: string;
+  their_relation?: string;
+  care_role_id?: string;
   label: string;
   weekday: number;
   start_minute: number;
   end_minute: number;
   when_label?: string;
+  usual_ids?: string[];
+  slots?: ProposedUsualSlotView[];
 };
 
 export type CommitmentProposal = {

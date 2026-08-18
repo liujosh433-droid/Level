@@ -1,6 +1,6 @@
 """Profile read + Keep / Not me + profile chat.
 
-Google sync and ChatGPT ingest stay in ``sources``. URLs stay under /v1/sources.
+Google sync stays in ``sources``. URLs stay under /v1/sources.
 """
 
 from __future__ import annotations
@@ -51,6 +51,7 @@ from level_core.profile.synthesize import (
     care_profile_to_snapshot,
     refresh_profile_and_manifesto,
 )
+from level_api.routes.today import ProposedUsualOut, proposed_usual_views
 from level_core.schemas.care import CareGraph, CareProfile, active_care_people, clean_conflict_summaries
 from level_core.schemas.profile import BulletStatus
 from level_core.schemas.signal import Signal, SignalSource
@@ -118,6 +119,7 @@ class ProfileResponse(BaseModel):
     conflict_summaries: list[str] = Field(default_factory=list)
     care_graph: CareGraph | None = None
     people: list[CarePersonOut] = Field(default_factory=list)
+    proposed_usuals: list[ProposedUsualOut] = Field(default_factory=list)
 
 
 def _people_out(care: CareProfile | None) -> list[CarePersonOut]:
@@ -251,7 +253,7 @@ async def _build_profile_response(
     if state and state.events:
         try:
             agenda_events = [
-                {"summary": e.summary, "start": e.start}
+                {"summary": e.summary, "start": e.start, "end": e.end}
                 for e in state.events.values()
                 if e.summary
             ]
@@ -324,6 +326,11 @@ async def _build_profile_response(
         care_graph, _, _ = cached_care_graph(care, agenda_events or None)
 
     about_summary = build_about_summary(care_profile=care, facts=facts)
+    proposed_usuals_out: list[ProposedUsualOut] = []
+    try:
+        proposed_usuals_out = proposed_usual_views(care, agenda_events)
+    except Exception:  # noqa: BLE001
+        _logger.warning("proposed_usuals_failed", user_id=user_id)
 
     return ProfileResponse(
         user_id=user_id,
@@ -343,6 +350,7 @@ async def _build_profile_response(
         ),
         care_graph=care_graph,
         people=_people_out(care),
+        proposed_usuals=proposed_usuals_out,
     )
 
 

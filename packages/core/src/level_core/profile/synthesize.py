@@ -258,7 +258,7 @@ def build_manifesto_statement(facts: list[Fact]) -> tuple[str, list[str]]:
 
 def care_profile_to_snapshot(profile: CareProfile, *, fact_count: int = 0) -> ProfileSnapshot:
     """Project Care Profile into Priorities UI bullets (role-grouped)."""
-    # Detect a shared dump pasted onto every role (ChatGPT Memory care_note).
+    # Detect a shared dump pasted onto every role.
     evidence_heads = [
         (r.evidence_summaries[0][:80].strip().lower() if r.evidence_summaries else "")
         for r in profile.roles

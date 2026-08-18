@@ -2,7 +2,7 @@
 
 The primary ingestion path is Cloud Run Jobs (see ``packages/jobs``), but
 we also expose a manual signal-submission endpoint so users can drop
-voice memos, chat exports, or arbitrary text into their Memory Bank
+voice memos or arbitrary text into their Memory Bank
 directly from the UI.
 """
 

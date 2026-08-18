@@ -24,7 +24,7 @@ Level is the friend who won’t let a late networking dinner quietly erase Thurs
 
 ## What it does
 
-Level ingests messy personal signals — Google Calendar, ChatGPT exports, voice-memo transcripts, notes — into a Memory Bank and **mutates a Care Profile** (child care, elder care, paid work, self & recovery, household logistics, co-parent). Users correct with Keep / Not me.
+Level ingests messy personal signals — Google Calendar, voice-memo transcripts, notes — into a Memory Bank and **mutates a Care Profile** (child care, elder care, paid work, self & recovery, household logistics, co-parent). Users correct with Keep / Not me.
 
 When the user brings a decision — or the background job spots a collision — specialized agents run:
 

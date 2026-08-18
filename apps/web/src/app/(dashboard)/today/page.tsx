@@ -703,41 +703,6 @@ function TodayInner() {
           </div>
         </div>
 
-        {today?.proposed_usuals && today.proposed_usuals.length > 0 && (
-          <div className={styles.bannerStack}>
-            {today.proposed_usuals.map((usual) => (
-              <div key={usual.usual_id} className={styles.banner}>
-                <p>
-                  <strong>Usual?</strong>{" "}
-                  {usual.display_name
-                    ? `${usual.display_name} ${usual.label}`
-                    : usual.label}
-                  {usual.when_label ? ` — ${usual.when_label}` : ""}
-                  {usual.your_role ? ` — you’re the ${usual.your_role}` : ""}.
-                </p>
-                <div className={styles.bannerActions}>
-                  <button
-                    type="button"
-                    className={styles.primaryAction}
-                    disabled={busy}
-                    onClick={() => void onUsual(usual.usual_id, "keep")}
-                  >
-                    Keep
-                  </button>
-                  <button
-                    type="button"
-                    className={styles.ghostAction}
-                    disabled={busy}
-                    onClick={() => void onUsual(usual.usual_id, "not_me")}
-                  >
-                    Not me
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-
         {today?.usual_gaps && today.usual_gaps.length > 0 && (
           <div className={styles.bannerStack}>
             {today.usual_gaps.map((gap) => (

@@ -33,12 +33,18 @@ from level_core.calendar.agenda_sync import (
 from level_core.calendar.event_cues import EventCue, EventCueStore, match_cues_for_summary
 from level_core.calendar.proposals import ProposalStore
 from level_core.calendar.routines import (
+    calendar_tz_label,
     classify_usual,
     format_usual_slot,
     normalize_routine,
     routine_word,
 )
-from level_core.calendar.usuals import find_usual_gaps, horizon_dates, usuals_infer_needed
+from level_core.calendar.usuals import (
+    find_usual_gaps,
+    horizon_dates,
+    usual_local_slot,
+    usuals_infer_needed,
+)
 from level_core.profile.care_store import apply_care, apply_series_usuals
 from level_core.profile.people_usuals import merge_series_usuals
 from level_core.schemas.care import pending_usuals
@@ -138,16 +144,28 @@ class UsualGapOut(BaseModel):
     banner: str
 
 
+class ProposedUsualSlotOut(BaseModel):
+    usual_id: str
+    weekday: int
+    start_minute: int
+    end_minute: int
+    when_label: str = ""
+
+
 class ProposedUsualOut(BaseModel):
     usual_id: str
     person_id: str
     display_name: str
     your_role: str = ""
+    their_relation: str = ""
+    care_role_id: str = ""
     label: str
     weekday: int
     start_minute: int
     end_minute: int
     when_label: str = ""
+    usual_ids: list[str] = Field(default_factory=list)
+    slots: list[ProposedUsualSlotOut] = Field(default_factory=list)
 
 
 class TodayResponse(BaseModel):
@@ -205,11 +223,85 @@ def _greeting_labels(now: datetime | None = None) -> tuple[str, str]:
     return _day_labels(local)
 
 
-def _usual_views(care, agenda_events: list[dict]) -> tuple[list[UsualGapOut], list[ProposedUsualOut]]:
-    gaps_out: list[UsualGapOut] = []
-    proposed: list[ProposedUsualOut] = []
+def proposed_usual_views(care, events: list[dict] | None = None) -> list[ProposedUsualOut]:
     if care is None:
-        return gaps_out, proposed
+        return []
+    groups: dict[tuple[str, str], list[tuple[object, object, str]]] = {}
+    order: list[tuple[str, str]] = []
+    for person, usual in pending_usuals(care):
+        label = routine_word(
+            classify_usual(
+                usual,
+                person,
+                routine_by_summary=care.calendar_routine_by_summary,
+            )
+        )
+        key = (person.person_id, label)
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append((person, usual, label))
+
+    proposed: list[ProposedUsualOut] = []
+    tz_label = calendar_tz_label()
+    agenda = events or []
+    for key in order[:6]:
+        rows = groups[key]
+        person, first, label = rows[0]
+        usual_ids = [usual.usual_id for _person, usual, _label in rows]
+        slots: list[ProposedUsualSlotOut] = []
+        seen: set[tuple[int, int]] = set()
+        refined: list[tuple[object, int, int, int]] = []
+        for _person, usual, _label in rows:
+            weekday, start_minute, end_minute = usual_local_slot(
+                usual, person, agenda, care=care
+            )
+            refined.append((usual, weekday, start_minute, end_minute))
+        refined.sort(key=lambda row: (row[1], row[2]))
+        for usual, weekday, start_minute, end_minute in refined:
+            band = (weekday, start_minute // 60)
+            if band in seen:
+                continue
+            seen.add(band)
+            slots.append(
+                ProposedUsualSlotOut(
+                    usual_id=usual.usual_id,
+                    weekday=weekday,
+                    start_minute=start_minute,
+                    end_minute=end_minute,
+                    when_label=format_usual_slot(
+                        weekday,
+                        start_minute,
+                        end_minute,
+                        tz_label=tz_label,
+                    ),
+                )
+            )
+        first_slot = slots[0] if slots else None
+        proposed.append(
+            ProposedUsualOut(
+                usual_id=first.usual_id,
+                person_id=person.person_id,
+                display_name=person.display_name,
+                your_role=person.your_role,
+                their_relation=person.their_relation,
+                care_role_id=person.care_role_id,
+                label=label,
+                weekday=first_slot.weekday if first_slot else first.weekday,
+                start_minute=first_slot.start_minute if first_slot else first.start_minute,
+                end_minute=first_slot.end_minute if first_slot else first.end_minute,
+                when_label=", ".join(slot.when_label for slot in slots),
+                usual_ids=usual_ids,
+                slots=slots,
+            )
+        )
+    return proposed
+
+
+def _usual_gap_views(care, agenda_events: list[dict]) -> list[UsualGapOut]:
+    gaps_out: list[UsualGapOut] = []
+    if care is None:
+        return gaps_out
     today_local = _local_now().date()
     for gap in find_usual_gaps(
         care=care,
@@ -233,27 +325,7 @@ def _usual_views(care, agenda_events: list[dict]) -> tuple[list[UsualGapOut], li
         )
         if len(gaps_out) >= 6:
             break
-    for person, usual in pending_usuals(care)[:6]:
-        proposed.append(
-            ProposedUsualOut(
-                usual_id=usual.usual_id,
-                person_id=person.person_id,
-                display_name=person.display_name,
-                your_role=person.your_role,
-                label=routine_word(
-                    classify_usual(
-                        usual,
-                        person,
-                        routine_by_summary=care.calendar_routine_by_summary,
-                    )
-                ),
-                weekday=usual.weekday,
-                start_minute=usual.start_minute,
-                end_minute=usual.end_minute,
-                when_label=format_usual_slot(usual.weekday, usual.start_minute),
-            )
-        )
-    return gaps_out, proposed
+    return gaps_out
 
 
 def _first_name(display_name: str | None) -> str:
@@ -687,17 +759,11 @@ async def get_today(
         _logger.warning("care_graph_failed", user_id=user_id)
 
     usual_gaps: list[UsualGapOut] = []
-    proposed_usuals: list[ProposedUsualOut] = []
     try:
-        gap_events = agenda_events if care is not None else []
-        usual_gaps, proposed_usuals = _usual_views(care, gap_events)
-        if proposed_usuals:
-            needs_review_usuals = True
-        else:
-            needs_review_usuals = False
+        if care is not None:
+            usual_gaps = _usual_gap_views(care, agenda_events)
     except Exception:  # noqa: BLE001
         _logger.warning("usual_gaps_failed", user_id=user_id)
-        needs_review_usuals = False
 
     return TodayResponse(
         user_id=user_id,
@@ -710,9 +776,8 @@ async def get_today(
         recommendations=recs,
         tomorrow=tomorrow,
         profile_ready=bool(snapshot and snapshot.bullets),
-        needs_review=bool((snapshot.needs_review if snapshot else False) or needs_review_usuals),
+        needs_review=bool(snapshot.needs_review if snapshot else False),
         usual_gaps=usual_gaps,
-        proposed_usuals=proposed_usuals,
         fact_count=len(facts),
         manifesto=manifesto.statement if manifesto else None,
         pending_challenges=pending,

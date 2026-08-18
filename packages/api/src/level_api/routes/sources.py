@@ -1,12 +1,8 @@
-"""Ingest real personal sources: ChatGPT Memory paste + Google sync."""
+"""Ingest real personal sources: Google Calendar sync."""
 
 from __future__ import annotations
 
 import asyncio
-import os
-import re
-import uuid
-from datetime import datetime, timezone
 
 from fastapi import (
     APIRouter,
@@ -17,18 +13,13 @@ from fastapi import (
     Response,
     status,
 )
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from level_api.auth_deps import require_user
 from level_api.dependencies import (
-    cached_memory,
     get_calendar_sync_store,
     get_memory,
     get_token_store,
-)
-from level_api.services.care_enrich import (
-    enrich_care_from_agenda as _bg_enrich_care,
-    ensure_profile_from_agenda,
 )
 from level_api.services.google_sync import agenda_only_refresh
 from level_core.agents.ingest_normalizer import IngestNormalizer
@@ -37,27 +28,18 @@ from level_core.auth.tokens import TokenStore
 from level_core.calendar.agenda_sync import ensure_calendar_watch, refresh_agenda_cache
 from level_core.calendar.sync_state import CalendarSyncState, CalendarSyncStore, watch_is_live
 from level_core.config import get_settings
-from level_core.errors import ConflictError, ModelUnavailable
+from level_core.errors import ModelUnavailable
 from level_core.guardrails.inbound import InboundGuardrail
-from level_core.ingest.chatgpt_memory import (
-    extract_from_chatgpt_memory,
-    memory_extract_to_facts,
-)
 from level_core.ingest.google_live import pull_calendar
 from level_core.ingest.pipeline import IngestPipeline
 from level_core.memory.base import MemoryBank
 from level_core.models.factory import build_embedding_client, build_gemini_client
 from level_core.observability.logger import get_logger
-from level_core.profile.ai_wrappers import degrade_message
-from level_core.profile.care_graph import cached_care_graph
-from level_core.profile.care_infer_llm import apply_note_to_care_profile_ai
-from level_core.profile.care_store import save_care
 from level_core.profile.persist import (
     persist_care_profile_from_events,
     refresh_persisted_profile,
 )
 from level_core.schemas.base import _now_utc
-from level_core.schemas.care import CareProfile
 from level_core.schemas.profile import ProfileSnapshot
 from level_core.schemas.signal import Fact, Signal, SignalSource
 
@@ -105,51 +87,6 @@ async def _infer_persist_care_profile(
     )
 
 
-async def _bg_enrich_care_if_needed(
-    user_id: str,
-    memory: MemoryBank,
-    sync_store: CalendarSyncStore,
-) -> None:
-    """Compat wrapper — enrich only when calendar hints are missing."""
-    await _bg_enrich_care(user_id, memory, sync_store, force=False)
-
-
-async def _persist_pattern_facts(
-    memory: MemoryBank,
-    facts: list[Fact],
-    *,
-    embed: bool = True,
-) -> int:
-    if not facts:
-        return 0
-    settings = get_settings()
-    embedder = build_embedding_client(settings) if embed else None
-    n = 0
-    # List once — not once per fact (heal used to re-scan on every insert).
-    existing = await memory.facts.list_for_user(user_id=facts[0].user_id, limit=200)
-    existing_stmts = {e.statement for e in existing}
-    for fact in facts:
-        if fact.statement in existing_stmts:
-            continue
-        await memory.facts.upsert(fact)
-        existing_stmts.add(fact.statement)
-        embeddings: list = []
-        if embedder is not None:
-            try:
-                embeddings = await embedder.embed(texts=[fact.statement])
-            except Exception:  # noqa: BLE001
-                embeddings = []
-        if embeddings:
-            await memory.vectors.upsert(
-                user_id=fact.user_id,
-                fact_id=fact.fact_id,
-                text=fact.statement,
-                embedding=embeddings[0],
-            )
-        n += 1
-    return n
-
-
 async def _run_signals(memory: MemoryBank, signals: list[Signal]) -> IngestSummary:
     pipeline = _pipeline(memory)
     summary = IngestSummary()
@@ -172,111 +109,6 @@ async def _run_signals(memory: MemoryBank, signals: list[Signal]) -> IngestSumma
         elif result.signal is not None:
             summary.accepted += 1
             summary.facts += len(result.facts)
-    return summary
-
-
-class ChatGPTMemoryRequest(BaseModel):
-    text: str = Field(min_length=20, max_length=24_000)
-
-
-@router.post("/chatgpt", response_model=IngestSummary)
-async def ingest_chatgpt_memory(
-    payload: ChatGPTMemoryRequest,
-    user_id: str = Depends(require_user),
-    memory: MemoryBank = Depends(get_memory),
-    sync_store: CalendarSyncStore = Depends(get_calendar_sync_store),
-) -> IngestSummary:
-    """Paste ChatGPT Memory → extract facts → reassess Care Profile + graph."""
-    paste = payload.text.strip()
-    settings = get_settings()
-    gemini = build_gemini_client(settings)
-    try:
-        extracted = await extract_from_chatgpt_memory(paste, gemini=gemini)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    facts = memory_extract_to_facts(extracted, user_id=user_id, paste=paste)
-    if not facts and not (extracted.care_note or "").strip():
-        raise HTTPException(
-            status_code=400,
-            detail="No care-relevant facts found in that Memory paste.",
-        )
-
-    summary = IngestSummary()
-    try:
-        summary.facts = await _persist_pattern_facts(memory, facts, embed=True)
-        summary.accepted = summary.facts
-    except Exception as exc:  # noqa: BLE001
-        _logger.exception("chatgpt_memory_persist_failed", user_id=user_id)
-        raise HTTPException(
-            status_code=502,
-            detail=f"Could not save Memory facts: {exc}",
-        ) from exc
-
-    # Fold the full distillate into Care Profile (bootstrap if missing).
-    care = await memory.manifestos.get_care_profile(user_id=user_id)
-    expected_care = care.version if care is not None else None
-    if care is None:
-        care = CareProfile(user_id=user_id, roles=[])
-
-    care_note = extracted.care_note.strip() if extracted.care_note else ""
-    facts_block = "\n".join(f"- {f}" for f in extracted.facts[:20])
-    apply_text = "\n".join(part for part in (care_note, facts_block) if part).strip()
-
-    care_applied = False
-    if apply_text:
-        updated = await apply_note_to_care_profile_ai(care, apply_text, gemini=gemini)
-        if updated is not None:
-            care, _reply = updated
-            care = care.model_copy(
-                update={
-                    "version": int(care.version or 1) + 1,
-                    "updated_at": _now_utc(),
-                }
-            )
-            await save_care(memory, care, expected_version=expected_care)
-            care_applied = True
-            agenda: list[dict[str, str | None]] = []
-            try:
-                state = await sync_store.get(user_id)
-                if state and state.events:
-                    agenda = [
-                        {"summary": e.summary, "start": e.start}
-                        for e in state.events.values()
-                    ]
-            except Exception:  # noqa: BLE001
-                agenda = []
-            cached_care_graph(care, agenda or None)
-        else:
-            _logger.warning(
-                "chatgpt_memory_care_ai_insufficient",
-                user_id=user_id,
-            )
-
-    snap = await _refresh_profile(memory, user_id)
-    summary.profile_bullets = len(snap.bullets)
-    summary.contradictions = len(snap.contradictions)
-    n_facts = len(extracted.facts)
-    if care_applied:
-        summary.detail = (
-            f"Pulled {n_facts} care-relevant fact{'s' if n_facts != 1 else ''} "
-            f"from ChatGPT Memory and refreshed your Care Profile "
-            f"({summary.profile_bullets} bullets)."
-        )
-    else:
-        summary.detail = (
-            f"Pulled {n_facts} care-relevant fact{'s' if n_facts != 1 else ''} "
-            f"from ChatGPT Memory. {degrade_message('care_note')}"
-            if n_facts
-            else degrade_message("memory")
-        )
-    _logger.info(
-        "chatgpt_memory_ingest_done",
-        user_id=user_id,
-        extracted=n_facts,
-        care_roles=len(care.roles) if care else 0,
-        **summary.model_dump(),
-    )
     return summary
 
 

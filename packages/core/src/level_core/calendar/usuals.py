@@ -13,6 +13,7 @@ from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from level_core.calendar.routines import (
+    CALENDAR_TZ,
     classify_routine,
     classify_usual,
     format_usual_when,
@@ -29,7 +30,7 @@ from level_core.schemas.care import (
 )
 from level_core.schemas.profile import BulletStatus
 
-DEFAULT_TZ = ZoneInfo("America/Los_Angeles")
+DEFAULT_TZ = CALENDAR_TZ
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,13 +127,81 @@ def usuals_infer_needed(
     return (stored_fingerprint or "") != live
 
 
+def event_local_slot(
+    event: dict[str, str | None],
+    *,
+    tz: ZoneInfo = DEFAULT_TZ,
+) -> tuple[int, int, int] | None:
+    """Calendar-zone weekday + start/end minutes. Never uses UTC wall clock."""
+    start = parse_event_start(event.get("start"))
+    if start is None:
+        return None
+    local_start = start.astimezone(tz)
+    start_minute = local_start.hour * 60 + local_start.minute
+    end = parse_event_start(event.get("end"))
+    if end is None:
+        return local_start.weekday(), start_minute, min(start_minute + 60, 24 * 60)
+    local_end = end.astimezone(tz)
+    end_minute = local_end.hour * 60 + local_end.minute
+    if local_end.date() != local_start.date() or end_minute <= start_minute:
+        end_minute = min(start_minute + 60, 24 * 60)
+    return local_start.weekday(), start_minute, end_minute
+
+
+def usual_local_slot(
+    usual: UsualWindow,
+    person: CarePerson,
+    events: list[dict[str, str | None]] | None = None,
+    *,
+    care: CareProfile | None = None,
+    tz: ZoneInfo = DEFAULT_TZ,
+) -> tuple[int, int, int]:
+    """Display slot in the calendar zone, snapped to matching agenda rows."""
+    titles = {_norm_title(t) for t in usual.evidence_titles if t}
+    routine = classify_usual(
+        usual,
+        person,
+        routine_by_summary=care.calendar_routine_by_summary if care else None,
+    )
+    who = _norm_title(person.display_name)
+    hints = care.calendar_routine_by_summary if care else None
+    candidates: list[tuple[int, int, int]] = []
+    for event in events or []:
+        title = _norm_title(event.get("summary") or "")
+        if not title:
+            continue
+        slot = event_local_slot(event, tz=tz)
+        if slot is None:
+            continue
+        titled = bool(titles) and title in titles
+        named = bool(who) and who in title
+        same_routine = (
+            classify_routine(
+                titles=[event.get("summary") or ""],
+                start_minute=slot[1],
+                care_role_id=person.care_role_id,
+                routine_by_summary=hints,
+            )
+            == routine
+        )
+        if titled or (named and same_routine):
+            candidates.append(slot)
+    if not candidates:
+        return usual.weekday, usual.start_minute, usual.end_minute
+    same_day = [row for row in candidates if row[0] == usual.weekday]
+    pool = same_day or candidates
+    return min(pool, key=lambda row: (abs(row[0] - usual.weekday), row[1]))
+
+
 def dated_event_evidence_lines(
     events: list[dict[str, str | None]],
     *,
     limit: int = 80,
+    tz: ZoneInfo = DEFAULT_TZ,
 ) -> list[str]:
     """Dated title lines for Gemini usuals — series first, then the rest.
 
+    Times are calendar-zone wall clock so start_hour is not UTC midnight.
     Ranking which lines to show is not inventing a usual.
     """
     parsed: list[tuple[datetime, str, str]] = []
@@ -141,8 +210,17 @@ def dated_event_evidence_lines(
         start_raw = (event.get("start") or "").strip()
         if not title or title == "(no title)" or not start_raw:
             continue
-        start = parse_event_start(start_raw) or datetime.min.replace(tzinfo=timezone.utc)
-        parsed.append((start, start_raw[:16], title[:120]))
+        start = parse_event_start(start_raw)
+        if start is None:
+            continue
+        local = start.astimezone(tz)
+        stamp = local.strftime("%a %Y-%m-%d %H:%M")
+        end = parse_event_start((event.get("end") or "").strip())
+        if end is not None:
+            end_local = end.astimezone(tz)
+            if end_local.date() == local.date() and end_local > local:
+                stamp = f"{stamp}–{end_local.strftime('%H:%M')}"
+        parsed.append((start, stamp, title[:120]))
     parsed.sort(key=lambda row: row[0])
     counts = Counter(_norm_title(title) for _start, _raw, title in parsed)
     series = [row for row in parsed if counts[_norm_title(row[2])] >= 2]
@@ -506,6 +584,7 @@ __all__ = [
     "apply_usual_resolution",
     "dated_event_evidence_lines",
     "event_belongs_to_person",
+    "event_local_slot",
     "event_matches_usual",
     "event_person_id",
     "find_usual_gaps",
@@ -515,6 +594,7 @@ __all__ = [
     "parse_event_start",
     "resolve_event_people",
     "series_usuals_from_agenda",
+    "usual_local_slot",
     "usual_window_datetimes",
     "usuals_infer_needed",
 ]

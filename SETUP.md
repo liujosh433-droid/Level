@@ -102,16 +102,9 @@ terraform apply
 
 Or tear everything down: `terraform destroy`.
 
-## 5. Real parent test (ChatGPT + Calendar)
+## 5. Real parent test (Calendar + chat)
 
-### A. ChatGPT-only path (works today, no OAuth)
-
-1. Export ChatGPT: Settings → Data controls → Export data → download zip.
-2. `make api` + `make web`
-3. Open http://localhost:3000/sources → **Start as guest** → upload the zip.
-4. When Memory Bank shows facts → **Ask Level** with a real decision.
-
-Child names are optional on calendar titles: Level still opens a **child care** role from pickup/school/sports cues (shown as “your kids” until a name appears). Named nodes fill in from `Title — Name`, `Jordan's soccer`, ChatGPT/Memory Bank relationship facts, or a Tell Level note like “my kid is Maya.”
+Child names are optional on calendar titles: Level still opens a **child care** role from pickup/school/sports cues (shown as “your kids” until a name appears). Named nodes fill in from `Title — Name`, `Jordan's soccer`, or a Tell Level note like “my kid is Maya.”
 
 Note: with `LEVEL_ENV=local`, memory is in-process — restarting the API clears guest data. For persistence, set `LEVEL_ENV=cloud` + `LEVEL_VECTOR_BACKEND=firestore` (ADC via `gcloud auth application-default login`).
 
@@ -141,4 +134,4 @@ LEVEL_WEB_APP_URL=http://localhost:3000
 
 ### C. What “helpful in reality” looks like
 
-Bring a decision you actually care about (school, job hours, custody logistics). Judge success by whether Level cites *your* ChatGPT/calendar evidence and asks a clarifying question you wouldn’t get from vanilla ChatGPT.
+Bring a decision you actually care about (school, job hours, custody logistics). Judge success by whether Level cites *your* calendar and chat evidence and asks a clarifying question you wouldn’t get from a generic assistant.

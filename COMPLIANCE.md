@@ -35,7 +35,7 @@ We additionally implement several **Fortified Enterprise Fleet** architectural c
 | Continuous Action Engine — background multi-step workflow | Yes — `async_challenge` job detects calendar↔care-window collisions and opens an unsolicited Conductor turn (`origin=async_role_theft`) with no human in the loop. Ingest job mutates Care Profile after signals land. |
 | Bring Your Own Friction — personal problem | Yes — busy parents / sandwich / working caregivers (Unlikely Hero). |
 | Evolving Knowledge Engine — synthesizes/mutates data | Yes — Care Profile is **mutated** on ingest/sync (`persist_care_profile_from_events`); Manifesto regenerates from care roles; Keep/Not me mutates salience/status. |
-| Ingests messy unstructured data | Yes — Google Calendar, ChatGPT export JSON/zip, voice-memo transcripts (fixtures), free-text notes. (Gmail connector not shipped yet.) |
+| Ingests messy unstructured data | Yes — Google Calendar, voice-memo transcripts (fixtures), free-text notes. (Gmail connector not shipped yet.) |
 | Multi-Agent Nexus — task warrants multi-agent | Yes — Framer → Retriever (care-pinned) → Challenger (`role_theft`) → Judge; Conductor retries once on invalid/hallucinated Challenger output. |
 | Delegates to specialized sub-agents | Yes — see above; Retriever loads Care Profile via Agent Gateway tool `get_care_profile`. |
 | Built for Unlikely Hero | Single parents / caregivers, not corporate roles. |

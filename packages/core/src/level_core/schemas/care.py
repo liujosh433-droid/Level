@@ -171,7 +171,7 @@ class CarePerson(TraceableModel):
     your_role: str = Field(
         default="",
         max_length=48,
-        description="How the user stands toward them (parent, adult child, …).",
+        description="How the user stands toward them (parent, caregiver). Never adult child.",
     )
     care_role_id: str = Field(default="child_care", max_length=40)
     status: BulletStatus = BulletStatus.PENDING

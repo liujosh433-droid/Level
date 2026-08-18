@@ -1,6 +1,6 @@
 """Source connectors that produce Signals for the ingest pipeline.
 
-Live calendar + ChatGPT Memory enter via the API (OAuth sync / paste).
+Live calendar enters via the API (OAuth sync).
 ``FixtureConnector`` + ``demo_caregiver_signals`` exist only for opt-in
 pitch scripts (``LEVEL_INGEST_FIXTURES=1`` / ``make demo-judge``).
 """

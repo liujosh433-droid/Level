@@ -351,6 +351,8 @@ class TestAgendaFingerprint:
         assert "Pickup stack" in lines[0]
         assert "Pickup stack" in lines[1]
         assert any("One-off" in line for line in lines)
+        assert any("15:45" in line for line in lines)
+        assert not any("22:45" in line for line in lines)
 
 
 def _keepd_child(name: str, person_id: str) -> CarePerson:
@@ -567,3 +569,111 @@ def test_holistic_events_store_gemini_routines() -> None:
         event_titles=["Alpha soccer"],
     )
     assert care.calendar_routine_by_summary["alpha soccer"] == "activity"
+
+
+def test_format_usual_slot_includes_range_and_calendar_tz() -> None:
+    from level_core.calendar.routines import format_clock_range, format_usual_slot
+
+    assert format_clock_range(13 * 60, 13 * 60 + 30) == "1–1:30pm"
+    assert format_clock_range(14 * 60, 14 * 60 + 30) == "2–2:30pm"
+    assert format_clock_range(11 * 60 + 30, 12 * 60 + 30) == "11:30am–12:30pm"
+    label = format_usual_slot(0, 13 * 60, 13 * 60 + 30, tz_label="PT")
+    assert label == "Mondays 1–1:30pm PT"
+
+
+def test_proposed_usuals_group_same_person_and_category() -> None:
+    from level_api.routes.today import proposed_usual_views
+
+    person = CarePerson(
+        person_id="p-alpha",
+        display_name="Alpha",
+        your_role="parent",
+        their_relation="child",
+        care_role_id="child_care",
+        status=BulletStatus.ACCEPTED,
+        usuals=[
+            UsualWindow(
+                usual_id="u:p-alpha:0:13",
+                person_id="p-alpha",
+                label="pickup",
+                weekday=0,
+                start_minute=13 * 60,
+                end_minute=13 * 60 + 30,
+                status=BulletStatus.PENDING,
+                evidence_titles=["Alpha pickup"],
+            ),
+            UsualWindow(
+                usual_id="u:p-alpha:2:14",
+                person_id="p-alpha",
+                label="pickup",
+                weekday=2,
+                start_minute=14 * 60,
+                end_minute=14 * 60 + 30,
+                status=BulletStatus.PENDING,
+                evidence_titles=["Alpha pickup"],
+            ),
+            UsualWindow(
+                usual_id="u:p-alpha:3:16",
+                person_id="p-alpha",
+                label="soccer",
+                weekday=3,
+                start_minute=16 * 60,
+                end_minute=17 * 60,
+                status=BulletStatus.PENDING,
+                evidence_titles=["Alpha soccer"],
+            ),
+        ],
+    )
+    views = proposed_usual_views(_care(person))
+    assert [row.label for row in views] == ["pickup", "activity"]
+    pickup = views[0]
+    assert pickup.display_name == "Alpha"
+    assert pickup.usual_ids == ["u:p-alpha:0:13", "u:p-alpha:2:14"]
+    assert [slot.when_label for slot in pickup.slots] == [
+        "Mondays 1–1:30pm PT",
+        "Wednesdays 2–2:30pm PT",
+    ]
+
+
+def test_proposed_usuals_use_calendar_zone_not_utc_midnight() -> None:
+    from level_api.routes.today import proposed_usual_views
+
+    person = CarePerson(
+        person_id="p-alpha",
+        display_name="Alpha",
+        your_role="parent",
+        their_relation="child",
+        care_role_id="child_care",
+        status=BulletStatus.ACCEPTED,
+        usuals=[
+            UsualWindow(
+                usual_id="u:p-alpha:1:0",
+                person_id="p-alpha",
+                label="pickup",
+                weekday=1,
+                start_minute=0,
+                end_minute=60,
+                status=BulletStatus.PENDING,
+                evidence_titles=["Alpha pickup"],
+            ),
+        ],
+    )
+    # Tuesday 00:00 UTC = Monday 5:00–5:30pm PT
+    start = datetime(2026, 8, 18, 0, 0, tzinfo=timezone.utc)
+    end = datetime(2026, 8, 18, 0, 30, tzinfo=timezone.utc)
+    views = proposed_usual_views(
+        _care(person),
+        [
+            {
+                "summary": "Alpha pickup",
+                "start": start.isoformat(),
+                "end": end.isoformat(),
+            }
+        ],
+    )
+    assert len(views) == 1
+    slot = views[0].slots[0]
+    assert slot.weekday == 0
+    assert slot.when_label == "Mondays 5–5:30pm PT"
+    assert "12am" not in slot.when_label
+    assert "midnight" not in slot.when_label.lower()

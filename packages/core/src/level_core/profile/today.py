@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
+from level_core.calendar.routines import CALENDAR_TZ
 from level_core.schemas.profile import ProfileSnapshot
 from level_core.schemas.signal import Fact
 
@@ -66,16 +68,22 @@ def format_event_time(
     *,
     end_raw: str | None = None,
     all_day: bool = False,
+    timezone_name: str | None = None,
 ) -> str:
-    """Human time label — prefer a start–end range when end is known."""
+    """Human time label in the calendar zone — prefer a start–end range."""
     if all_day or not start_raw:
         return "All day"
 
+    zone = ZoneInfo(timezone_name) if timezone_name else CALENDAR_TZ
+
     def _parse(raw: str) -> datetime | None:
         try:
-            return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
         except ValueError:
             return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(zone)
 
     def _clock(dt: datetime) -> str:
         return dt.strftime("%I:%M %p").lstrip("0")

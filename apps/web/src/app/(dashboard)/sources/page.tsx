@@ -1,17 +1,11 @@
 "use client";
 
 import Image from "next/image";
-import { FormEvent, Suspense, useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
 import { AuthError, ensureSession, fetchGoogleSyncStatus, fetchMe, getApiBase } from "@/lib/api";
 import styles from "./sources.module.css";
-
-const CHATGPT_STEPS = [
-  "In ChatGPT, open Settings → Personalization → Memory (or ask: “What do you remember about me?”).",
-  "Copy the memory summary — especially family, work, and caregiving bits.",
-  "Paste it below. Level keeps what’s relevant to your care roles.",
-] as const;
 
 const SYNC_BEATS = [
   { at: 0, label: "Saying hi to Google…", progress: 12 },
@@ -42,12 +36,10 @@ function SourcesInner() {
   const [status, setStatus] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [phase, setPhase] = useState<Phase>("connect");
-  const [showHowto, setShowHowto] = useState(false);
   const [ready, setReady] = useState(false);
   const [syncElapsed, setSyncElapsed] = useState(0);
   const [syncProgress, setSyncProgress] = useState(10);
   const [syncLabel, setSyncLabel] = useState(SYNC_BEATS[0].label);
-  const [memoryPaste, setMemoryPaste] = useState("");
 
   useEffect(() => {
     const fromOAuth = params.get("connected") === "1";
@@ -118,7 +110,12 @@ function SourcesInner() {
         }
 
         if (me.google_connected) {
-          // Returning user opened Sources intentionally → optional add-ons.
+          const writeOk = me.can_write_calendar !== false;
+          const sendOk = me.can_send_email !== false;
+          if (!needGmail && writeOk && sendOk) {
+            router.replace("/today");
+            return;
+          }
           setPhase("addons");
           setReady(true);
           return;
@@ -138,6 +135,14 @@ function SourcesInner() {
             setGoogleConnected(Boolean(guest.google_connected));
             setCanWriteCalendar(guest.can_write_calendar !== false);
             setCanSendEmail(guest.can_send_email !== false);
+            if (
+              guest.google_connected &&
+              guest.can_write_calendar !== false &&
+              guest.can_send_email !== false
+            ) {
+              router.replace("/today");
+              return;
+            }
             setPhase(guest.google_connected ? "addons" : "connect");
             setReady(true);
             return;
@@ -166,46 +171,6 @@ function SourcesInner() {
       window.location.href = `${getApiBase()}/v1/auth/google/start${q}`;
     } catch (err) {
       setStatus(err instanceof Error ? err.message : String(err));
-      setBusy(false);
-    }
-  }
-
-  async function onChatGPT(e: FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    const text = memoryPaste.trim();
-    if (text.length < 20) {
-      setStatus("Paste a longer ChatGPT Memory summary first.");
-      return;
-    }
-    setBusy(true);
-    setStatus(null);
-    try {
-      await ensureSession();
-      const res = await fetch(`${getApiBase()}/v1/sources/chatgpt`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text }),
-        credentials: "include",
-      });
-      const raw = await res.text();
-      let data: { detail?: string } = {};
-      try {
-        data = raw ? JSON.parse(raw) : {};
-      } catch {
-        throw new Error(raw.trim() || `Request failed (${res.status})`);
-      }
-      if (!res.ok) {
-        const detail = data.detail;
-        throw new Error(
-          typeof detail === "string" ? detail : detail ? JSON.stringify(detail) : raw || `Request failed (${res.status})`,
-        );
-      }
-      setStatus((data as { detail?: string }).detail || "ChatGPT Memory added.");
-      setMemoryPaste("");
-      setShowHowto(false);
-    } catch (err) {
-      setStatus(err instanceof Error ? err.message : String(err));
-    } finally {
       setBusy(false);
     }
   }
@@ -312,10 +277,10 @@ function SourcesInner() {
 
         {phase === "addons" && (
           <section className={`${styles.panel} ${styles.enter}`} key="addons">
-            <h1 className={styles.title}>Add more context</h1>
+            <h1 className={styles.title}>Your calendar</h1>
             <p className={styles.intro}>
-              {email ? `Calendar linked as ${email}.` : "Google Calendar is linked."} Optional
-              extras below — skip anytime.
+              {email ? `Linked as ${email}.` : "Google Calendar is linked."} Tell Level in chat
+              what you hold and what to change — no extra import needed.
             </p>
             {(!canWriteCalendar || !canSendEmail) && (
               <aside className={styles.consentTip}>
@@ -328,67 +293,6 @@ function SourcesInner() {
                   </p>
                 </div>
               </aside>
-            )}
-
-            <div className={styles.addonList}>
-              <div className={styles.addon}>
-                <div>
-                  <h2>ChatGPT Memory</h2>
-                  <p>Paste what ChatGPT already knows about your life.</p>
-                </div>
-                <button
-                  type="button"
-                  className={styles.ghost}
-                  onClick={() => {
-                    setShowHowto((v) => !v);
-                    setMemoryPaste("");
-                  }}
-                >
-                  {showHowto ? "Hide" : "Paste memory"}
-                </button>
-              </div>
-            </div>
-
-            {showHowto && (
-              <div className={`${styles.howtoWrap} ${styles.enter}`}>
-                <ol className={styles.howto}>
-                  {CHATGPT_STEPS.map((line, i) => (
-                    <li key={line} style={{ animationDelay: `${0.05 + i * 0.1}s` }}>
-                      <span>{i + 1}</span>
-                      <p>{line}</p>
-                    </li>
-                  ))}
-                </ol>
-                <form onSubmit={onChatGPT} className={styles.upload}>
-                  <label className={styles.pasteLabel} htmlFor="chatgpt-memory">
-                    Memory summary
-                  </label>
-                  <textarea
-                    id="chatgpt-memory"
-                    name="memory"
-                    className={styles.pasteArea}
-                    rows={8}
-                    value={memoryPaste}
-                    onChange={(e) => setMemoryPaste(e.target.value)}
-                    placeholder="Paste your ChatGPT Memory summary here…"
-                    required
-                    minLength={20}
-                    maxLength={24000}
-                  />
-                  <div className={styles.uploadRow}>
-                    <button
-                      type="submit"
-                      className={styles.uploadBtn}
-                      disabled={busy || memoryPaste.trim().length < 20}
-                    >
-                      {busy ? "Reading…" : "Add to Level"}
-                    </button>
-                  </div>
-                  <p className={styles.fileName}>
-                    Level extracts care-relevant facts only — not your whole chat history.
-                  </p>
-                </form>
-              </div>
             )}
 
             <div className={styles.actions}>

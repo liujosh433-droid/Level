@@ -72,7 +72,7 @@ async def main() -> int:
         _logger.info(
             "ingest_skip_no_fixtures",
             note=(
-                "Live job ingest is driven by API calendar sync + ChatGPT paste. "
+                "Live job ingest is driven by API calendar sync. "
                 "Set LEVEL_INGEST_FIXTURES=1 for the pitch fixture narrative."
             ),
         )

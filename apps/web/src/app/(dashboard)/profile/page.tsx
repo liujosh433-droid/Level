@@ -16,11 +16,13 @@ import {
   declineProposal,
   fetchMe,
   fetchProfile,
+  resolveUsual,
   reviewProfile,
   sendChat,
   submitSchoolPaper,
   type CommitmentProposal,
   type Profile,
+  type ProposedUsualView,
 } from "@/lib/api";
 import styles from "./profile.module.css";
 import chatStyles from "../today/today.module.css";
@@ -42,6 +44,32 @@ const CARE_ROLE_LABELS: Record<string, string> = {
 function careRoleLabel(id?: string | null): string | null {
   if (!id) return null;
   return CARE_ROLE_LABELS[id] ?? id.replace(/_/g, " ");
+}
+
+function usualWhoLabel(usual: ProposedUsualView): string {
+  const role = (usual.care_role_id || "").trim().toLowerCase();
+  const relation = (usual.their_relation || "").trim().toLowerCase();
+  if (
+    role === "elder_care" ||
+    relation === "elder" ||
+    relation === "adult child"
+  ) {
+    return "Elder care";
+  }
+  if (role === "child_care" || relation === "child") {
+    return "child";
+  }
+  if (relation && relation !== "adult child") {
+    return usual.their_relation || "";
+  }
+  return "";
+}
+
+function usualIds(usual: ProposedUsualView): string[] {
+  if (usual.usual_ids && usual.usual_ids.length > 0) {
+    return usual.usual_ids;
+  }
+  return usual.usual_id ? [usual.usual_id] : [];
 }
 
 function formatCareUpdated(iso: string): string {
@@ -139,6 +167,43 @@ function ProfileInner() {
       cancelled = true;
     };
   }, [router]);
+
+  async function onUsual(usual: ProposedUsualView, action: "keep" | "not_me") {
+    const ids = usualIds(usual);
+    if (busy || ids.length === 0) return;
+    setBusy(true);
+    setStatus(null);
+    try {
+      for (const usualId of ids) {
+        await resolveUsual(usualId, action);
+      }
+      const next = await fetchProfile();
+      setProfile(next);
+    } catch (err) {
+      setStatus(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function keepAllUsuals() {
+    const pending = profile?.proposed_usuals ?? [];
+    const ids = pending.flatMap(usualIds);
+    if (busy || ids.length === 0) return;
+    setBusy(true);
+    setStatus(null);
+    try {
+      for (const usualId of ids) {
+        await resolveUsual(usualId, "keep");
+      }
+      const next = await fetchProfile();
+      setProfile(next);
+    } catch (err) {
+      setStatus(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function setBullet(bulletId: string, next: "accepted" | "rejected") {
     if (!userId) return;
@@ -470,13 +535,6 @@ function ProfileInner() {
           helped — grounded only in what you’ve shared or connected.
         </p>
 
-        {profile?.about_summary ? (
-          <section className={styles.aboutSummary} aria-label="Level’s read on you">
-            <p className={styles.aboutKicker}>Level’s read</p>
-            <p className={styles.aboutBody}>{profile.about_summary}</p>
-          </section>
-        ) : null}
-
         {profile &&
         (profile.care_profile_version != null || profile.care_role_count) ? (
           <p className={styles.versionLine}>
@@ -490,13 +548,6 @@ function ProfileInner() {
             {typeof profile.fact_count === "number"
               ? ` · ${profile.fact_count} facts`
               : ""}
-          </p>
-        ) : null}
-
-        {profile?.conflict_summaries && profile.conflict_summaries.length > 0 ? (
-          <p className={styles.conflictLine}>
-            <span className={styles.conflictLabel}>Heads up</span>
-            {profile.conflict_summaries[0]}
           </p>
         ) : null}
 
@@ -570,6 +621,77 @@ function ProfileInner() {
             </button>
           </div>
         )}
+
+        {profile?.proposed_usuals && profile.proposed_usuals.length > 0 ? (
+          <>
+            <h2 className={styles.sectionTitle}>Usuals</h2>
+            <ul className={styles.list}>
+              {profile.proposed_usuals.map((usual) => {
+                const slots =
+                  usual.slots && usual.slots.length > 0
+                    ? usual.slots
+                    : [
+                        {
+                          usual_id: usual.usual_id,
+                          weekday: usual.weekday,
+                          start_minute: usual.start_minute,
+                          end_minute: usual.end_minute,
+                          when_label: usual.when_label,
+                        },
+                      ];
+                const who = usualWhoLabel(usual);
+                return (
+                  <li key={`${usual.person_id}:${usual.label}:${usual.usual_id}`}>
+                    <span className={styles.cat}>
+                      {usual.label || "Usual"}
+                      {who ? ` · ${who}` : ""}
+                    </span>
+                    <p>
+                      {usual.display_name
+                        ? `${usual.display_name} ${usual.label}`
+                        : usual.label}
+                    </p>
+                    <ul className={styles.usualSlots}>
+                      {slots.map((slot) => (
+                        <li key={slot.usual_id}>
+                          {slot.when_label || "Repeating"}
+                        </li>
+                      ))}
+                    </ul>
+                    <div className={styles.row}>
+                      <button
+                        type="button"
+                        className={styles.keep}
+                        disabled={busy}
+                        onClick={() => void onUsual(usual, "keep")}
+                      >
+                        Keep
+                      </button>
+                      <button
+                        type="button"
+                        className={styles.notMe}
+                        disabled={busy}
+                        onClick={() => void onUsual(usual, "not_me")}
+                      >
+                        Not me
+                      </button>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+            <div className={styles.primaryWrap}>
+              <button
+                type="button"
+                className={styles.primary}
+                disabled={busy}
+                onClick={() => void keepAllUsuals()}
+              >
+                Keep all
+              </button>
+            </div>
+          </>
+        ) : null}
 
         {status ? <p className={styles.status}>{status}</p> : null}
       </DashboardWorkspace>

@@ -6,9 +6,13 @@ titles the agenda already attached, with a child hour-band fallback.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 from level_core.schemas.care import CarePerson, CareRoleId, UsualWindow
+
+# Same zone usual inference uses (see level_core.calendar.usuals.DEFAULT_TZ).
+CALENDAR_TZ = ZoneInfo("America/Los_Angeles")
 
 ROUTINE_PICKUP = "pickup"
 ROUTINE_SCHOOL = "school"
@@ -162,13 +166,62 @@ def format_clock(start_minute: int) -> str:
     return f"{hour12}:{minute:02d} {suffix}"
 
 
+def _clock_bits(minute_of_day: int) -> tuple[str, str]:
+    hour, minute = divmod(max(0, min(int(minute_of_day), 24 * 60 - 1)), 60)
+    suffix = "am" if hour < 12 else "pm"
+    hour12 = hour % 12 or 12
+    face = f"{hour12}" if minute == 0 else f"{hour12}:{minute:02d}"
+    return face, suffix
+
+
+def format_clock_range(start_minute: int, end_minute: int | None = None) -> str:
+    """Compact range like ``1–1:30pm``; start only when end is missing or equal."""
+    start_face, start_suffix = _clock_bits(start_minute)
+    if end_minute is None or int(end_minute) <= int(start_minute):
+        return f"{start_face}{start_suffix}"
+    end_face, end_suffix = _clock_bits(end_minute)
+    if start_suffix == end_suffix:
+        return f"{start_face}–{end_face}{end_suffix}"
+    return f"{start_face}{start_suffix}–{end_face}{end_suffix}"
+
+
+def calendar_tz_label(tz: ZoneInfo | None = None, *, when: datetime | None = None) -> str:
+    """Abbreviation for the calendar zone usuals were inferred in (PT, not UTC)."""
+    zone = tz or CALENDAR_TZ
+    stamp = when or datetime.now(tz=zone)
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=zone)
+    else:
+        stamp = stamp.astimezone(zone)
+    raw = (stamp.tzname() or "").strip()
+    if raw in {"PDT", "PST", "Pacific Daylight Time", "Pacific Standard Time"}:
+        return "PT"
+    if raw in {"EDT", "EST", "Eastern Daylight Time", "Eastern Standard Time"}:
+        return "ET"
+    if raw in {"CDT", "CST", "Central Daylight Time", "Central Standard Time"}:
+        return "CT"
+    if raw in {"MDT", "MST", "Mountain Daylight Time", "Mountain Standard Time"}:
+        return "MT"
+    return raw or "PT"
+
+
 def format_usual_when(on_date: date, start_minute: int) -> str:
     return f"{on_date.strftime('%A, %B')} {on_date.day} at {format_clock(start_minute)}"
 
 
-def format_usual_slot(weekday: int, start_minute: int) -> str:
+def format_usual_slot(
+    weekday: int,
+    start_minute: int,
+    end_minute: int | None = None,
+    *,
+    tz_label: str | None = None,
+) -> str:
     day = _WEEKDAYS[max(0, min(int(weekday), 6))]
-    return f"{day}s at {format_clock(start_minute)}"
+    zone = tz_label if tz_label is not None else calendar_tz_label()
+    clock = format_clock_range(start_minute, end_minute)
+    if zone:
+        return f"{day}s {clock} {zone}"
+    return f"{day}s {clock}"
 
 
 def usual_event_title(
@@ -186,14 +239,17 @@ def usual_event_title(
 
 
 __all__ = [
+    "CALENDAR_TZ",
     "ROUTINE_ACTIVITY",
     "ROUTINE_CLINIC",
     "ROUTINE_PICKUP",
     "ROUTINE_SCHOOL",
     "ROUTINE_USUAL",
+    "calendar_tz_label",
     "classify_routine",
     "classify_usual",
     "format_clock",
+    "format_clock_range",
     "normalize_routine",
     "format_usual_slot",
     "format_usual_when",

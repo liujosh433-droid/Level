@@ -28,7 +28,7 @@ General assistants optimize *your* time. Level models **competing care roles** u
 |---|---|---|
 | Calendar events | Google Calendar API / fixtures | Care roles, protected windows (pickup), load |
 | Voice memos | Transcripts (fixtures / upload path) | Preferences, strain language |
-| Prior AI chats | ChatGPT export zip/JSON | Prior reasoning the user already did |
+| Level chat | Today / About me | Priorities, Keep / Not me, what you hold |
 
 Knowledge loop mutates a **Care Profile**; users confirm with Keep / Not me. Session loop:
 

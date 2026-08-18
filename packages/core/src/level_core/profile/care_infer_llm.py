@@ -70,7 +70,7 @@ class CarePersonAssign(BaseModel):
     )
     your_role: str = Field(
         default="",
-        description="How the caregiver stands toward them (parent, adult child, …).",
+        description="How the caregiver stands toward them (parent, caregiver). Never adult child.",
     )
 
 
@@ -354,7 +354,8 @@ async def infer_care_holistic(
             "{child_care, elder_care, partner_coparent}, short evidence, "
             "also_known_as for nicknames, relationship (who they are to the "
             "caregiver), and your_role (how the caregiver stands toward them — "
-            "parent, adult child, co-parent, …). Prefer given names. "
+            "parent for children; caregiver for elders — never 'adult child'). "
+            "their_relation is child or elder. Prefer given names. "
             "roles.people must use those same canonical names only.\n"
             f"- events: classify at most {event_cap} distinctive titles from the list into "
             "{child_care, elder_care, paid_work, self_recovery, household_logistics, "
@@ -366,7 +367,9 @@ async def infer_care_holistic(
             "- usuals: repeating care obligations with "
             "{person, routine, label, weekday 0=Mon..6=Sun, start_hour, end_hour, evidence, "
             "evidence_titles[]}. routine is pickup/school/activity/clinic/usual; "
-            "label should be that same routine word. Only when the dated events show a real series. "
+            "label should be that same routine word. Dated event times are already "
+            "America/Los_Angeles wall clock — copy those hours, never UTC. "
+            "Only when the dated events show a real series. "
             "Honor Rejected usuals in previous people — do not revive them. "
             "Keep accepted usuals even if this window is thin.\n"
             "- conflicts: at most 3 actionable forward-looking sentences. "
@@ -977,7 +980,8 @@ async def infer_usuals_only(
         f"{', '.join(names)}. "
         "routine must be exactly one of pickup, school, activity, clinic, usual. "
         "label should be that same routine word — not the raw calendar title. "
-        "weekday is 0=Mon .. 6=Sun. Use start_hour/end_hour from the dated series. "
+        "weekday is 0=Mon .. 6=Sun. Dated event times are America/Los_Angeles wall "
+        "clock — copy start_hour/end_hour from those stamps, never UTC. "
         "evidence_titles must be exact calendar titles from the list. "
         "Skip one-offs. Do not invent people. "
         "Honor Rejected usuals — do not revive them. "

@@ -3,14 +3,14 @@
 import Link from "next/link";
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
-import { logout, updateDisplayName } from "@/lib/api";
+import { fetchMe, logout, updateDisplayName } from "@/lib/api";
 import styles from "./AppNav.module.css";
 
 const TABS = [
   { href: "/today", label: "Today", hint: "Schedule & ask" },
   { href: "/profile", label: "About me", hint: "Who you are" },
   { href: "/contacts", label: "Contacts", hint: "Teachers & doctors" },
-  { href: "/sources", label: "Sources", hint: "Calendar & Memory" },
+  { href: "/sources", label: "Sources", hint: "Calendar" },
   { href: "/about", label: "Info", hint: "What Level can do" },
 ] as const;
 
@@ -44,9 +44,11 @@ export function AppNav({
   const [nameDraft, setNameDraft] = useState(displayName || "");
   /** Highlight the clicked tab immediately — don’t wait for the route to finish loading. */
   const [pendingPath, setPendingPath] = useState<string | null>(null);
+  const [googleConnected, setGoogleConnected] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
 
   const activePath = pendingPath ?? pathname;
+  const tabs = TABS.filter((tab) => tab.href !== "/sources" || !googleConnected);
 
   useEffect(() => {
     setNameDraft(displayName || "");
@@ -57,10 +59,29 @@ export function AppNav({
   }, [pathname]);
 
   useEffect(() => {
+    if (!signedIn) {
+      setGoogleConnected(false);
+      return;
+    }
+    let cancelled = false;
+    void fetchMe()
+      .then((me) => {
+        if (!cancelled) setGoogleConnected(Boolean(me.google_connected));
+      })
+      .catch(() => {
+        if (!cancelled) setGoogleConnected(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [signedIn]);
+
+  useEffect(() => {
     for (const tab of TABS) {
+      if (tab.href === "/sources" && googleConnected) continue;
       router.prefetch(tab.href);
     }
-  }, [router]);
+  }, [router, googleConnected]);
 
   useEffect(() => {
     if (!open) return;
@@ -121,7 +142,7 @@ export function AppNav({
           </Link>
           <div className={styles.right}>
             <nav className={styles.desktopNav} aria-label="Main">
-              {TABS.map((tab) => {
+              {tabs.map((tab) => {
                 const active = pathMatches(activePath, tab.href);
                 return (
                   <Link
@@ -229,7 +250,7 @@ export function AppNav({
       </header>
 
       <nav className={styles.bottomNav} aria-label="Main">
-        {TABS.map((tab) => {
+        {tabs.map((tab) => {
           const active = pathMatches(activePath, tab.href);
           return (
             <Link

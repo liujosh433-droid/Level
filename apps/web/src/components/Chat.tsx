@@ -345,7 +345,7 @@ export default function Chat({
         >
           {messages.length === 0 && !busy ? (
             <p className={styles.emptyHint}>
-              Start a chat &mdash; ask about your day, book a time, or tell me a priority.
+              Start a chat &mdash; ask about your day, book a time or reminder, or tell me a priority.
             </p>
           ) : null}
 

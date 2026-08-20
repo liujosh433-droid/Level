@@ -97,6 +97,13 @@ def _fence_user_input(user_input: str) -> str:
 _DROP = object()
 
 
+def _span_echoes(source_span: str, raw_user_input: str) -> bool:
+    """True when the span is an actual quote of the user, ignoring case."""
+    if source_span in raw_user_input:
+        return True
+    return source_span.lower() in raw_user_input.lower()
+
+
 def _walk_source_spans(
     value: Any, raw_user_input: str, path: str, dropped: list[str]
 ) -> Any:
@@ -108,7 +115,7 @@ def _walk_source_spans(
     """
     if isinstance(value, dict):
         source_span = value.get("source_span")
-        if source_span and source_span not in raw_user_input:
+        if source_span and not _span_echoes(str(source_span), raw_user_input):
             dropped.append(f"{path}.source_span={source_span!r}")
             return _DROP
         cleaned: dict[str, Any] = {}

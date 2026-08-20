@@ -104,7 +104,7 @@
 }
 
 .copy {
-  flex: 0 1 22rem;
+  flex: 0 1 28rem;
   min-width: 0;
 }
 
@@ -133,7 +133,7 @@
 .sub {
   margin: 0 0 1rem;
   color: var(--mist);
-  max-width: 28ch;
+  max-width: 46ch;
   font-size: 0.98rem;
   line-height: 1.4;
   animation: rise 0.95s ease-out 0.12s both;

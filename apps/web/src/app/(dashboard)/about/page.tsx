@@ -1,17 +1,32 @@
+import Image from "next/image";
 import styles from "./about.module.css";
 
 export default function AboutPage() {
   return (
     <article className={styles.wrap}>
-      <header>
-        <h1>About Level</h1>
-        <p>
-          Level is a caregiver&apos;s second set of hands - built for the{" "}
-          <a href="https://allthingsagentichackathon.devpost.com/" target="_blank" rel="noreferrer">
-            All Things Agentic Hackathon
-          </a>{" "}
-          in the Collaborative Partner track.
-        </p>
+      <header className={styles.hero}>
+        <div className={styles.heroCopy}>
+          <h1>About Level</h1>
+          <p>
+            Level is a caregiver&apos;s second set of hands - built for the{" "}
+            <a href="https://allthingsagentichackathon.devpost.com/" target="_blank" rel="noreferrer">
+              All Things Agentic Hackathon
+            </a>{" "}
+            in the Collaborative Partner track.
+          </p>
+        </div>
+        <div className={styles.art} aria-hidden="true">
+          <div className={styles.artFrame}>
+            <Image
+              src="/about-care.jpg"
+              alt=""
+              width={1600}
+              height={900}
+              priority
+              className={styles.people}
+            />
+          </div>
+        </div>
       </header>
 
       <section>
@@ -43,11 +58,12 @@ export default function AboutPage() {
       </section>
 
       <section>
-        <h2>Feedback loop</h2>
+        <h2>How Level learns</h2>
         <p>
-          Every &ldquo;Not me&rdquo; you tap is stored in a <code>negatives</code> collection and
-          injected into the next agent call as &ldquo;do not propose this again.&rdquo; Level
-          adapts to your particular family shape without a training run.
+          Tell Level in chat when an inference needs correction &mdash; &ldquo;Robert is my kid, not my dad,&rdquo;
+          &ldquo;Alex is my co-parent,&rdquo; &ldquo;never miss time with my mom.&rdquo; Those
+          corrections live on your profile, so the next pass doesn&apos;t invent the same thing.
+          A missing usual you mark Resolved, or as a different week, stays quiet until next Monday.
         </p>
       </section>
     </article>

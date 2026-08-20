@@ -54,6 +54,8 @@ from level_core.storage.care_store import (
     find_person_by_name,
     new_id,
     parse_person_intro,
+    parse_reminder,
+    parse_reminder_followup,
     record_negative,
     relation_from_phrase,
     relation_label,
@@ -181,6 +183,11 @@ async def _dispatch_message(
     fast_person = await _try_fast_person(store, message)
     if fast_person is not None:
         return fast_person
+
+    # Fast path: "remind me to bring a charger" skips ReminderAgent.
+    fast_rem = await _try_fast_reminder(store, message, history)
+    if fast_rem is not None:
+        return fast_rem
 
     # Fast path: "email Nova's teacher…" resolves contacts without Gemini.
     fast_email = await _try_fast_email(store, message, history)
@@ -355,29 +362,86 @@ async def _extract_reminder(
     store: UserStore, message: str, decision: Any, history: list[dict[str, str]]
 ) -> dict[str, Any]:
     result = await reminder_run(store=store, message=message, history=history)
-    if not result.value or result.value.reminder is None:
-        return _ack_no_agent(store, "Tell me the thing you might forget and I'll surface it.")
-    er = result.value.reminder
+    if result.value and result.value.reminder is not None:
+        er = result.value.reminder
+        return await _save_reminder(
+            store,
+            text=er.text,
+            person_display_name=er.person_display_name,
+            activity_type=er.activity_type or ActivityType.OTHER,
+            source_span=er.source_span,
+            lead_minutes=er.lead_minutes,
+        )
+    parsed = parse_reminder(message) or parse_reminder_followup(message, history)
+    if parsed is not None:
+        return await _save_reminder(
+            store,
+            text=parsed.text,
+            person_display_name=parsed.person_display_name,
+            activity_type=parsed.activity_type,
+            source_span=parsed.source_span,
+        )
+    return _ack_no_agent(store, "Tell me the thing you might forget and I'll surface it.")
+
+
+async def _try_fast_reminder(
+    store: UserStore, message: str, history: list[dict[str, str]]
+) -> dict[str, Any] | None:
+    """Save an explicit reminder without an LLM call."""
+    if _TIME_RANGE_RE.search(message):
+        return None
+    parsed = parse_reminder(message) or parse_reminder_followup(message, history)
+    if parsed is None:
+        return None
+    logger.info(
+        "chat.reminder.fast_hit",
+        user=store.user_id,
+        activity=parsed.activity_type.value,
+    )
+    return await _save_reminder(
+        store,
+        text=parsed.text,
+        person_display_name=parsed.person_display_name,
+        activity_type=parsed.activity_type,
+        source_span=parsed.source_span,
+    )
+
+
+async def _save_reminder(
+    store: UserStore,
+    *,
+    text: str,
+    person_display_name: str | None,
+    activity_type: ActivityType,
+    source_span: str | None,
+    lead_minutes: int = 60,
+) -> dict[str, Any]:
     person_id: str | None = None
-    if er.person_display_name:
-        for p in await store.people.list():
-            if p.display_name.lower() == er.person_display_name.lower() or er.person_display_name.lower() in [a.lower() for a in p.aliases]:
-                person_id = p.person_id
-                break
+    if person_display_name:
+        found = await find_person_by_name(store, person_display_name)
+        if found is not None:
+            person_id = found.person_id
     reminder = await add_reminder(
         store,
-        text=er.text,
+        text=text,
         person_id=person_id,
-        activity_type=er.activity_type or ActivityType.OTHER,
-        lead_minutes=er.lead_minutes,
-        source_span=er.source_span,
+        activity_type=activity_type,
+        lead_minutes=lead_minutes,
+        source_span=source_span,
     )
     await enrich_agenda(store)
-    await _write_reply(
-        store, "Reminder saved. I'll show it whenever a matching event comes up."
-    )
+    where = activity_type.category.label.lower()
+    if activity_type == ActivityType.OTHER:
+        reply = (
+            f"Reminder saved: '{reminder.text}'. "
+            "I'll keep it in Reminders — tell me which events it belongs on "
+            "(dropoff, pickup, work, soccer) if you want it on the calendar."
+        )
+    else:
+        reply = f"Reminder saved: '{reminder.text}'. I'll flag it on {where} events."
+    await _write_reply(store, reply)
     return {
-        "reply": f"Reminder saved: '{reminder.text}'. I'll flag it on matching events.",
+        "reply": reply,
         "path": "reminder",
         "intent": "add_reminder",
         "reminder_id": reminder.reminder_id,

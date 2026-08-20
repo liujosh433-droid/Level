@@ -194,6 +194,11 @@ def _heuristic_activity(summary: str) -> ActivityType | None:
 
 
 def _reminder_matches(reminder: Reminder, event: CachedEvent) -> bool:
+    # OTHER is the "couldn't classify" bucket for leftover calendar titles
+    # (Lunch, errands, …). A reminder that landed there has no real join key,
+    # so attaching it would flag every leftover event.
+    if reminder.match.activity_type == ActivityType.OTHER:
+        return False
     if event.activity_type != reminder.match.activity_type:
         return False
     if reminder.match.person_id and reminder.match.person_id not in event.matched_person_ids:

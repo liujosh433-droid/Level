@@ -14,7 +14,7 @@ export default function HomePage() {
     let cancelled = false;
     void resolveHomeDestination().then(({ dest }) => {
       if (cancelled) return;
-      if (dest === "/today" || dest === "/sources") {
+      if (dest === "/today") {
         router.replace(dest);
         return;
       }
@@ -26,9 +26,7 @@ export default function HomePage() {
   }, [router]);
 
   function start() {
-    void resolveHomeDestination().then(({ dest }) => {
-      router.push(dest === "/today" ? "/today" : "/sources");
-    });
+    router.push("/today");
   }
 
   if (checking) {
@@ -57,13 +55,13 @@ export default function HomePage() {
           <p className={styles.brand}>Level</p>
           <h1 className={styles.headline}>Steady when everything else isn&apos;t.</h1>
           <p className={styles.sub}>
-            For busy caregivers &mdash; see what saying yes would crowd out from the care roles you hold.
+            For busy caregivers &mdash; a partner that helps you organize your care-roles, priorities, and reminds
+            you when usual events are missing. <br></br><br></br>Level can also send emails for you, like emailing kids' teachers when they need to take a sick day. Try it out now!
           </p>
           <div className={styles.cta}>
             <button type="button" className={styles.primary} onClick={start}>
               Get Started
             </button>
-            <p className={styles.hint}>We&apos;ll explain first &mdash; then a quick connect</p>
           </div>
         </div>
 

@@ -52,6 +52,26 @@ async def test_source_span_hallucination_drops_value(store) -> None:  # type: ig
 
 
 @pytest.mark.asyncio
+async def test_source_span_case_insensitive_keeps_value(store) -> None:  # type: ignore[no-untyped-def]
+    register_fake(
+        "MiniAgent",
+        {"items": [{"text": "charger", "source_span": "Bring a charger"}]},
+    )
+    spec = AgentSpec(
+        name="MiniAgent",
+        model="flash",
+        system="test",
+        response_schema=MiniList,
+    )
+    result = await call_agent(
+        spec, user_input="remind me to bring a charger to my meetings", store=store
+    )
+    assert result.value is not None
+    assert [i.text for i in result.value.items] == ["charger"]  # type: ignore[union-attr]
+    assert result.hallucinated is False
+
+
+@pytest.mark.asyncio
 async def test_schema_invalid_returns_safe_default(store) -> None:  # type: ignore[no-untyped-def]
     register_fake("MiniAgent", "not-json-at-all")
     spec = AgentSpec(

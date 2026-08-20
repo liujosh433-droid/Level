@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from dataclasses import dataclass
 
 from level_core.schemas import (
     ActivityType,
@@ -146,6 +147,157 @@ def relation_from_phrase(phrase: str) -> CareRelation | None:
     ):
         return CareRelation.OTHER
     return None
+
+
+@dataclass(frozen=True)
+class ParsedReminder:
+    text: str
+    activity_type: ActivityType
+    person_display_name: str | None
+    source_span: str
+
+
+_REMINDER_LEAD = re.compile(
+    r"^\s*(?:please\s+|can you\s+|could you\s+)?"
+    r"(?:"
+    r"remind\s+me\s+(?:to\s+|about\s+)?"
+    r"|don['\u2019]t\s+forget\s+(?:to\s+)?"
+    r"|i\s+(?:keep\s+|always\s+)?(?:forget(?:ting)?|forgot)\s+(?:to\s+)?"
+    r")",
+    re.IGNORECASE,
+)
+
+_REMINDER_QUESTION = re.compile(
+    r"\bremind\s+me\s+(?:what|when|where|if|whether|who)\b",
+    re.IGNORECASE,
+)
+
+_REMINDER_ACTIVITY_HINTS: list[tuple[re.Pattern[str], ActivityType]] = [
+    (re.compile(r"\b(?:soccer)\b", re.I), ActivityType.SPORTS_SOCCER),
+    (re.compile(r"\bbasketball\b", re.I), ActivityType.SPORTS_BASKETBALL),
+    (re.compile(r"\bswim(?:ming)?\b", re.I), ActivityType.SPORTS_SWIM),
+    (re.compile(r"\bsports?\b", re.I), ActivityType.SPORTS_OTHER),
+    (
+        re.compile(
+            r"\bdrop(?:ping)?(?:\s+\w+){0,2}\s+off\b|\bdrop[\s-]?off\b",
+            re.I,
+        ),
+        ActivityType.SCHOOL_DROPOFF,
+    ),
+    (
+        re.compile(
+            r"\bpick(?:ing)?(?:\s+\w+){0,2}\s+up\b|\bpick[\s-]?up\b",
+            re.I,
+        ),
+        ActivityType.SCHOOL_PICKUP,
+    ),
+    (re.compile(r"\bschool\b", re.I), ActivityType.SCHOOL_EVENT),
+    (re.compile(r"\btherapy\b", re.I), ActivityType.MEDICAL_THERAPY),
+    (re.compile(r"\b(?:dentist|doctor|medical|appointment)\b", re.I), ActivityType.MEDICAL_APPT),
+    (re.compile(r"\b(?:elder|dad|mom|father|mother|parent|family)\b", re.I), ActivityType.FAMILY),
+    (
+        re.compile(
+            r"\b(?:meetings?|standup|stand-up|1:1|one[- ]on[- ]ones?|calls?|work)\b",
+            re.I,
+        ),
+        ActivityType.WORK,
+    ),
+]
+
+_TRAILING_ACTIVITY_CONTEXT = re.compile(
+    r"\s+(?:"
+    r"when\s+i\s+(?:drop(?:ping)?(?:\s+\w+){0,2}\s+off|pick(?:ing)?(?:\s+\w+){0,2}\s+up)"
+    r"|(?:to|at|for|before|during|on)\s+(?:all\s+)?"
+    r"(?:my\s+|our\s+)?"
+    r"(?:meetings?|work(?:\s+(?:events?|days?))?|calls?|standups?"
+    r"|drop[\s-]?offs?|pick[\s-]?ups?)"
+    r")\s*$",
+    re.IGNORECASE,
+)
+
+_POSSESSIVE_ITEM = re.compile(
+    r"^([A-Za-z][A-Za-z'-]+)'s\s+(.+)$",
+)
+
+_ASK_FOR_REMINDER_ITEM = re.compile(
+    r"thing you might forget",
+    re.IGNORECASE,
+)
+
+_FOLLOWUP_SKIP = re.compile(
+    r"\b(?:book|schedule|email|prioritize|cancel|move|find a time)\b|\?",
+    re.IGNORECASE,
+)
+
+
+def activity_hint_from_text(*parts: str) -> ActivityType:
+    blob = " ".join(p for p in parts if p)
+    for pattern, activity in _REMINDER_ACTIVITY_HINTS:
+        if pattern.search(blob):
+            return activity
+    return ActivityType.OTHER
+
+
+def _title_reminder_item(item: str) -> str:
+    cleaned = item.strip(" .!")
+    if not cleaned:
+        return cleaned
+    return cleaned[0].upper() + cleaned[1:]
+
+
+def parse_reminder(message: str) -> ParsedReminder | None:
+    """Pull a reminder from 'remind me to bring a charger to my meetings'."""
+    text = " ".join(message.strip().split())
+    if not text or _REMINDER_QUESTION.search(text):
+        return None
+    match = _REMINDER_LEAD.search(text)
+    if not match:
+        return None
+    rest = text[match.end() :].strip(" .!")
+    if len(rest) < 2:
+        return None
+    if rest.lower() in {"later", "tomorrow", "please", "something", "it"}:
+        return None
+    return _reminder_from_item(rest, source_span=rest[:200])
+
+
+def parse_reminder_followup(
+    message: str, history: list[dict[str, str]] | None
+) -> ParsedReminder | None:
+    """After Level asked for the item, accept a short noun like 'a charger'."""
+    if not history:
+        return None
+    last_assistant = next(
+        (t.get("text") or "" for t in reversed(history) if t.get("role") == "assistant"),
+        "",
+    )
+    if not _ASK_FOR_REMINDER_ITEM.search(last_assistant):
+        return None
+    item = " ".join(message.strip().split()).strip(" .!")
+    if len(item) < 2 or _FOLLOWUP_SKIP.search(item) or _REMINDER_LEAD.search(item):
+        return None
+    prior_user = " ".join(
+        t.get("text") or "" for t in history if t.get("role") == "user"
+    )
+    return _reminder_from_item(item, source_span=item[:200], extra_context=prior_user)
+
+
+def _reminder_from_item(
+    rest: str, *, source_span: str, extra_context: str = ""
+) -> ParsedReminder:
+    activity = activity_hint_from_text(rest, extra_context)
+    item = _TRAILING_ACTIVITY_CONTEXT.sub("", rest).strip() or rest
+    person: str | None = None
+    possessive = _POSSESSIVE_ITEM.match(item)
+    if possessive:
+        person = possessive.group(1)
+        item = possessive.group(2).strip()
+    return ParsedReminder(
+        text=_title_reminder_item(item),
+        activity_type=activity,
+        person_display_name=person,
+        source_span=source_span,
+    )
 
 
 def parse_person_intro(message: str) -> tuple[str, CareRelation] | None:

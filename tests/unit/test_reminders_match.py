@@ -64,3 +64,24 @@ def test_matches_any_person_when_reminder_is_generic() -> None:
     )
     e = _event(ActivityType.SPORTS_SOCCER, ["p2"])
     assert _reminder_matches(r, e)
+
+
+def test_other_reminder_does_not_stick_to_leftover_events() -> None:
+    r = Reminder(
+        reminder_id="r1",
+        text="Give my kids permission slips",
+        match=ReminderMatch(person_id=None, activity_type=ActivityType.OTHER),
+    )
+    assert not _reminder_matches(r, _event(ActivityType.OTHER, []))
+    assert not _reminder_matches(r, _event(ActivityType.PERSONAL, []))
+
+
+def test_dropoff_reminder_skips_lunch() -> None:
+    r = Reminder(
+        reminder_id="r1",
+        text="Give my kids permission slips",
+        match=ReminderMatch(person_id=None, activity_type=ActivityType.SCHOOL_DROPOFF),
+    )
+    assert not _reminder_matches(r, _event(ActivityType.PERSONAL, []))
+    assert not _reminder_matches(r, _event(ActivityType.OTHER, []))
+    assert _reminder_matches(r, _event(ActivityType.SCHOOL_DROPOFF, ["p_nova"]))

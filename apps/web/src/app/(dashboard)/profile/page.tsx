@@ -79,7 +79,7 @@ function summarize(people: CarePerson[], usuals: Usual[], priorities: Priority[]
   if (parts.length === 0) {
     return "I don\u2019t have a picture of your care load yet \u2014 tap Re-read calendar or tell me anything I should know.";
   }
-  return `Right now Level thinks you hold ${parts.join(", ")}.`;
+  return `Level infers and remembers: ${parts.join(", ")}.`;
 }
 
 function groupPeopleForRoles(people: CarePerson[]): { label: string; people: CarePerson[] }[] {
@@ -309,7 +309,7 @@ export default function ProfilePage() {
           <Chat
             title="Tell Level"
             lead={
-              "Add someone new (\u201cAlex is my co-parent\u201d), correct a role, save a priority, or drop a usual I invented."
+              "Add someone new (\u201cAlex is my co-parent\u201d), correct a role, save a priority, or update a usual."
             }
             placeholder="&ldquo;Alex is my co-parent&rdquo;"
             onAfterReply={() => void load()}

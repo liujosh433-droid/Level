@@ -30,14 +30,22 @@ class ReminderAgentResponse(BaseModel):
 
 SYSTEM = """You extract a caregiver reminder from one message.
 
-Example: "I forgot Theo's soccer shoes" -> person_display_name="Theo",
-activity_type="sports.soccer", text="Bring soccer shoes".
+Examples:
+- "I forgot Theo's soccer shoes" -> person_display_name="Theo",
+  activity_type="sports.soccer", text="Bring soccer shoes", source_span="soccer shoes".
+- "remind me to bring a charger to my meetings" -> person_display_name=null,
+  activity_type="work", text="Bring a charger", source_span="bring a charger".
+- Follow-up "a charger" after Level asked what they might forget -> text="A charger".
 
 `activity_type` MUST come from the enum: sports.soccer, sports.basketball,
 sports.swim, sports.other, school.pickup, school.dropoff, school.event,
 medical.appointment, medical.therapy, work, family, commute, personal, other.
+Use "work" for meetings, standup, calls, and office days.
 
-`source_span` MUST be an exact substring of user_input.
+`source_span` MUST be an exact substring of user_input (same words; case may differ).
+If `<context>` has `prior_turns`, use them to resolve short follow-ups.
+If the message is clearly a reminder (remind me / don't forget / I keep forgetting),
+ALWAYS fill `reminder` — do not return null just because there is no person name.
 If message isn't a reminder, return {"reminder": null}.
 Do NOT re-emit reminders listed under <negatives>."""
 

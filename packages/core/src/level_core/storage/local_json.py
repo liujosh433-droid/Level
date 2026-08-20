@@ -26,7 +26,17 @@ from level_core.storage.base import KVStore, UserStore
 
 T = TypeVar("T", bound=BaseModel)
 
-_root_lock = asyncio.Lock()
+# One lock per file so agenda writes don't stall people/admin reads.
+_path_locks: dict[str, asyncio.Lock] = {}
+
+
+def _lock_for(path: Path) -> asyncio.Lock:
+    key = str(path)
+    lock = _path_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _path_locks[key] = lock
+    return lock
 
 
 def _root_dir() -> Path:
@@ -51,17 +61,26 @@ class LocalRepo(Generic[T]):
         self._model = model
         self._id_field = id_field
 
+    def _lock(self) -> asyncio.Lock:
+        return _lock_for(self._path)
+
+    def _load_unlocked(self) -> list[dict[str, Any]]:
+        if not self._path.exists():
+            return []
+        return json.loads(self._path.read_text() or "[]")
+
+    def _dump_unlocked(self, items: list[dict[str, Any]]) -> None:
+        tmp = self._path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(items, default=str, indent=2))
+        tmp.replace(self._path)
+
     async def _load(self) -> list[dict[str, Any]]:
-        async with _root_lock:
-            if not self._path.exists():
-                return []
-            return json.loads(self._path.read_text() or "[]")
+        async with self._lock():
+            return self._load_unlocked()
 
     async def _dump(self, items: list[dict[str, Any]]) -> None:
-        async with _root_lock:
-            tmp = self._path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(items, default=str, indent=2))
-            tmp.replace(self._path)
+        async with self._lock():
+            self._dump_unlocked(items)
 
     async def get(self, id_: str) -> T | None:
         for row in await self._load():
@@ -73,30 +92,61 @@ class LocalRepo(Generic[T]):
         return [self._model.model_validate(row) for row in await self._load()]
 
     async def upsert(self, item: T) -> T:
-        rows = await self._load()
-        id_ = getattr(item, self._id_field)
+        async with self._lock():
+            rows = self._load_unlocked()
+            id_ = getattr(item, self._id_field)
 
-        updated = item.model_copy(update={"version": getattr(item, "version", 1)})
-        if hasattr(updated, "updated_at"):
-            updated = updated.model_copy(update={"updated_at": datetime.utcnow()})
+            updated = item.model_copy(update={"version": getattr(item, "version", 1)})
+            if hasattr(updated, "updated_at"):
+                updated = updated.model_copy(update={"updated_at": datetime.utcnow()})
 
-        payload = json.loads(updated.model_dump_json())
-        for i, row in enumerate(rows):
-            if row.get(self._id_field) == id_:
-                new_version = row.get("version", 0) + 1
-                payload["version"] = new_version
-                updated = self._model.model_validate(payload)
-                rows[i] = payload
-                await self._dump(rows)
-                return updated
+            payload = json.loads(updated.model_dump_json())
+            for i, row in enumerate(rows):
+                if row.get(self._id_field) == id_:
+                    new_version = row.get("version", 0) + 1
+                    payload["version"] = new_version
+                    updated = self._model.model_validate(payload)
+                    rows[i] = payload
+                    self._dump_unlocked(rows)
+                    return updated
 
-        rows.append(payload)
-        await self._dump(rows)
-        return updated
+            rows.append(payload)
+            self._dump_unlocked(rows)
+            return updated
+
+    async def upsert_many(self, items: list[T]) -> None:
+        if not items:
+            return
+        async with self._lock():
+            rows = self._load_unlocked()
+            index = {row.get(self._id_field): i for i, row in enumerate(rows)}
+            now = datetime.utcnow()
+            for item in items:
+                id_ = getattr(item, self._id_field)
+                updated = item.model_copy(update={"version": getattr(item, "version", 1)})
+                if hasattr(updated, "updated_at"):
+                    updated = updated.model_copy(update={"updated_at": now})
+                payload = json.loads(updated.model_dump_json())
+                if id_ in index:
+                    payload["version"] = rows[index[id_]].get("version", 0) + 1
+                    rows[index[id_]] = payload
+                else:
+                    index[id_] = len(rows)
+                    rows.append(payload)
+            self._dump_unlocked(rows)
 
     async def delete(self, id_: str) -> None:
-        rows = [r for r in await self._load() if r.get(self._id_field) != id_]
-        await self._dump(rows)
+        async with self._lock():
+            rows = [r for r in self._load_unlocked() if r.get(self._id_field) != id_]
+            self._dump_unlocked(rows)
+
+    async def delete_many(self, ids: list[str]) -> None:
+        if not ids:
+            return
+        drop = set(ids)
+        async with self._lock():
+            rows = [r for r in self._load_unlocked() if r.get(self._id_field) not in drop]
+            self._dump_unlocked(rows)
 
 
 class LocalKV(KVStore):
@@ -105,7 +155,7 @@ class LocalKV(KVStore):
         self._path.parent.mkdir(parents=True, exist_ok=True)
 
     async def read(self) -> dict[str, Any] | None:
-        async with _root_lock:
+        async with _lock_for(self._path):
             if not self._path.exists():
                 return None
             raw = self._path.read_text().strip()
@@ -114,7 +164,7 @@ class LocalKV(KVStore):
             return json.loads(raw)
 
     async def write(self, value: dict[str, Any]) -> None:
-        async with _root_lock:
+        async with _lock_for(self._path):
             tmp = self._path.with_suffix(".tmp")
             tmp.write_text(json.dumps(value, default=str, indent=2))
             tmp.replace(self._path)

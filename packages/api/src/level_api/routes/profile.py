@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from level_core.agents.role import ProposedPerson
 from level_core.agents.role import run as role_run
 from level_core.agents.usual import run as usual_run
+from level_core.calendar.enrich import enrich_agenda
 from level_core.calendar.usuals import compute_usuals_from_events, rollup_for_role_agent
 from level_core.config import get_settings
 from level_core.schemas import (
@@ -24,6 +25,7 @@ from level_core.schemas import (
 )
 from level_core.storage.base import UserStore
 from level_core.storage.care_store import (
+    ensure_self_person,
     propose_person,
     propose_usual,
     record_negative,
@@ -150,6 +152,11 @@ def _fmt_hm(total_minutes: int) -> str:
 
 @router.post("/refresh")
 async def refresh_profile(store: UserStore = Depends(get_user_store)) -> dict[str, Any]:
+    await ensure_self_person(store)
+    try:
+        await enrich_agenda(store)
+    except Exception:
+        pass
     events = await store.agenda.list()
     rollup = rollup_for_role_agent(events)
     role_result = await role_run(store=store, calendar_rollup=rollup)

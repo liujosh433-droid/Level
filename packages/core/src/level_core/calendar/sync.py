@@ -24,6 +24,7 @@ from zoneinfo import ZoneInfo
 
 from dateutil import parser as date_parser
 
+from level_core.calendar.enrich import heuristic_activity
 from level_core.calendar.google_client import build_calendar_client
 from level_core.config import get_settings
 from level_core.observability import get_logger, span
@@ -41,62 +42,99 @@ class RefreshResult:
     total_cached: int
     fingerprint: str
     fingerprint_changed: bool
+    calendars: list[str]
+    last_error: str | None = None
 
 
-async def refresh_agenda(store: UserStore, *, calendar_id: str = "primary") -> RefreshResult:
+async def refresh_agenda(store: UserStore, *, calendar_id: str | None = None) -> RefreshResult:
     settings = get_settings()
     tz = ZoneInfo(settings.calendar_tz)
     now = datetime.now(UTC)
-    time_min = now - timedelta(days=settings.level_cal_days_back)
-    time_max = now + timedelta(days=settings.level_cal_days_forward)
+    time_min, time_max = await _sync_window(store, settings=settings, now=now)
 
-    with span("calendar.refresh", user=store.user_id, calendar=calendar_id):
+    with span("calendar.refresh", user=store.user_id, calendar=calendar_id or "all"):
         service = await build_calendar_client(store)
-        events_page = await asyncio.to_thread(
-            _list_events,
-            service=service,
-            calendar_id=calendar_id,
-            time_min=time_min,
-            time_max=time_max,
-        )
+        calendars = await asyncio.to_thread(_resolve_calendars, service, calendar_id)
 
     added = 0
     updated = 0
     seen_ids: set[str] = set()
-    for item in events_page:
-        cached = _to_cached_event(item, calendar_id=calendar_id, tz=tz)
-        if not cached:
+    pulled_ids: set[str] = set()
+    errors: list[str] = []
+    to_upsert: list[CachedEvent] = []
+
+    existing_list = await store.agenda.list()
+    by_id = {e.event_id: e for e in existing_list}
+
+    for cal in calendars:
+        cal_id = cal["id"]
+        try:
+            events_page = await asyncio.to_thread(
+                _list_events,
+                service=service,
+                calendar_id=cal_id,
+                time_min=time_min,
+                time_max=time_max,
+            )
+        except Exception as exc:  # noqa: BLE001 - one calendar must not wipe the rest
+            errors.append(f"{cal.get('summary') or cal_id}: {exc}")
+            logger.warning("calendar.refresh.calendar_failed", calendar=cal_id, error=str(exc)[:200])
             continue
-        seen_ids.add(cached.event_id)
-        existing = await store.agenda.get(cached.event_id)
-        if existing and existing.etag == cached.etag:
-            continue
-        if existing:
-            merged = _merge_preserving_ai(existing, cached)
-            await store.agenda.upsert(merged)
-            updated += 1
-        else:
-            await store.agenda.upsert(cached)
-            added += 1
+
+        pulled_ids.add(cal_id)
+        if cal.get("primary"):
+            pulled_ids.add("primary")
+
+        for item in events_page:
+            cached = _to_cached_event(item, calendar_id=cal_id, tz=tz)
+            if not cached:
+                continue
+            seen_ids.add(cached.event_id)
+            existing = by_id.get(cached.event_id)
+            if existing and existing.etag == cached.etag:
+                continue
+            if existing:
+                to_upsert.append(_merge_preserving_ai(existing, cached))
+                updated += 1
+            else:
+                to_upsert.append(cached)
+                added += 1
+
+    await store.agenda.upsert_many(to_upsert)
 
     all_cached = await store.agenda.list()
-    to_remove = [e for e in all_cached if e.event_id not in seen_ids and _within_window(e, time_min, time_max)]
-    for e in to_remove:
-        await store.agenda.delete(e.event_id)
+    to_remove = [
+        e
+        for e in all_cached
+        if e.event_id not in seen_ids
+        and _within_window(e, time_min, time_max)
+        and (e.calendar_id in pulled_ids or not pulled_ids)
+    ]
+    # Never wipe the cache because every calendar listing failed.
+    if errors and not pulled_ids:
+        to_remove = []
+    await store.agenda.delete_many([e.event_id for e in to_remove])
     removed = len(to_remove)
 
-    remaining = [e for e in await store.agenda.list()]
+    remaining = await store.agenda.list()
     fingerprint = _fingerprint(remaining)
-    prev = (await store.calendar_sync.read() or {}).get("events_fingerprint")
-    fingerprint_changed = prev != fingerprint
+    prev_state = await store.calendar_sync.read() or {}
+    fingerprint_changed = prev_state.get("events_fingerprint") != fingerprint
     await _rebuild_daily_agenda(store, remaining, tz=tz)
 
+    last_error = "; ".join(errors) if errors else None
     await store.calendar_sync.write(
         {
+            **prev_state,
             "events_fingerprint": fingerprint,
             "last_pull_at": now.isoformat(),
-            "calendar_id": calendar_id,
-            **({"sync_token": None}),
+            "calendar_id": calendars[0]["id"] if calendars else "primary",
+            "calendars": [
+                {"id": c["id"], "summary": c.get("summary"), "primary": bool(c.get("primary"))}
+                for c in calendars
+            ],
+            "last_error": last_error,
+            "sync_token": None,
         }
     )
 
@@ -107,7 +145,9 @@ async def refresh_agenda(store: UserStore, *, calendar_id: str = "primary") -> R
         updated=updated,
         removed=removed,
         total=len(remaining),
+        calendars=[c["id"] for c in calendars],
         fingerprint_changed=fingerprint_changed,
+        last_error=last_error,
     )
     return RefreshResult(
         added=added,
@@ -116,7 +156,59 @@ async def refresh_agenda(store: UserStore, *, calendar_id: str = "primary") -> R
         total_cached=len(remaining),
         fingerprint=fingerprint,
         fingerprint_changed=fingerprint_changed,
+        calendars=[c["id"] for c in calendars],
+        last_error=last_error,
     )
+
+
+async def _sync_window(
+    store: UserStore, *, settings: Any, now: datetime
+) -> tuple[datetime, datetime]:
+    profile = await store.profile.read() or {}
+    days_back = int(profile.get("calendar_window_days_back") or settings.level_cal_days_back)
+    days_forward = int(profile.get("calendar_window_days_forward") or settings.level_cal_days_forward)
+    return now - timedelta(days=days_back), now + timedelta(days=days_forward)
+
+
+def _resolve_calendars(service: Any, calendar_id: str | None) -> list[dict[str, Any]]:
+    if calendar_id:
+        return [{"id": calendar_id, "summary": calendar_id, "primary": calendar_id == "primary"}]
+    try:
+        return _list_writable_calendars(service)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("calendar.list_failed", error=str(exc)[:200])
+        return [{"id": "primary", "summary": "primary", "primary": True}]
+
+
+def _list_writable_calendars(service: Any) -> list[dict[str, Any]]:
+    """Calendars the user can write (owner/writer). Skips holidays and subscriptions."""
+    items: list[dict[str, Any]] = []
+    page_token: str | None = None
+    while True:
+        resp = (
+            service.calendarList()
+            .list(
+                minAccessRole="writer",
+                showHidden=True,
+                pageToken=page_token,
+            )
+            .execute()
+        )
+        for cal in resp.get("items") or []:
+            items.append(
+                {
+                    "id": cal["id"],
+                    "summary": cal.get("summary") or cal["id"],
+                    "primary": bool(cal.get("primary")),
+                    "access_role": cal.get("accessRole"),
+                }
+            )
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+    if not items:
+        items.append({"id": "primary", "summary": "primary", "primary": True})
+    return items
 
 
 def _list_events(
@@ -145,6 +237,11 @@ def _list_events(
     return items
 
 
+def _cached_event_id(calendar_id: str, google_id: str) -> str:
+    """Event ids are unique per calendar, not globally."""
+    return google_id if calendar_id == "primary" else f"{calendar_id}:{google_id}"
+
+
 def _to_cached_event(
     item: dict[str, Any], *, calendar_id: str, tz: ZoneInfo
 ) -> CachedEvent | None:
@@ -164,17 +261,21 @@ def _to_cached_event(
     origin = "level" if private.get("origin") == "level" else "google"
 
     attendee_tokens = _first_name_tokens(item.get("attendees") or [])
+    summary = (item.get("summary") or "").strip()
+    activity = heuristic_activity(summary)
 
     return CachedEvent(
-        event_id=item["id"],
+        event_id=_cached_event_id(calendar_id, item["id"]),
         calendar_id=calendar_id,
-        summary=(item.get("summary") or "").strip(),
+        summary=summary,
         time=EventTime(start=start, end=end, tz=str(tz), all_day=all_day),
         location=(item.get("location") or None),
         attendee_tokens=attendee_tokens,
         origin=origin,
         level_reason=private.get("level_reason"),
         etag=item.get("etag"),
+        activity_type=activity,
+        classified_at=datetime.utcnow() if activity else None,
     )
 
 
@@ -201,14 +302,15 @@ def _first_name_tokens(attendees: list[dict[str, Any]]) -> list[str]:
 
 def _merge_preserving_ai(existing: CachedEvent, incoming: CachedEvent) -> CachedEvent:
     """Keep AI-classified fields when the event's core content is unchanged."""
+    same_title = existing.summary == incoming.summary
     return incoming.model_copy(
         update={
             "activity_type": existing.activity_type
-            if existing.summary == incoming.summary
-            else None,
+            if same_title and existing.activity_type
+            else incoming.activity_type,
             "classified_at": existing.classified_at
-            if existing.summary == incoming.summary
-            else None,
+            if same_title and existing.classified_at
+            else incoming.classified_at,
             "matched_person_ids": existing.matched_person_ids,
             "matched_reminder_ids": existing.matched_reminder_ids,
         }
@@ -229,6 +331,22 @@ def _fingerprint(events: list[CachedEvent]) -> str:
     return hasher.hexdigest()[:16]
 
 
+def agenda_is_fresh(sync_meta: dict[str, Any] | None, *, ttl_seconds: int = 45) -> bool:
+    """Skip a Google round-trip on rapid /today reloads (chat, tab focus)."""
+    if not sync_meta:
+        return False
+    raw = sync_meta.get("last_pull_at")
+    if not raw:
+        return False
+    try:
+        pulled = date_parser.isoparse(str(raw))
+        if pulled.tzinfo is None:
+            pulled = pulled.replace(tzinfo=UTC)
+        return datetime.now(UTC) - pulled < timedelta(seconds=ttl_seconds)
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
 async def _rebuild_daily_agenda(
     store: UserStore, events: list[CachedEvent], *, tz: ZoneInfo
 ) -> None:
@@ -240,13 +358,11 @@ async def _rebuild_daily_agenda(
         local = start.astimezone(tz)
         key = local.strftime("%Y-%m-%d")
         buckets.setdefault(key, []).append(e.event_id)
-    for date_key, ids in buckets.items():
-        await store.daily_agenda.upsert(
-            DailyAgenda(date=date_key, event_ids=sorted(ids))
-        )
-    existing = [d for d in await store.daily_agenda.list() if d.date not in buckets]
-    for d in existing:
-        await store.daily_agenda.delete(d.date)
+    await store.daily_agenda.upsert_many(
+        [DailyAgenda(date=date_key, event_ids=sorted(ids)) for date_key, ids in buckets.items()]
+    )
+    stale = [d.date for d in await store.daily_agenda.list() if d.date not in buckets]
+    await store.daily_agenda.delete_many(stale)
 
 
 async def ensure_watch(store: UserStore, *, calendar_id: str = "primary") -> bool:

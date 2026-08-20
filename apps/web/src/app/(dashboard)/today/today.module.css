@@ -205,6 +205,29 @@
   font-weight: 550;
 }
 
+.resolve {
+  margin-left: auto;
+  min-height: 1.85rem;
+  padding: 0.15rem 0.6rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--line-strong);
+  background: transparent;
+  color: var(--mist);
+  font-size: 0.78rem;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+}
+
+.resolve:hover:not(:disabled) {
+  color: var(--signal-deep);
+  border-color: color-mix(in srgb, var(--signal) 40%, var(--line));
+  background: var(--signal-soft);
+}
+
+.resolve:disabled {
+  opacity: 0.45;
+}
+
 .personChip {
   display: inline-flex;
   align-items: baseline;

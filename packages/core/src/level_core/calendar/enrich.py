@@ -39,21 +39,22 @@ async def enrich_agenda(store: UserStore) -> EnrichResult:
 
     self_id = next((p.person_id for p in people if p.is_self), None)
 
-    people_matched = 0
+    people_updates: list[CachedEvent] = []
     for event in events:
         matches: list[str] = [p.person_id for p in people if person_matches(event, p)]
         if not matches and self_id:
             matches = [self_id]
         sorted_matches = sorted(set(matches))
         if sorted_matches != event.matched_person_ids:
-            await store.agenda.upsert(
+            people_updates.append(
                 event.model_copy(update={"matched_person_ids": sorted_matches})
             )
-            people_matched += 1
+    await store.agenda.upsert_many(people_updates)
+    people_matched = len(people_updates)
 
     events = await store.agenda.list()
 
-    reminders_matched = 0
+    reminder_updates: list[CachedEvent] = []
     for event in events:
         matched: list[str] = []
         for r in reminders:
@@ -61,10 +62,11 @@ async def enrich_agenda(store: UserStore) -> EnrichResult:
                 matched.append(r.reminder_id)
         matched.sort()
         if matched != event.matched_reminder_ids:
-            await store.agenda.upsert(
+            reminder_updates.append(
                 event.model_copy(update={"matched_reminder_ids": matched})
             )
-            reminders_matched += 1
+    await store.agenda.upsert_many(reminder_updates)
+    reminders_matched = len(reminder_updates)
 
     logger.info(
         "calendar.enrich.done",
@@ -102,7 +104,7 @@ async def _classify_unseen(store: UserStore, events: list[CachedEvent]) -> int:
         ai_available = False
         logger.warning("calendar.classify.ai_unavailable", error=str(exc)[:200])
 
-    total = 0
+    classified: list[CachedEvent] = []
     for e in unseen:
         new_type = ai_by_id.get(e.event_id)
         span = ai_span_by_id.get(e.event_id, "")
@@ -110,7 +112,7 @@ async def _classify_unseen(store: UserStore, events: list[CachedEvent]) -> int:
         if new_type and (not span or span in e.summary):
             resolved = new_type
         else:
-            resolved = _heuristic_activity(e.summary)
+            resolved = heuristic_activity(e.summary)
         # If the AI was reachable but chose not to classify this event, accept
         # OTHER as a floor. If the AI was unreachable, leave activity_type None
         # so the next enrich pass gets another chance.
@@ -118,7 +120,7 @@ async def _classify_unseen(store: UserStore, events: list[CachedEvent]) -> int:
             resolved = ActivityType.OTHER
         if resolved is None:
             continue
-        await store.agenda.upsert(
+        classified.append(
             e.model_copy(
                 update={
                     "activity_type": resolved,
@@ -126,8 +128,8 @@ async def _classify_unseen(store: UserStore, events: list[CachedEvent]) -> int:
                 }
             )
         )
-        total += 1
-    return total
+    await store.agenda.upsert_many(classified)
+    return len(classified)
 
 
 async def reclassify_all(store: UserStore) -> int:
@@ -136,15 +138,14 @@ async def reclassify_all(store: UserStore) -> int:
     Useful after tweaking heuristics or connecting a smarter classifier.
     """
     events = await store.agenda.list()
-    reset = 0
-    for e in events:
-        if e.activity_type is not None:
-            await store.agenda.upsert(
-                e.model_copy(update={"activity_type": None, "classified_at": None})
-            )
-            reset += 1
+    reset_rows = [
+        e.model_copy(update={"activity_type": None, "classified_at": None})
+        for e in events
+        if e.activity_type is not None
+    ]
+    await store.agenda.upsert_many(reset_rows)
     await enrich_agenda(store)
-    return reset
+    return len(reset_rows)
 
 
 # Tiny, deliberately-narrow floor of *unambiguous* signals.
@@ -159,16 +160,18 @@ async def reclassify_all(store: UserStore) -> int:
 OBVIOUS_SIGNALS: tuple[tuple[ActivityType, tuple[str, ...]], ...] = (
     (ActivityType.SPORTS_SOCCER, ("soccer",)),
     (ActivityType.SPORTS_BASKETBALL, ("basketball",)),
-    (ActivityType.SPORTS_SWIM, ("swim lesson", "swim practice", "swim meet")),
+    (ActivityType.SPORTS_SWIM, ("swim lesson", "swim practice", "swim meet", "swim")),
     (ActivityType.SCHOOL_PICKUP, ("pickup", "pick-up", "aftercare")),
     (ActivityType.SCHOOL_DROPOFF, ("dropoff", "drop-off", "(drop)")),
     (ActivityType.MEDICAL_THERAPY, ("therapy", "therapist")),
     (ActivityType.MEDICAL_APPT, ("dentist", "dental", "pediatric", "doctor visit", "dr appt", "appt")),
     (ActivityType.WORK, ("1:1", "standup", "all hands", "all-hands", "sprint review", "sprint planning")),
+    (ActivityType.COMMUTE, ("commute",)),
+    (ActivityType.PERSONAL, ("grocery", "meal prep", "laundry")),
 )
 
 
-def _heuristic_activity(summary: str) -> ActivityType | None:
+def heuristic_activity(summary: str) -> ActivityType | None:
     """Instant, high-precision floor for unambiguous titles.
 
     Returns None on anything else so the AI classifier can do the real work
@@ -177,11 +180,17 @@ def _heuristic_activity(summary: str) -> ActivityType | None:
     """
     if not summary:
         return None
-    lower = summary.lower()
+    lower = summary.lower().strip()
+    if lower == "work" or lower.startswith("work "):
+        return ActivityType.WORK
     for activity, phrases in OBVIOUS_SIGNALS:
         if any(phrase in lower for phrase in phrases):
             return activity
     return None
+
+
+def _heuristic_activity(summary: str) -> ActivityType | None:
+    return heuristic_activity(summary)
 
 
 def _reminder_matches(reminder: Reminder, event: CachedEvent) -> bool:

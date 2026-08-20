@@ -14,6 +14,7 @@ from level_core.schemas import (
 from level_core.storage.care_store import (
     add_priority,
     add_reminder,
+    delete_reminder,
     propose_person,
     propose_usual,
     recent_negatives,
@@ -119,6 +120,39 @@ async def test_priorities_and_reminders_written(store) -> None:  # type: ignore[
         activity_type=ActivityType.SPORTS_SOCCER,
     )
     assert rem.match.activity_type == ActivityType.SPORTS_SOCCER
+
+
+@pytest.mark.asyncio
+async def test_delete_reminder_detaches_from_events(store) -> None:  # type: ignore[no-untyped-def]
+    from datetime import UTC, datetime, timedelta
+
+    from level_core.schemas import CachedEvent, EventTime
+
+    rem = await add_reminder(
+        store,
+        text="Bring soccer shoes",
+        person_id="p_x",
+        activity_type=ActivityType.SPORTS_SOCCER,
+    )
+    now = datetime.now(UTC)
+    await store.agenda.upsert(
+        CachedEvent(
+            event_id="e_soccer",
+            calendar_id="primary",
+            summary="Theo soccer",
+            time=EventTime(start=now, end=now + timedelta(hours=1), tz="UTC"),
+            activity_type=ActivityType.SPORTS_SOCCER,
+            matched_reminder_ids=[rem.reminder_id, "rem_keep"],
+        )
+    )
+    assert await delete_reminder(store, rem.reminder_id) is True
+    assert await store.reminders.get(rem.reminder_id) is None
+    event = await store.agenda.get("e_soccer")
+    assert event is not None
+    assert rem.reminder_id not in event.matched_reminder_ids
+    assert event.matched_reminder_ids == ["rem_keep"]
+    negs = await recent_negatives(store, agent=NegativeAgent.REMINDER, limit=5)
+    assert any(n.value == "Bring soccer shoes" for n in negs)
 
 
 @pytest.mark.asyncio

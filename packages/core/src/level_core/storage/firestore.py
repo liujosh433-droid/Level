@@ -82,8 +82,45 @@ class FirestoreRepo(Generic[T]):
         doc.set(payload)
         return self._model.model_validate(payload)
 
+    async def upsert_many(self, items: list[T]) -> None:
+        if not items:
+            return
+        batch = self._client.batch()
+        pending = 0
+        now = datetime.utcnow().isoformat()
+        for item in items:
+            id_ = getattr(item, self._id_field)
+            doc = self._col().document(id_)
+            payload = item.model_dump(mode="json")
+            payload["version"] = int(payload.get("version") or 1) + 1
+            if "updated_at" in payload:
+                payload["updated_at"] = now
+            batch.set(doc, payload)
+            pending += 1
+            if pending >= 400:
+                batch.commit()
+                batch = self._client.batch()
+                pending = 0
+        if pending:
+            batch.commit()
+
     async def delete(self, id_: str) -> None:
         self._col().document(id_).delete()
+
+    async def delete_many(self, ids: list[str]) -> None:
+        if not ids:
+            return
+        batch = self._client.batch()
+        pending = 0
+        for id_ in ids:
+            batch.delete(self._col().document(id_))
+            pending += 1
+            if pending >= 400:
+                batch.commit()
+                batch = self._client.batch()
+                pending = 0
+        if pending:
+            batch.commit()
 
 
 class FirestoreKV(KVStore):

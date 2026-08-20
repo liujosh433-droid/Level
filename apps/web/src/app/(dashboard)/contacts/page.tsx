@@ -46,6 +46,16 @@ function toDraftRows(existing: Contact[]): DraftRow[] {
   }));
 }
 
+const RELATION_LABEL: Record<string, string> = {
+  self: "you",
+  child: "kid",
+  elder: "elder",
+  coparent: "co-parent",
+  partner: "partner",
+  friend: "friend",
+  other: "other",
+};
+
 const PERSON_GROUPS: {
   key: string;
   title: string;
@@ -56,6 +66,7 @@ const PERSON_GROUPS: {
   { key: "self", title: "You", relations: [], isSelf: true },
   { key: "child", title: "Kids", relations: ["child"], addLabel: "Add a child" },
   { key: "elder", title: "Elder care", relations: ["elder"], addLabel: "Add someone in elder care" },
+  { key: "coparent", title: "Co-parent", relations: ["coparent"], addLabel: "Add a co-parent" },
   { key: "partner", title: "Partner", relations: ["partner"], addLabel: "Add partner" },
   { key: "other", title: "Others", relations: ["friend", "other"] },
 ];
@@ -222,7 +233,9 @@ export default function ContactsPage() {
                   <div className={styles.personHead}>
                     <div>
                       <p className={styles.personName}>{person.display_name}</p>
-                      <p className={styles.personRel}>{group.isSelf ? "you" : person.relation}</p>
+                      <p className={styles.personRel}>
+                        {group.isSelf ? "you" : RELATION_LABEL[person.relation] ?? person.relation}
+                      </p>
                     </div>
                     <div className={styles.personActions}>
                       {savedIndicator[person.person_id] ? (

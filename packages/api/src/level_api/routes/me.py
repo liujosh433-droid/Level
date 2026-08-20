@@ -4,26 +4,84 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, HTTPException, Response
 from level_core.auth.sessions import SESSION_COOKIE_NAME
 from level_core.auth.tokens import clear_tokens
+from level_core.schemas import CareRelation
 from level_core.storage.base import UserStore
+from level_core.storage.care_store import propose_person, set_person_status
+from pydantic import BaseModel, Field
 
 from level_api.deps import get_current_user_id, get_user_store
 
 router = APIRouter()
 
+_GENERIC_SELF = {"you", "me", "self", "myself", "a parent"}
 
-@router.get("")
-async def whoami(store: UserStore = Depends(get_user_store)) -> dict[str, Any]:
+
+class MePatch(BaseModel):
+    display_name: str = Field(min_length=1, max_length=80)
+
+
+async def _self_person(store: UserStore):
+    for person in await store.people.list():
+        if person.is_self and (person.status or "") != "not_me":
+            return person
+    return None
+
+
+async def _whoami_payload(store: UserStore) -> dict[str, Any]:
     profile = await store.profile.read() or {}
     tokens_present = bool((await store.tokens.read() or {}).get("access_token"))
+    self_p = await _self_person(store)
+    name = ""
+    if self_p:
+        name = (self_p.display_name or "").strip()
+        if name.lower() in _GENERIC_SELF:
+            name = ""
+    if not name:
+        name = str(profile.get("display_name") or "").strip()
     return {
         "user_id": store.user_id,
         "email": profile.get("email"),
+        "display_name": name or None,
         "google_connected": tokens_present,
         "tz": profile.get("tz"),
     }
+
+
+@router.get("")
+async def whoami(store: UserStore = Depends(get_user_store)) -> dict[str, Any]:
+    return await _whoami_payload(store)
+
+
+@router.patch("")
+async def patch_me(body: MePatch, store: UserStore = Depends(get_user_store)) -> dict[str, Any]:
+    name = body.display_name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name_required")
+    profile = dict(await store.profile.read() or {})
+    profile["display_name"] = name
+    await store.profile.write(profile)
+
+    self_p = await _self_person(store)
+    if self_p:
+        await store.people.upsert(
+            self_p.model_copy(update={"display_name": name, "status": "kept"})
+        )
+    else:
+        created = await propose_person(
+            store,
+            display_name=name,
+            relation=CareRelation.SELF,
+            is_self=True,
+        )
+        await set_person_status(store, created.person_id, "kept")
+        if created.display_name.strip() != name:
+            await store.people.upsert(
+                created.model_copy(update={"display_name": name, "is_self": True, "status": "kept"})
+            )
+    return await _whoami_payload(store)
 
 
 @router.get("/export")

@@ -68,7 +68,7 @@ export default function RemindersPanel({ onChange }: { onChange?: () => void }) 
               onClick={() => dismiss(r.reminder_id)}
               disabled={busyId === r.reminder_id}
               aria-label={`Dismiss ${r.text}`}
-              title="Dismiss - Level will stop suggesting this"
+              title="Remove this reminder"
             >
               ×
             </button>

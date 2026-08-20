@@ -112,6 +112,15 @@ function clock(iso: string): string {
   }
 }
 
+function resolvedMissingLabel(raw: unknown): string {
+  if (!raw || typeof raw !== "object") return "—";
+  const o = raw as Record<string, unknown>;
+  const ids = Array.isArray(o.group_ids) ? o.group_ids : [];
+  if (!ids.length) return "—";
+  const week = typeof o.week_start === "string" ? o.week_start : "";
+  return week ? `${ids.length} · ${week}` : String(ids.length);
+}
+
 function emailPendingLabel(profile: Record<string, unknown>): string {
   const draft = profile.pending_email_draft;
   if (draft && typeof draft === "object") {
@@ -255,6 +264,7 @@ export default function DataInspector() {
             <Row k="email" v={String(snap.profile.email ?? "—")} />
             <Row k="tz" v={String(snap.profile.tz ?? "—")} />
             <Row k="dismissed week" v={String(snap.profile.dismissed_missing_week ?? "—")} />
+            <Row k="resolved missing" v={resolvedMissingLabel(snap.profile.resolved_missing_week)} />
             <Row k="pending book" v={pendingLabel(snap.profile.pending_booking) ?? "—"} />
             <Row k="pending find" v={pendingLabel(snap.profile.pending_find) ?? "—"} />
             <Row k="pending email" v={emailPendingLabel(snap.profile)} />

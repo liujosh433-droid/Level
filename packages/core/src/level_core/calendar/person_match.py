@@ -61,19 +61,28 @@ def person_matches(event: CachedEvent, person: CarePerson) -> bool:
     return False
 
 
-def resolve_person_id(event: CachedEvent, people: list[CarePerson]) -> str | None:
-    """Pick a person for this event.
+def resolve_person_ids(event: CachedEvent, people: list[CarePerson]) -> list[str]:
+    """Every care person this event is about.
 
-    Order: (1) any cached match already on the event, (2) word-boundary
-    match on display_name or long-enough alias, (3) the self person if
-    one exists. Returns None only when no self is set.
+    A title like "Nova + Theo dropoff" must yield both kids, not whichever
+    `matched_person_ids` happened to sort first. Falls back to self only
+    when nobody is named (Work, commute, grocery).
     """
+    known = {p.person_id for p in people}
     if event.matched_person_ids:
-        return event.matched_person_ids[0]
-    for p in people:
-        if person_matches(event, p):
-            return p.person_id
+        ids = [pid for pid in event.matched_person_ids if pid in known]
+        if ids:
+            return list(dict.fromkeys(ids))
+    matched = [p.person_id for p in people if person_matches(event, p)]
+    if matched:
+        return list(dict.fromkeys(matched))
     for p in people:
         if p.is_self:
-            return p.person_id
-    return None
+            return [p.person_id]
+    return []
+
+
+def resolve_person_id(event: CachedEvent, people: list[CarePerson]) -> str | None:
+    """Pick a primary person for this event. See `resolve_person_ids`."""
+    ids = resolve_person_ids(event, people)
+    return ids[0] if ids else None

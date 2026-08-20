@@ -6,6 +6,7 @@ that always apply: assign IDs, resolve aliases, mark status transitions.
 
 from __future__ import annotations
 
+import re
 import uuid
 
 from level_core.schemas import (
@@ -111,6 +112,121 @@ async def propose_person(
     return await store.people.upsert(person)
 
 
+_NAME = r"(?P<name>[A-Za-z][A-Za-z'.\-]+(?:\s+[A-Za-z][A-Za-z'.\-]+){0,2})"
+_INTRO_PATTERNS = (
+    re.compile(rf"^{_NAME}\s+is my\s+(?P<rest>.+?)\.?$", re.I | re.DOTALL),
+    re.compile(
+        rf"\badd(?:ing)?\s+(?:a\s+new\s+(?:role|person),?\s*)?{_NAME}\s+as\s+(?P<rest>.+)",
+        re.I,
+    ),
+    re.compile(rf"{_NAME}\s+as\s+(?:an?\s+|my\s+)?(?P<rest>co[-\s]?parents?\b.*)", re.I),
+)
+
+
+def relation_from_phrase(phrase: str) -> CareRelation | None:
+    """Map 'occasional co-parent helper' / 'kid, not my dad' onto CareRelation."""
+    positive = re.split(r"\bnot\b", phrase, maxsplit=1, flags=re.I)[0]
+    lower = positive.lower()
+    if re.search(r"\bco[-\s]?parent", lower):
+        return CareRelation.COPARENT
+    if re.search(r"\b(?:husband|wife|spouse|partner|boyfriend|girlfriend)\b", lower):
+        return CareRelation.PARTNER
+    if re.search(r"\b(?:kids?|child|son|daughter)\b", lower):
+        return CareRelation.CHILD
+    if re.search(
+        r"\b(?:dad|mom|father|mother|grandma|grandpa|grandmother|grandfather|elder|parents?)\b",
+        lower,
+    ):
+        return CareRelation.ELDER
+    if re.search(r"\b(?:me|myself)\b", lower):
+        return CareRelation.SELF
+    if re.search(
+        r"\b(?:nephew|niece|friend|helper|nanny|babysitter|colleague|coworker)\b",
+        lower,
+    ):
+        return CareRelation.OTHER
+    return None
+
+
+def parse_person_intro(message: str) -> tuple[str, CareRelation] | None:
+    """Pull (name, relation) from 'Alex is my co-parent' / 'add Alex as co-parent'."""
+    text = " ".join(message.strip().split())
+    if not text:
+        return None
+    for pattern in _INTRO_PATTERNS:
+        match = pattern.search(text)
+        if not match:
+            continue
+        name = match.group("name").strip()
+        relation = relation_from_phrase(match.group("rest") or "")
+        if name and relation:
+            return name, relation
+    return None
+
+
+def relation_label(relation: CareRelation) -> str:
+    return {
+        CareRelation.SELF: "you",
+        CareRelation.CHILD: "kid",
+        CareRelation.ELDER: "elder",
+        CareRelation.COPARENT: "co-parent",
+        CareRelation.PARTNER: "partner",
+        CareRelation.OTHER: "other",
+    }[relation]
+
+
+async def upsert_kept_person(
+    store: UserStore,
+    *,
+    display_name: str,
+    relation: CareRelation,
+    is_self: bool = False,
+    source_span: str | None = None,
+) -> CarePerson:
+    person = await propose_person(
+        store,
+        display_name=display_name,
+        relation=relation,
+        is_self=is_self or relation == CareRelation.SELF,
+        source_span=source_span,
+    )
+    return await store.people.upsert(
+        person.model_copy(
+            update={
+                "display_name": display_name.strip(),
+                "relation": relation,
+                "care_role_id": role_for_relation(relation),
+                "is_self": is_self or relation == CareRelation.SELF,
+                "status": "kept",
+            }
+        )
+    )
+
+
+async def ensure_self_person(store: UserStore) -> CarePerson:
+    """Work/commute/lunch have no name in the title. Usuals hang those on self."""
+    existing = [
+        p for p in await store.people.list() if p.is_self and (p.status or "") != "not_me"
+    ]
+    if existing:
+        return existing[0]
+    profile = await store.profile.read() or {}
+    name = str(profile.get("display_name") or "").strip()
+    if not name or name.lower() in {"you", "me", "self", "myself", "a parent"}:
+        name = "You"
+    person = await propose_person(
+        store,
+        display_name=name,
+        relation=CareRelation.SELF,
+        is_self=True,
+        source_span="self",
+    )
+    if person.status == "proposed":
+        updated = await set_person_status(store, person.person_id, "kept")
+        return updated or person
+    return person
+
+
 async def set_person_status(store: UserStore, person_id: str, status: str) -> CarePerson | None:
     person = await store.people.get(person_id)
     if not person:
@@ -212,6 +328,32 @@ async def add_reminder(
         source_span=source_span,
     )
     return await store.reminders.upsert(reminder)
+
+
+async def delete_reminder(store: UserStore, reminder_id: str) -> bool:
+    """Remove a reminder and detach it from every cached event."""
+    existing = await store.reminders.get(reminder_id)
+    if not existing:
+        return False
+    await record_negative(
+        store,
+        agent=NegativeAgent.REMINDER,
+        field="text",
+        value=existing.text,
+    )
+    events = await store.agenda.list()
+    stripped = [
+        e.model_copy(
+            update={
+                "matched_reminder_ids": [rid for rid in e.matched_reminder_ids if rid != reminder_id]
+            }
+        )
+        for e in events
+        if reminder_id in e.matched_reminder_ids
+    ]
+    await store.agenda.upsert_many(stripped)
+    await store.reminders.delete(reminder_id)
+    return True
 
 
 async def record_negative(

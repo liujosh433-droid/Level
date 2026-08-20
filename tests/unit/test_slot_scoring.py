@@ -108,6 +108,7 @@ def test_find_time_window_from_when_not_what() -> None:
     assert plan_label_from_message("find a time this week") == ""
     assert plan_label_from_message("find lunch this week") == "lunch"
     assert plan_label_from_message("when can I grab coffee this week") == "coffee"
+    assert plan_label_from_message("lets book a lunch event next Wednesday 2-3pm") == "lunch event"
     from level_core.schedule.slots import calendar_title_from_label
 
     assert calendar_title_from_label("lunch with a friend") == "Lunch"

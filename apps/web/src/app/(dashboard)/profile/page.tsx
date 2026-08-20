@@ -305,13 +305,13 @@ export default function ProfilePage() {
 
         </div>
 
-        <aside className={styles.rail} aria-label="Correct Level">
+        <aside className={styles.rail} aria-label="Tell Level">
           <Chat
-            title="Correct Level"
+            title="Tell Level"
             lead={
-              "Tell me anything I got wrong \u2014 rename a person, add a priority (\u201cnever miss elder therapy\u201d), or drop a usual I invented."
+              "Add someone new (\u201cAlex is my co-parent\u201d), correct a role, save a priority, or drop a usual I invented."
             }
-            placeholder="&ldquo;Sam is my nephew, not my child.&rdquo;"
+            placeholder="&ldquo;Alex is my co-parent&rdquo;"
             onAfterReply={() => void load()}
           />
 

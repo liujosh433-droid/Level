@@ -1,6 +1,7 @@
 """PersonEditAgent: turn a free-text correction into a structured edit.
 
 Handles messages like:
+  - "Alex is my co-parent" / "add Alex as co-parent"  (add)
   - "Robert is my kid, not my dad"        (change_relation)
   - "call her Nova, not Nova Ann"         (rename)
   - "Sam is me"                            (mark_self)
@@ -19,8 +20,8 @@ from level_core.storage.base import UserStore
 
 
 class PersonEdit(BaseModel):
-    action: Literal["change_relation", "rename", "mark_self", "remove", "unknown"]
-    target_name: str = Field(..., description="Name Level should match against")
+    action: Literal["add", "change_relation", "rename", "mark_self", "remove", "unknown"]
+    target_name: str = Field(..., description="Name Level should match against or add")
     new_relation: CareRelation | None = None
     new_display_name: str | None = None
     source_span: str = Field(..., description="Exact substring of user message")
@@ -30,16 +31,19 @@ class PersonEditResponse(BaseModel):
     edit: PersonEdit | None = None
 
 
-SYSTEM = """You turn a caregiver's correction into ONE structured edit on their people list.
+SYSTEM = """You turn a caregiver's message into ONE structured edit on their people list.
 
 Given the user's message and their current people (name, relation), decide:
-- change_relation: they said someone belongs in a different bucket (child/elder/coparent/partner/self/other)
-- rename: they gave a new preferred name for someone
+- add: they INTRODUCED someone new ("Alex is my co-parent", "add Maya as my kid")
+- change_relation: they said an EXISTING person belongs in a different bucket (child/elder/coparent/partner/self/other)
+- rename: they gave a new preferred name for someone already on the list
 - mark_self: they said someone IS them
 - remove: they said that person shouldn't be in the list at all
 - unknown: message isn't a person edit (return null edit)
 
-`target_name` MUST match a name or alias in <people> (case-insensitive).
+For `add`, `target_name` is the new person's name and `new_relation` is required.
+It does NOT need to already appear in <people>.
+For other actions, `target_name` should match a name or alias in <people> (case-insensitive).
 `source_span` MUST be an exact substring of the user_input.
 Return exactly one edit or none."""
 

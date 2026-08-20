@@ -58,6 +58,7 @@ async def store_snapshot(store: UserStore = Depends(get_user_store)) -> dict[str
             "email": profile.get("email"),
             "tz": profile.get("tz"),
             "dismissed_missing_week": profile.get("dismissed_missing_week"),
+            "resolved_missing_week": profile.get("resolved_missing_week"),
             "pending_booking": profile.get("pending_booking"),
             "pending_find": profile.get("pending_find"),
             "pending_email_pick": profile.get("pending_email_pick"),

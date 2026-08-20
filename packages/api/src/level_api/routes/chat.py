@@ -33,10 +33,12 @@ from level_core.schedule.slots import (
     calendar_title_from_label,
     infer_event_kind,
     parse_duration_minutes,
+    plan_label_from_message,
     recommend_slots,
 )
 from level_core.schemas import (
     ActivityType,
+    CachedEvent,
     ChatMessage,
     ChatRole,
     ChatRouterIntent,
@@ -44,15 +46,19 @@ from level_core.schemas import (
     NegativeAgent,
 )
 from level_core.schemas.usual import hour_to_band
-from level_core.schemas.care import role_for_relation
+from level_core.schemas.care import CareRelation, role_for_relation
 from level_core.storage.base import UserStore
 from level_core.storage.care_store import (
     add_priority,
     add_reminder,
     find_person_by_name,
     new_id,
+    parse_person_intro,
     record_negative,
+    relation_from_phrase,
+    relation_label,
     set_person_status,
+    upsert_kept_person,
 )
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
@@ -171,6 +177,10 @@ async def _dispatch_message(
     fast_prio = await _try_fast_priority(store, message)
     if fast_prio is not None:
         return fast_prio
+
+    fast_person = await _try_fast_person(store, message)
+    if fast_person is not None:
+        return fast_person
 
     # Fast path: "email Nova's teacher…" resolves contacts without Gemini.
     fast_email = await _try_fast_email(store, message, history)
@@ -307,6 +317,40 @@ async def _try_fast_priority(
     }
 
 
+async def _try_fast_person(store: UserStore, message: str) -> dict[str, Any] | None:
+    """Add or correct a person without Gemini: 'Alex is my co-parent'."""
+    parsed = parse_person_intro(message)
+    if parsed is None:
+        return None
+    name, relation = parsed
+    return await _remember_person(store, name=name, relation=relation, source_span=message[:200])
+
+
+async def _remember_person(
+    store: UserStore, *, name: str, relation: Any, source_span: str | None
+) -> dict[str, Any]:
+    existing = await find_person_by_name(store, name)
+    person = await upsert_kept_person(
+        store,
+        display_name=name if existing is None else existing.display_name,
+        relation=relation,
+        is_self=relation == CareRelation.SELF,
+        source_span=source_span,
+    )
+    label = relation_label(person.relation)
+    if existing is None:
+        reply = f"Got it \u2014 I\u2019ll remember {person.display_name} as your {label}."
+    elif existing.relation != person.relation:
+        reply = (
+            f"Updated {person.display_name}: "
+            f"{relation_label(existing.relation)} \u2192 {label}."
+        )
+    else:
+        reply = f"{person.display_name} is already on your list as your {label}."
+    await _write_reply(store, reply)
+    return {"reply": reply, "path": "profile", "intent": "person_update", "person_id": person.person_id}
+
+
 async def _extract_reminder(
     store: UserStore, message: str, decision: Any, history: list[dict[str, str]]
 ) -> dict[str, Any]:
@@ -346,14 +390,40 @@ async def _person_update(
     result = await person_edit_run(store=store, message=message, history=history)
     edit = result.value.edit if (result.value and result.value.edit) else None  # type: ignore[union-attr]
     if edit is None or edit.action == "unknown":
+        parsed = parse_person_intro(message)
+        if parsed is not None:
+            name, relation = parsed
+            return await _remember_person(
+                store, name=name, relation=relation, source_span=message[:200]
+            )
         return _ack_no_agent(
-            store, "Tell me the name and what to change (\u201cRobert is my kid, not my dad\u201d)."
+            store,
+            "Tell me who they are \u2014 \u201cAlex is my co-parent\u201d or \u201cRobert is my kid, not my dad\u201d.",
         )
 
     target = await find_person_by_name(store, edit.target_name)
     if target is None:
+        relation = edit.new_relation
+        if relation is None and edit.action in {"add", "change_relation"}:
+            relation = relation_from_phrase(message)
+        if relation is not None:
+            return await _remember_person(
+                store,
+                name=edit.target_name,
+                relation=relation,
+                source_span=edit.source_span,
+            )
         return _ack_no_agent(
-            store, f"I don't have anyone called {edit.target_name!r} yet. Add them and try again."
+            store,
+            f"I don\u2019t have {edit.target_name} yet. Try \u201c{edit.target_name} is my co-parent\u201d (or kid, elder, partner).",
+        )
+
+    if edit.action == "add" and edit.new_relation is not None:
+        return await _remember_person(
+            store,
+            name=target.display_name,
+            relation=edit.new_relation,
+            source_span=edit.source_span,
         )
 
     if edit.action == "change_relation" and edit.new_relation is not None:
@@ -1059,6 +1129,7 @@ async def _fast_create(store: UserStore, message: str) -> dict[str, Any]:
     pending_find = await _read_pending_find(store)
     title = (
         _title_from_message(message)
+        or _title_from_plan_label(message)
         or (pending_find.title if pending_find else None)
         or await _title_from_usual_category(store, target.weekday(), start_t.hour)
         or "Time block"
@@ -1213,6 +1284,11 @@ async def _fast_move(store: UserStore, message: str) -> dict[str, Any]:
 _TITLE_KEYWORDS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\bdrop[\s-]?off\b", re.IGNORECASE), "Dropoff"),
     (re.compile(r"\bpick[\s-]?up\b", re.IGNORECASE), "Pickup"),
+    (re.compile(r"\blunch\b", re.IGNORECASE), "Lunch"),
+    (re.compile(r"\bdinner\b", re.IGNORECASE), "Dinner"),
+    (re.compile(r"\bbrunch\b", re.IGNORECASE), "Brunch"),
+    (re.compile(r"\bbreakfast\b", re.IGNORECASE), "Breakfast"),
+    (re.compile(r"\bcoffee\b", re.IGNORECASE), "Coffee"),
     (re.compile(r"\bschool\b", re.IGNORECASE), "School"),
     (re.compile(r"\btherapy\b", re.IGNORECASE), "Therapy"),
     (re.compile(r"\b(?:dentist|doctor|medical|appointment|appt)\b", re.IGNORECASE), "Medical"),
@@ -1237,6 +1313,18 @@ def _title_from_message(message: str) -> str | None:
         if m and (best is None or m.start() < best[0]):
             best = (m.start(), label)
     return best[1] if best else None
+
+
+def _title_from_plan_label(message: str) -> str | None:
+    """Title from 'book a lunch event next Wednesday' when no keyword hit."""
+    label = plan_label_from_message(message)
+    if not label:
+        return None
+    title = calendar_title_from_label(label)
+    title = re.sub(r"\s+events?\s*$", "", title, flags=re.I).strip()
+    if len(title) < 2:
+        return None
+    return title
 
 
 async def _title_from_usual_category(
@@ -1639,6 +1727,11 @@ class _PendingBooking(BaseModel):
 _TITLE_TO_ACTIVITY: dict[str, ActivityType] = {
     "Dropoff": ActivityType.SCHOOL_DROPOFF,
     "Pickup": ActivityType.SCHOOL_PICKUP,
+    "Lunch": ActivityType.PERSONAL,
+    "Dinner": ActivityType.PERSONAL,
+    "Brunch": ActivityType.PERSONAL,
+    "Breakfast": ActivityType.PERSONAL,
+    "Coffee": ActivityType.PERSONAL,
     "School": ActivityType.SCHOOL_EVENT,
     "Therapy": ActivityType.MEDICAL_THERAPY,
     "Medical": ActivityType.MEDICAL_APPT,
@@ -1671,17 +1764,17 @@ async def _propose_cal_change(
     or stash a pending change and ask the user to confirm.
     """
     ignore_ids = {event_id} if event_id else set()
-    if action == "delete":
-        conflicts: list[str] = []
-    else:
-        conflicts = await _find_conflicts(
+    overlapping: list[CachedEvent] = []
+    if action != "delete":
+        overlapping = await _overlapping_events(
             store, start_dt, end_dt, ignore_event_ids=ignore_ids
         )
+    conflicts = _conflict_labels(overlapping, start_dt.tzinfo)
     priority_notes = await _find_priority_notes(
         store,
         message=message,
         title=title,
-        conflict_labels=conflicts,
+        overlapping=overlapping,
         activity=activity,
     )
 
@@ -1857,6 +1950,32 @@ async def _handle_pending_confirmation(
     return None
 
 
+async def _overlapping_events(
+    store: UserStore,
+    start_dt: datetime,
+    end_dt: datetime,
+    *,
+    ignore_event_ids: set[str] | None = None,
+) -> list[CachedEvent]:
+    skip = ignore_event_ids or set()
+    out: list[CachedEvent] = []
+    for e in await store.agenda.list():
+        if e.time.all_day or e.event_id in skip:
+            continue
+        if e.time.start < end_dt and e.time.end > start_dt:
+            out.append(e)
+    return out
+
+
+def _conflict_labels(events: list[CachedEvent], tzinfo: Any) -> list[str]:
+    labels: list[str] = []
+    for e in events:
+        local_start = e.time.start.astimezone(tzinfo)
+        local_end = e.time.end.astimezone(tzinfo)
+        labels.append(f"{e.summary} ({_fmt_local(local_start)}\u2013{_fmt_local(local_end)})")
+    return labels
+
+
 async def _find_conflicts(
     store: UserStore,
     start_dt: datetime,
@@ -1864,24 +1983,11 @@ async def _find_conflicts(
     *,
     ignore_event_ids: set[str] | None = None,
 ) -> list[str]:
-    """Return short human labels for cached events that overlap [start,end).
-
-    Skips all-day events (they're informational, not blocking). Level-created
-    events count as overlaps — moving onto a slot we booked still collides.
-    Pass `ignore_event_ids` so a move does not conflict with itself.
-    Cached events only — no Google roundtrip.
-    """
-    skip = ignore_event_ids or set()
-    conflicts: list[str] = []
-    for e in await store.agenda.list():
-        if e.time.all_day or e.event_id in skip:
-            continue
-        if e.time.start < end_dt and e.time.end > start_dt:
-            local_start = e.time.start.astimezone(start_dt.tzinfo)
-            local_end = e.time.end.astimezone(start_dt.tzinfo)
-            label = f"{e.summary} ({_fmt_local(local_start)}\u2013{_fmt_local(local_end)})"
-            conflicts.append(label)
-    return conflicts
+    """Return short human labels for cached events that overlap [start,end)."""
+    overlapping = await _overlapping_events(
+        store, start_dt, end_dt, ignore_event_ids=ignore_event_ids
+    )
+    return _conflict_labels(overlapping, start_dt.tzinfo)
 
 
 _STOPWORDS = frozenset(
@@ -1917,32 +2023,93 @@ def _keywords(text: str) -> set[str]:
     return {t for t in tokens if len(t) >= 3 and t not in _STOPWORDS}
 
 
+_CARE_RELATIONS = frozenset(
+    {
+        CareRelation.CHILD,
+        CareRelation.ELDER,
+        CareRelation.COPARENT,
+        CareRelation.PARTNER,
+    }
+)
+
+_KINSHIP_RELATIONS: dict[str, frozenset[CareRelation]] = {
+    "mom": frozenset({CareRelation.ELDER}),
+    "mother": frozenset({CareRelation.ELDER}),
+    "mama": frozenset({CareRelation.ELDER}),
+    "mum": frozenset({CareRelation.ELDER}),
+    "dad": frozenset({CareRelation.ELDER}),
+    "daddy": frozenset({CareRelation.ELDER}),
+    "father": frozenset({CareRelation.ELDER}),
+    "papa": frozenset({CareRelation.ELDER}),
+    "parent": frozenset({CareRelation.ELDER}),
+    "parents": frozenset({CareRelation.ELDER}),
+    "grandma": frozenset({CareRelation.ELDER}),
+    "grandpa": frozenset({CareRelation.ELDER}),
+    "grandmother": frozenset({CareRelation.ELDER}),
+    "grandfather": frozenset({CareRelation.ELDER}),
+    "nana": frozenset({CareRelation.ELDER}),
+    "kid": frozenset({CareRelation.CHILD}),
+    "kids": frozenset({CareRelation.CHILD}),
+    "child": frozenset({CareRelation.CHILD}),
+    "children": frozenset({CareRelation.CHILD}),
+    "son": frozenset({CareRelation.CHILD}),
+    "daughter": frozenset({CareRelation.CHILD}),
+    "coparent": frozenset({CareRelation.COPARENT}),
+    "partner": frozenset({CareRelation.PARTNER}),
+}
+
+
+def _kinship_relations_in(text: str) -> set[CareRelation]:
+    words = set(re.findall(r"[a-z]+", text.lower()))
+    out: set[CareRelation] = set()
+    for word, rels in _KINSHIP_RELATIONS.items():
+        if word in words:
+            out |= set(rels)
+    return out
+
+
 async def _find_priority_notes(
     store: UserStore,
     *,
     message: str,
     title: str,
-    conflict_labels: list[str],
+    overlapping: list[CachedEvent],
     activity: ActivityType | None = None,
 ) -> list[str]:
     """Return priority notes only when this change actually touches one.
 
     Related if:
       (a) the event being written shares an activity_type with the priority, OR
-      (b) a known person is named in both the priority and the event title, OR
-      (c) the priority shares a content word with the event TITLE or with an
-          overlapping calendar event (the real "you might miss PT" case).
-
-    The user message is not used for keyword overlap — it is full of day
-    and time words ("Sunday 12pm") that are not the topic.
+      (b) a known person is named in both the priority and the event/overlap, OR
+      (c) the priority names mom/kid/... and an overlapping event is about
+          that relation (Helen follow-up vs "never miss time with my mom"), OR
+      (d) a FAMILY priority overlaps a care-person event, OR
+      (e) the priority shares a content word with the title or overlap.
     """
     activity = activity or _TITLE_TO_ACTIVITY.get(title)
     topic_words = _keywords(title)
-    for label in conflict_labels:
-        topic_words |= _keywords(label)
+    for event in overlapping:
+        topic_words |= _keywords(event.summary or "")
+    conflict_text = " ".join(e.summary or "" for e in overlapping)
+
+    people = await store.people.list()
+    people_by_id = {p.person_id: p for p in people}
+    conflict_people = []
+    seen_pids: set[str] = set()
+    for event in overlapping:
+        for pid in event.matched_person_ids:
+            person = people_by_id.get(pid)
+            if person and pid not in seen_pids:
+                seen_pids.add(pid)
+                conflict_people.append(person)
+        hay = (event.summary or "").lower()
+        for person in people:
+            name = person.display_name.strip().lower()
+            if len(name) >= 2 and name in hay and person.person_id not in seen_pids:
+                seen_pids.add(person.person_id)
+                conflict_people.append(person)
 
     notes: list[str] = []
-    people = await store.people.list()
     for p in await store.priorities.list():
         if p.status != "kept":
             continue
@@ -1951,10 +2118,10 @@ async def _find_priority_notes(
             continue
 
         prio_words = _keywords(p.text)
+        haystack = f"{message} {title} {conflict_text}".lower()
+        prio_l = p.text.lower()
 
         person_match = False
-        haystack = f"{message} {title} {' '.join(conflict_labels)}".lower()
-        prio_l = p.text.lower()
         for person in people:
             for name in [person.display_name, *(person.aliases or [])]:
                 n = name.strip().lower()
@@ -1964,8 +2131,13 @@ async def _find_priority_notes(
             if person_match:
                 break
 
+        kinship = _kinship_relations_in(p.text)
+        kinship_hit = any(person.relation in kinship for person in conflict_people)
+        family_hit = ActivityType.FAMILY in p.activity_types and any(
+            person.relation in _CARE_RELATIONS for person in conflict_people
+        )
         overlap = prio_words & topic_words
-        if person_match or overlap:
+        if person_match or kinship_hit or family_hit or overlap:
             notes.append(p.text)
     return notes
 

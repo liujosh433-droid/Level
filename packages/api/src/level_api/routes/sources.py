@@ -30,6 +30,8 @@ async def status(store: UserStore = Depends(get_user_store)) -> dict[str, Any]:
         "google_connected": bool(tokens.get("access_token")),
         "email": tokens.get("email"),
         "calendar_id": sync.get("calendar_id"),
+        "calendars": sync.get("calendars") or [],
+        "last_error": sync.get("last_error"),
         "last_pull_at": sync.get("last_pull_at"),
         "days_back": profile.get("calendar_window_days_back"),
         "days_forward": profile.get("calendar_window_days_forward"),

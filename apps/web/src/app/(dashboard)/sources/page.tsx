@@ -78,9 +78,16 @@ export default function SourcesPage() {
             <div>
               <strong>Google is connected</strong>
               <div className={styles.meta}>
-                {status.email} · calendar {status.calendar_id ?? "primary"} · last pull{" "}
+                {status.email}
+                {status.calendars && status.calendars.length > 0
+                  ? ` · ${status.calendars.map((c) => c.summary || c.id).join(", ")}`
+                  : ` · calendar ${status.calendar_id ?? "primary"}`}
+                {" · last pull "}
                 {status.last_pull_at ? new Date(status.last_pull_at).toLocaleString() : "never"}
               </div>
+              {status.last_error ? (
+                <div className={styles.meta}>Last sync error: {status.last_error}</div>
+              ) : null}
             </div>
             <div className={styles.actions}>
               <button className="button-ghost" onClick={sync} disabled={busy}>

@@ -36,6 +36,9 @@ If `<context>` has `prior_turns`, use them to resolve short follow-ups:
 - If a prior turn set a topic (priority, reminder, person edit) and the
   current message adds a detail, keep the same path/intent.
 
+person_update covers BOTH corrections and introductions:
+  "Robert is my kid, not my dad", "Alex is my co-parent", "add Maya as my kid".
+
 Return JSON matching the schema. `source_span` MUST be an exact substring of the user_input."""
 
 

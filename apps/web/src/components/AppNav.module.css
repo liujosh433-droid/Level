@@ -45,6 +45,13 @@
   color: var(--nav-signal);
 }
 
+.headerEnd {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  margin-left: auto;
+}
+
 .desktopNav {
   display: none;
   gap: 0.35rem;

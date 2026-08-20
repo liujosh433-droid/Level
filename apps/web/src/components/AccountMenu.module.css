@@ -1,0 +1,128 @@
+.wrap {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.35rem;
+  height: 2.35rem;
+  border-radius: 999px;
+  border: 1px solid rgba(61, 184, 160, 0.45);
+  background: rgba(61, 184, 160, 0.18);
+  color: #f2f7f8;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.avatar:hover,
+.avatar[aria-expanded="true"] {
+  background: rgba(61, 184, 160, 0.32);
+  border-color: #3db8a0;
+}
+
+.menu {
+  position: absolute;
+  top: calc(100% + 0.45rem);
+  right: 0;
+  z-index: 30;
+  width: min(18.5rem, calc(100vw - 2rem));
+  padding: 0.85rem 0.9rem 0.7rem;
+  border-radius: var(--radius-lg);
+  border: 1px solid rgba(197, 213, 219, 0.16);
+  background: #12242e;
+  color: #f2f7f8;
+  box-shadow: 0 12px 32px rgba(12, 22, 28, 0.35);
+}
+
+.email {
+  margin: 0 0 0.7rem;
+  font-size: 0.78rem;
+  color: #b7c9d0;
+  word-break: break-all;
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  margin-bottom: 0.55rem;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.28rem;
+  font-size: 0.7rem;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #b7c9d0;
+}
+
+.field input {
+  width: 100%;
+  min-height: 2.4rem;
+  padding: 0.45rem 0.65rem;
+  border-radius: var(--radius);
+  border: 1px solid rgba(197, 213, 219, 0.22);
+  background: rgba(12, 22, 28, 0.55);
+  color: #f2f7f8;
+  font-size: 0.95rem;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.save {
+  min-height: 2.3rem;
+  border-radius: var(--radius);
+  background: #3db8a0;
+  color: #0c161c;
+  font-weight: 700;
+  font-size: 0.88rem;
+}
+
+.save:hover:not(:disabled) {
+  background: #2a8f7c;
+  color: #f2f7f8;
+}
+
+.save:disabled {
+  opacity: 0.45;
+}
+
+.status {
+  margin: 0 0 0.45rem;
+  font-size: 0.8rem;
+  color: #3db8a0;
+}
+
+.item,
+.logout {
+  display: block;
+  width: 100%;
+  text-align: left;
+  min-height: 2.35rem;
+  padding: 0.4rem 0.45rem;
+  border-radius: var(--radius);
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: #f2f7f8;
+}
+
+.item:hover {
+  background: rgba(61, 184, 160, 0.14);
+}
+
+.logout {
+  color: #e0a35a;
+  margin-top: 0.15rem;
+}
+
+.logout:hover {
+  background: rgba(224, 163, 90, 0.12);
+}

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 
-from fastapi import APIRouter, Cookie, HTTPException, Query, Response
+from fastapi import APIRouter, BackgroundTasks, Cookie, HTTPException, Query, Response
 from fastapi.responses import RedirectResponse
 from level_core.auth.google_oauth import build_auth_url, exchange_code
 from level_core.auth.sessions import (
@@ -17,7 +17,9 @@ from level_core.auth.sessions import (
 from level_core.auth.tokens import save_tokens
 from level_core.config import get_settings
 from level_core.schemas import UserSession
+from level_core.storage.care_store import ensure_self_person
 from level_core.storage.factory import get_store
+from level_api.routes.today import refresh_and_enrich_safe
 
 router = APIRouter()
 
@@ -40,6 +42,7 @@ async def google_start(response: Response) -> RedirectResponse:
 
 @router.get("/google/callback")
 async def google_callback(
+    background: BackgroundTasks,
     code: str = Query(...),
     state: str = Query(...),
     level_oauth_state: str | None = Cookie(default=None, alias=STATE_COOKIE_NAME),
@@ -75,7 +78,10 @@ async def google_callback(
         }
     )
 
+    await ensure_self_person(store)
+
     session = UserSession(user_id=user_id, email=email)
+    background.add_task(refresh_and_enrich_safe, store)
     redirect = RedirectResponse(url=settings.level_web_app_url, status_code=307)
     redirect.set_cookie(
         key=SESSION_COOKIE_NAME,

@@ -42,7 +42,9 @@ async def get_daily_summary(store: UserStore) -> str:
     missing_lines = [f"{m.usual.display_summary} ({m.expected_hour_band.value})" for m in missing]
 
     reminder_lines: list[str] = []
-    reminders_by_id = {r.reminder_id: r for r in await store.reminders.list()}
+    reminders_by_id = {
+        r.reminder_id: r for r in await store.reminders.list() if r.status == "active"
+    }
     for e in todays:
         for rid in e.matched_reminder_ids:
             r = reminders_by_id.get(rid)

@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import AccountMenu from "./AccountMenu";
 import styles from "./AppNav.module.css";
 
 const TABS = [
@@ -26,22 +27,25 @@ export default function AppNav() {
           <Link href="/today" className={styles.brand}>
             Level
           </Link>
-          <nav className={styles.desktopNav} aria-label="Main">
-            {TABS.map((tab) => {
-              const active = pathMatches(pathname, tab.href);
-              return (
-                <Link
-                  key={tab.href}
-                  href={tab.href}
-                  prefetch
-                  className={active ? styles.active : undefined}
-                  aria-current={active ? "page" : undefined}
-                >
-                  {tab.label}
-                </Link>
-              );
-            })}
-          </nav>
+          <div className={styles.headerEnd}>
+            <nav className={styles.desktopNav} aria-label="Main">
+              {TABS.map((tab) => {
+                const active = pathMatches(pathname, tab.href);
+                return (
+                  <Link
+                    key={tab.href}
+                    href={tab.href}
+                    prefetch
+                    className={active ? styles.active : undefined}
+                    aria-current={active ? "page" : undefined}
+                  >
+                    {tab.label}
+                  </Link>
+                );
+              })}
+            </nav>
+            <AccountMenu />
+          </div>
         </div>
       </header>
 

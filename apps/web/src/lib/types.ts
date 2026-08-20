@@ -1,6 +1,7 @@
 export type WhoAmI = {
   user_id: string;
   email: string | null;
+  display_name?: string | null;
   google_connected: boolean;
   tz: string | null;
 };
@@ -75,6 +76,12 @@ export type WeekLoadRow = {
   percent: number;
 };
 
+export type MissingUsualPerson = {
+  person_id: string;
+  display_name: string | null;
+  relation: string | null;
+};
+
 export type MissingUsualWeek = {
   group_id: string;
   weekday: number;
@@ -84,8 +91,17 @@ export type MissingUsualWeek = {
   person_id: string;
   person_name: string | null;
   person_relation: string | null;
+  people?: MissingUsualPerson[];
   typical_start: string | null;
   typical_end: string | null;
+};
+
+export type CalendarSyncInfo = {
+  calendars: { id: string; summary?: string | null; primary?: boolean }[];
+  last_error?: string | null;
+  last_pull_at?: string | null;
+  total_cached: number;
+  pulling?: boolean;
 };
 
 export type TodayResponse = {
@@ -101,12 +117,15 @@ export type TodayResponse = {
   missing_usuals_week: MissingUsualWeek[];
   missing_usuals_week_dismissed?: boolean;
   week_load: WeekLoadRow[];
+  sync?: CalendarSyncInfo;
 };
 
 export type SourcesStatus = {
   google_connected: boolean;
   email: string | null;
   calendar_id: string | null;
+  calendars?: { id: string; summary?: string | null; primary?: boolean }[];
+  last_error?: string | null;
   last_pull_at: string | null;
   days_back: number | null;
   days_forward: number | null;

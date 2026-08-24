@@ -106,6 +106,7 @@ export type CalendarSyncInfo = {
 
 export type TodayResponse = {
   date: string;
+  tz?: string;
   today: TodayEvent[];
   tomorrow: TodayEvent[];
   missing_usuals: {

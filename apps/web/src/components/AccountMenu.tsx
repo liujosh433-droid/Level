@@ -3,6 +3,7 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
+import { browserTimeZone } from "@/lib/dates";
 import type { WhoAmI } from "@/lib/types";
 import styles from "./AccountMenu.module.css";
 
@@ -49,6 +50,10 @@ export default function AccountMenu() {
         setWho(me);
         const shown = prettyName(me);
         setName(shown === "You" ? "" : shown);
+        const tz = browserTimeZone();
+        if (me.tz !== tz) {
+          void api.patch<WhoAmI>("/v1/me", { tz }).then((next) => setWho(next)).catch(() => undefined);
+        }
       })
       .catch(() => setWho(null));
   }, []);

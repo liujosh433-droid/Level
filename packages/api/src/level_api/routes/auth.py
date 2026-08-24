@@ -68,15 +68,18 @@ async def google_callback(
             "email": email,
         },
     )
-    await store.profile.write(
+    profile = dict(await store.profile.read() or {})
+    profile.update(
         {
             "user_id": user_id,
             "email": email,
-            "tz": settings.calendar_tz,
             "calendar_window_days_back": settings.level_cal_days_back,
             "calendar_window_days_forward": settings.level_cal_days_forward,
         }
     )
+    if not profile.get("tz"):
+        profile["tz"] = settings.calendar_tz
+    await store.profile.write(profile)
 
     await ensure_self_person(store)
 

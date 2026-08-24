@@ -10,7 +10,8 @@ from level_core.auth.tokens import clear_tokens
 from level_core.schemas import CareRelation
 from level_core.storage.base import UserStore
 from level_core.storage.care_store import propose_person, set_person_status
-from pydantic import BaseModel, Field
+from level_core.tz import resolve_tz_name
+from pydantic import BaseModel, Field, model_validator
 
 from level_api.deps import get_current_user_id, get_user_store
 
@@ -20,7 +21,14 @@ _GENERIC_SELF = {"you", "me", "self", "myself", "a parent"}
 
 
 class MePatch(BaseModel):
-    display_name: str = Field(min_length=1, max_length=80)
+    display_name: str | None = Field(default=None, min_length=1, max_length=80)
+    tz: str | None = Field(default=None, min_length=1, max_length=80)
+
+    @model_validator(mode="after")
+    def _at_least_one(self) -> MePatch:
+        if not self.display_name and not self.tz:
+            raise ValueError("nothing_to_update")
+        return self
 
 
 async def _self_person(store: UserStore):
@@ -57,10 +65,18 @@ async def whoami(store: UserStore = Depends(get_user_store)) -> dict[str, Any]:
 
 @router.patch("")
 async def patch_me(body: MePatch, store: UserStore = Depends(get_user_store)) -> dict[str, Any]:
-    name = body.display_name.strip()
-    if not name:
-        raise HTTPException(status_code=400, detail="name_required")
     profile = dict(await store.profile.read() or {})
+    if body.tz:
+        resolved = resolve_tz_name(body.tz)
+        if resolved != body.tz.strip():
+            raise HTTPException(status_code=400, detail="invalid_tz")
+        profile["tz"] = resolved
+    name = (body.display_name or "").strip()
+    if not name:
+        if body.tz:
+            await store.profile.write(profile)
+            return await _whoami_payload(store)
+        raise HTTPException(status_code=400, detail="name_required")
     profile["display_name"] = name
     await store.profile.write(profile)
 

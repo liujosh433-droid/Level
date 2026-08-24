@@ -8,7 +8,7 @@ from statistics import median
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, BackgroundTasks, Depends
+from fastapi import APIRouter, BackgroundTasks, Depends, Query
 from pydantic import BaseModel, Field
 from level_core.calendar.enrich import enrich_agenda
 from level_core.calendar.sync import agenda_is_fresh, refresh_agenda
@@ -21,6 +21,7 @@ from level_core.config import get_settings
 from level_core.observability import get_logger
 from level_core.schemas import ActivityType, CachedEvent, LoadBucket
 from level_core.storage.base import UserStore
+from level_core.tz import resolve_tz
 from level_core.voice.summary import get_daily_summary
 
 from level_api.deps import get_user_store
@@ -69,9 +70,15 @@ def _event_local_date(event: CachedEvent, tz: ZoneInfo):
 async def get_today(
     background: BackgroundTasks,
     store: UserStore = Depends(get_user_store),
+    tz_name: str | None = Query(default=None, alias="tz", max_length=80),
 ) -> dict[str, Any]:
     settings = get_settings()
-    tz = ZoneInfo(settings.calendar_tz)
+    profile = await store.profile.read() or {}
+    tz = resolve_tz(tz_name, profile.get("tz") if isinstance(profile.get("tz"), str) else None)
+    if tz_name and tz.key == tz_name.strip() and profile.get("tz") != tz.key:
+        profile = dict(profile)
+        profile["tz"] = tz.key
+        await store.profile.write(profile)
 
     tokens = await store.tokens.read() or {}
     events = await store.agenda.list()
@@ -92,7 +99,7 @@ async def get_today(
     tomorrows = [e for e in events if _event_local_date(e, tz) == tomorrow]
 
     usuals = await store.usuals.list()
-    missing = missing_usuals_today(usuals=usuals, todays_events=todays)
+    missing = missing_usuals_today(usuals=usuals, todays_events=todays, tz=tz)
 
     reminders_by_id = {
         r.reminder_id: r for r in await store.reminders.list() if r.status == "active"
@@ -134,9 +141,9 @@ async def get_today(
         week_events=week,
         as_of_date=today,
         events_by_id=events_by_id,
+        tz=tz,
     )
 
-    profile = await store.profile.read() or {}
     week_start_iso = week_start.isoformat()
     dismissed_this_week = profile.get("dismissed_missing_week") == week_start_iso
     resolved_ids = _resolved_group_ids(profile, week_start_iso)
@@ -157,6 +164,7 @@ async def get_today(
     calendars = sync_meta.get("calendars") or []
     return {
         "date": today.isoformat(),
+        "tz": tz.key,
         "today": [_view(e) for e in todays],
         "tomorrow": [_view(e) for e in tomorrows],
         "missing_usuals": [
@@ -188,11 +196,10 @@ async def dismiss_missing_week(store: UserStore = Depends(get_user_store)) -> di
     The user is saying this week is intentionally different, not that the
     usuals are wrong forever. Next week the list comes back.
     """
-    settings = get_settings()
-    tz = ZoneInfo(settings.calendar_tz)
+    profile = await store.profile.read() or {}
+    tz = resolve_tz(profile.get("tz") if isinstance(profile.get("tz"), str) else None)
     today = datetime.now(tz).date()
     week_start, _week_end = current_week_bounds(today)
-    profile = await store.profile.read() or {}
     profile["dismissed_missing_week"] = week_start.isoformat()
     await store.profile.write(profile)
     return {"status": "dismissed", "week_start": week_start.isoformat()}
@@ -212,12 +219,11 @@ async def resolve_missing_group(
     The user handled this gap (coverage arranged, or they just don't need
     the nag). Other missing usuals this week stay. Next week it can return.
     """
-    settings = get_settings()
-    tz = ZoneInfo(settings.calendar_tz)
+    profile = await store.profile.read() or {}
+    tz = resolve_tz(profile.get("tz") if isinstance(profile.get("tz"), str) else None)
     today = datetime.now(tz).date()
     week_start, _week_end = current_week_bounds(today)
     week_start_iso = week_start.isoformat()
-    profile = await store.profile.read() or {}
     raw = profile.get("resolved_missing_week")
     if not isinstance(raw, dict) or raw.get("week_start") != week_start_iso:
         ids: list[str] = []

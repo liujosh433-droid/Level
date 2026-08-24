@@ -48,6 +48,7 @@ from level_core.schemas import (
 from level_core.schemas.usual import hour_to_band
 from level_core.schemas.care import CareRelation, role_for_relation
 from level_core.storage.base import UserStore
+from level_core.tz import tz_for_store
 from level_core.storage.care_store import (
     add_priority,
     add_reminder,
@@ -562,7 +563,7 @@ async def _book(
     datetime range, inserts into Google Calendar, and re-syncs the local
     agenda cache.
     """
-    tz = ZoneInfo(get_settings().calendar_tz)
+    tz = await tz_for_store(store)
     today_local = datetime.now(tz).date()
     result = await book_run(
         store=store,
@@ -811,7 +812,7 @@ async def _match_agenda_events(
     end_t: time | None,
     title_hint: str | None,
 ) -> list[Any]:
-    tz = ZoneInfo(get_settings().calendar_tz)
+    tz = await tz_for_store(store)
     matches: list[Any] = []
     for event in await store.agenda.list():
         if event.time.all_day:
@@ -862,7 +863,7 @@ async def _try_fast_calendar(
     if picked is not None:
         return picked
 
-    tz = ZoneInfo(get_settings().calendar_tz)
+    tz = await tz_for_store(store)
     today_local = datetime.now(tz).date()
     is_move = bool(_MOVE_LEAD.search(message))
     is_cancel = bool(_CANCEL_LEAD.search(message)) and not is_move
@@ -969,7 +970,7 @@ def _horizon_for_message(
 
 async def _fast_find_time(store: UserStore, message: str) -> dict[str, Any]:
     """Suggest open slots from the cached agenda. No LLM, no calendar write."""
-    tz = ZoneInfo(get_settings().calendar_tz)
+    tz = await tz_for_store(store)
     now_local = datetime.now(tz)
     kind = infer_event_kind(message)
     duration = parse_duration_minutes(message, kind.duration_minutes)
@@ -988,6 +989,7 @@ async def _fast_find_time(store: UserStore, message: str) -> dict[str, Any]:
         usuals=usuals,
         duration_minutes=duration,
         limit=4,
+        tz=tz,
     )
 
     if not picks and horizon_label == "this week":
@@ -1000,6 +1002,7 @@ async def _fast_find_time(store: UserStore, message: str) -> dict[str, Any]:
             usuals=usuals,
             duration_minutes=duration,
             limit=4,
+            tz=tz,
         )
         if picks:
             horizon_label = "the next few days"
@@ -1115,7 +1118,7 @@ async def _try_pick_offered_slot(
     if pending is None:
         return None
 
-    tz = ZoneInfo(get_settings().calendar_tz)
+    tz = await tz_for_store(store)
     today_local = datetime.now(tz).date()
     parsed = _parse_time_range(message)
     target = _resolve_target_date(message, today_local)
@@ -1179,7 +1182,7 @@ async def _try_pick_offered_slot(
 
 async def _fast_create(store: UserStore, message: str) -> dict[str, Any]:
     parsed = _parse_time_range(message)
-    tz = ZoneInfo(get_settings().calendar_tz)
+    tz = await tz_for_store(store)
     today_local = datetime.now(tz).date()
     target = _resolve_target_date(message, today_local)
     if parsed is None or target is None:
@@ -1222,7 +1225,7 @@ async def _fast_create(store: UserStore, message: str) -> dict[str, Any]:
 
 async def _fast_delete(store: UserStore, message: str) -> dict[str, Any]:
     parsed = _parse_time_range(message)
-    tz = ZoneInfo(get_settings().calendar_tz)
+    tz = await tz_for_store(store)
     today_local = datetime.now(tz).date()
     target = _resolve_target_date(message, today_local) or today_local
     title_hint = _title_from_message(message)
@@ -1266,7 +1269,7 @@ async def _fast_delete(store: UserStore, message: str) -> dict[str, Any]:
 
 
 async def _fast_move(store: UserStore, message: str) -> dict[str, Any]:
-    tz = ZoneInfo(get_settings().calendar_tz)
+    tz = await tz_for_store(store)
     today_local = datetime.now(tz).date()
     parts = re.split(r"\bto\b", message, maxsplit=1, flags=re.IGNORECASE)
     src_text = parts[0]

@@ -1,0 +1,14 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - packages/jobs/Dockerfile
+      - -t
+      - us-central1-docker.pkg.dev/project-c31bdcdc-f293-47c2-a4c/level/jobs:latest
+      - .
+images:
+  - us-central1-docker.pkg.dev/project-c31bdcdc-f293-47c2-a4c/level/jobs:latest
+timeout: 1800s
+options:
+  logging: CLOUD_LOGGING_ONLY

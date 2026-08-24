@@ -14,6 +14,7 @@ from level_core.agents.usual import run as usual_run
 from level_core.calendar.enrich import enrich_agenda
 from level_core.calendar.usuals import compute_usuals_from_events, rollup_for_role_agent
 from level_core.config import get_settings
+from level_core.tz import tz_for_store
 from level_core.schemas import (
     ActivityType,
     CachedEvent,
@@ -68,15 +69,15 @@ async def get_profile(store: UserStore = Depends(get_user_store)) -> dict[str, A
 
     people_by_id = {p.person_id: p for p in people_models}
     events_by_id = {e.event_id: e for e in events}
+    tz = await tz_for_store(store)
 
     people = [p.model_dump(mode="json") for p in people_models]
     priorities = [p.model_dump(mode="json") for p in priorities_models]
     usuals = [
-        _decorate_usual(u.model_dump(mode="json"), u.source_event_uids, u.person_id, events_by_id, people_by_id)
+        _decorate_usual(u.model_dump(mode="json"), u.source_event_uids, u.person_id, events_by_id, people_by_id, tz)
         for u in usuals_models
     ]
 
-    tz = ZoneInfo(settings.calendar_tz)
     now_local = datetime.now(tz)
     week_keys: set[tuple[int, int]] = set()
     past_events = 0
@@ -106,9 +107,9 @@ def _decorate_usual(
     person_id: str,
     events_by_id: dict[str, CachedEvent],
     people_by_id: dict[str, Any],
+    tz: ZoneInfo,
 ) -> dict[str, Any]:
     """Attach human-friendly typical start/end + person label to a usual."""
-    tz = ZoneInfo(get_settings().calendar_tz)
     starts: list[int] = []
     durations: list[int] = []
     for uid in source_event_uids:
@@ -158,7 +159,8 @@ async def refresh_profile(store: UserStore = Depends(get_user_store)) -> dict[st
     except Exception:
         pass
     events = await store.agenda.list()
-    rollup = rollup_for_role_agent(events)
+    tz = await tz_for_store(store)
+    rollup = rollup_for_role_agent(events, tz=tz)
     role_result = await role_run(store=store, calendar_rollup=rollup)
 
     people_added = 0
@@ -176,7 +178,7 @@ async def refresh_profile(store: UserStore = Depends(get_user_store)) -> dict[st
             people_added += 1
 
     people = await store.people.list()
-    candidates = compute_usuals_from_events(events, people)
+    candidates = compute_usuals_from_events(events, people, tz=tz)
 
     fresh_ids: set[str] = set()
     for c in candidates:

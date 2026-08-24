@@ -33,10 +33,15 @@ def _client() -> Any:
     from google.cloud import firestore
 
     settings = get_settings()
-    return firestore.Client(
-        project=settings.google_cloud_project or None,
-        database=settings.level_firestore_database,
-    )
+    kwargs: dict[str, Any] = {}
+    if settings.google_cloud_project:
+        kwargs["project"] = settings.google_cloud_project
+    # Passing database="(default)" makes some client versions send
+    # "%28default%29" and Firestore rejects it. Omit for the default DB.
+    db = (settings.level_firestore_database or "").strip()
+    if db and db not in {"(default)", "%28default%29"}:
+        kwargs["database"] = db
+    return firestore.Client(**kwargs)
 
 
 class FirestoreRepo(Generic[T]):

@@ -4,17 +4,15 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from level_core.agents.summary import run as summary_run
 from level_core.calendar.usuals import missing_usuals_today
-from level_core.config import get_settings
 from level_core.storage.base import UserStore
+from level_core.tz import tz_for_store
 
 
 async def get_daily_summary(store: UserStore) -> str:
-    settings = get_settings()
-    tz = ZoneInfo(settings.calendar_tz)
+    tz = await tz_for_store(store)
     today = datetime.now(tz).date().isoformat()
 
     cache = await store.calendar_sync.read() or {}
@@ -38,7 +36,7 @@ async def get_daily_summary(store: UserStore) -> str:
     ]
 
     usuals = await store.usuals.list()
-    missing = missing_usuals_today(usuals=usuals, todays_events=todays)
+    missing = missing_usuals_today(usuals=usuals, todays_events=todays, tz=tz)
     missing_lines = [f"{m.usual.display_summary} ({m.expected_hour_band.value})" for m in missing]
 
     reminder_lines: list[str] = []

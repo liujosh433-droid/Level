@@ -30,6 +30,7 @@ from level_core.config import get_settings
 from level_core.observability import get_logger, span
 from level_core.schemas import CachedEvent, DailyAgenda, EventTime
 from level_core.storage.base import UserStore
+from level_core.tz import tz_for_store
 
 logger = get_logger(__name__)
 
@@ -48,7 +49,7 @@ class RefreshResult:
 
 async def refresh_agenda(store: UserStore, *, calendar_id: str | None = None) -> RefreshResult:
     settings = get_settings()
-    tz = ZoneInfo(settings.calendar_tz)
+    tz = await tz_for_store(store)
     now = datetime.now(UTC)
     time_min, time_max = await _sync_window(store, settings=settings, now=now)
 

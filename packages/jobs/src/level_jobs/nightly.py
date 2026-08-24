@@ -20,6 +20,7 @@ from level_core.observability import get_logger
 from level_core.schemas import Usual
 from level_core.storage.care_store import propose_usual, sync_usuals
 from level_core.storage.factory import get_store
+from level_core.tz import tz_for_store
 
 logger = get_logger("nightly")
 
@@ -35,8 +36,9 @@ async def _process_user(user_id: str) -> None:
         await enrich_agenda(store)
     events = await store.agenda.list()
     people = await store.people.list()
+    tz = await tz_for_store(store)
     fresh_ids: set[str] = set()
-    for c in compute_usuals_from_events(events, people):
+    for c in compute_usuals_from_events(events, people, tz=tz):
         await propose_usual(
             store,
             person_id=c.person_id,

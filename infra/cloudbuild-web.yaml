@@ -1,0 +1,16 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - apps/web/Dockerfile
+      - --build-arg
+      - LEVEL_API_PROXY_TARGET=https://level-api-185318998255.us-central1.run.app
+      - -t
+      - us-central1-docker.pkg.dev/project-c31bdcdc-f293-47c2-a4c/level/web:latest
+      - .
+images:
+  - us-central1-docker.pkg.dev/project-c31bdcdc-f293-47c2-a4c/level/web:latest
+timeout: 1800s
+options:
+  logging: CLOUD_LOGGING_ONLY

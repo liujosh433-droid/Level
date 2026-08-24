@@ -56,7 +56,7 @@ export default function HomePage() {
           <h1 className={styles.headline}>Steady when everything else isn&apos;t.</h1>
           <p className={styles.sub}>
             For busy caregivers &mdash; a partner that helps you organize your care-roles, priorities, and reminds
-            you when usual events are missing. <br></br><br></br>Level can also send emails for you, like emailing kids' teachers when they need to take a sick day. Try it out now!
+            you when usual events are missing. <br></br><br></br>Level can also send emails for you, like emailing kids&apos; teachers when they need to take a sick day. Try it out now!
           </p>
           <div className={styles.cta}>
             <button type="button" className={styles.primary} onClick={start}>

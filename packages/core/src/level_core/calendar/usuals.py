@@ -14,7 +14,6 @@ from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from level_core.calendar.person_match import resolve_person_ids
-from level_core.config import get_settings
 from level_core.schemas import (
     ActivityType,
     CachedEvent,
@@ -26,6 +25,7 @@ from level_core.schemas import (
 )
 from level_core.schemas.activity import activity_category
 from level_core.schemas.usual import hour_to_band
+from level_core.tz import resolve_tz
 
 
 @dataclass(frozen=True)
@@ -47,7 +47,9 @@ class UsualCandidate:
 
 
 def compute_usuals_from_events(
-    events: Iterable[CachedEvent], people: list[CarePerson]
+    events: Iterable[CachedEvent],
+    people: list[CarePerson],
+    tz: ZoneInfo | None = None,
 ) -> list[UsualCandidate]:
     """Group past events into weekly-repeating "usuals".
 
@@ -58,8 +60,7 @@ def compute_usuals_from_events(
     Shared titles ("Nova + Theo dropoff") fan out to every matched person so
     each kid owns a usual, not just whoever sorted first on the event.
     """
-    settings = get_settings()
-    tz = ZoneInfo(settings.calendar_tz)
+    tz = tz or resolve_tz()
     now = datetime.now(tz)
 
     groups: dict[
@@ -121,10 +122,12 @@ class MissingUsual:
 
 
 def missing_usuals_today(
-    *, usuals: list[Usual], todays_events: list[CachedEvent]
+    *,
+    usuals: list[Usual],
+    todays_events: list[CachedEvent],
+    tz: ZoneInfo | None = None,
 ) -> list[MissingUsual]:
-    settings = get_settings()
-    tz = ZoneInfo(settings.calendar_tz)
+    tz = tz or resolve_tz()
     today = datetime.now(tz).date()
     today_wd = Weekday(today.weekday())
 
@@ -208,6 +211,7 @@ def missing_usuals_this_week(
     week_events: list[CachedEvent],
     as_of_date=None,
     events_by_id: dict[str, CachedEvent] | None = None,
+    tz: ZoneInfo | None = None,
 ) -> list[MissingCategoryGroup]:
     """Coarse missing-usuals view for the rest of this Mon-Sun week.
 
@@ -218,8 +222,7 @@ def missing_usuals_this_week(
     every named person, so a deleted "Nova + Theo dropoff" warns for both.
     Only today and later days this week are flagged.
     """
-    settings = get_settings()
-    tz = ZoneInfo(settings.calendar_tz)
+    tz = tz or resolve_tz()
     today = _as_local_date(as_of_date, tz)
     today_wd = today.weekday()
     week_start, week_end = current_week_bounds(today)
@@ -276,11 +279,10 @@ def missing_usuals_this_week(
 
 
 def rollup_for_role_agent(
-    events: Iterable[CachedEvent], *, top_n: int = 40
+    events: Iterable[CachedEvent], *, top_n: int = 40, tz: ZoneInfo | None = None
 ) -> list[dict[str, str | int]]:
     """Compressed rollup used by RoleAgent - no full bodies leave the API."""
-    settings = get_settings()
-    tz = ZoneInfo(settings.calendar_tz)
+    tz = tz or resolve_tz()
     counts: dict[
         tuple[Weekday, HourBand, str], int
     ] = defaultdict(int)

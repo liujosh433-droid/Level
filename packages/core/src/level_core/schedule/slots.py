@@ -12,7 +12,6 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from level_core.config import get_settings
 from level_core.schemas import (
     ActivityType,
     CachedEvent,
@@ -21,6 +20,7 @@ from level_core.schemas import (
     UsualStatus,
 )
 from level_core.schemas.usual import hour_to_band
+from level_core.tz import resolve_tz
 
 
 @dataclass
@@ -31,11 +31,11 @@ class CandidateSlot:
     conflicts: list[str] = field(default_factory=list)
     aligned_priorities: list[str] = field(default_factory=list)
     aligned_usuals: list[str] = field(default_factory=list)
+    tz_name: str = ""
 
     @property
     def local_label(self) -> str:
-        settings = get_settings()
-        tz = ZoneInfo(settings.calendar_tz)
+        tz = resolve_tz(self.tz_name or None)
         return self.start.astimezone(tz).strftime("%a %b %d, %-I:%M %p")
 
 
@@ -48,10 +48,10 @@ def find_candidate_slots(
     step_minutes: int = 30,
     day_start_hour: int = 8,
     day_end_hour: int = 21,
+    tz: ZoneInfo | None = None,
 ) -> list[CandidateSlot]:
     starts_at = starts_at or datetime.now(UTC)
-    settings = get_settings()
-    tz = ZoneInfo(settings.calendar_tz)
+    tz = tz or resolve_tz()
 
     busy = sorted(
         [
@@ -81,6 +81,7 @@ def find_candidate_slots(
                     end=utc_end,
                     score=0.0,
                     conflicts=conflicts,
+                    tz_name=tz.key,
                 )
             )
             slot_start += step
@@ -109,9 +110,9 @@ def score_slots(
     priorities: list[Priority],
     usuals: list[Usual],
     events_by_id: dict[str, CachedEvent],
+    tz: ZoneInfo | None = None,
 ) -> list[CandidateSlot]:
-    settings = get_settings()
-    tz = ZoneInfo(settings.calendar_tz)
+    tz = tz or resolve_tz()
     kept_usuals = [u for u in usuals if u.status == UsualStatus.KEPT]
 
     ranked: list[CandidateSlot] = []
@@ -311,6 +312,7 @@ def recommend_slots(
     usuals: list[Usual],
     duration_minutes: int | None = None,
     limit: int = 4,
+    tz: ZoneInfo | None = None,
 ) -> list[CandidateSlot]:
     """Free slots inside the kind's plausible hours, one best start per day.
 
@@ -320,8 +322,7 @@ def recommend_slots(
     """
     duration = duration_minutes or kind.duration_minutes
     timed = [e for e in events if not e.time.all_day]
-    settings = get_settings()
-    tz = ZoneInfo(settings.calendar_tz)
+    tz = tz or resolve_tz()
     seen: set[tuple[str, str]] = set()
     raw: list[CandidateSlot] = []
     for start_h, end_h in kind.windows:
@@ -334,6 +335,7 @@ def recommend_slots(
             starts_at=starts_at,
             day_start_hour=start_h,
             day_end_hour=end_h,
+            tz=tz,
         ):
             local = slot.start.astimezone(tz)
             if kind.weekdays_only and local.weekday() >= 5:
@@ -351,6 +353,7 @@ def recommend_slots(
         priorities=priorities,
         usuals=usuals,
         events_by_id=events_by_id,
+        tz=tz,
     )
     free = [s for s in ranked if not s.conflicts]
     if not free:

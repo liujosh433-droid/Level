@@ -6,6 +6,7 @@ import EventCard from "@/components/EventCard";
 import RemindersPanel from "@/components/RemindersPanel";
 import RoleLoadBar from "@/components/RoleLoadBar";
 import { api, ApiError } from "@/lib/api";
+import { browserTimeZone, formatDateOnly } from "@/lib/dates";
 import { buildPersonColorMap } from "@/lib/personColor";
 import type { CalendarSyncInfo, MissingUsualWeek, TodayResponse, WhoAmI } from "@/lib/types";
 import styles from "./today.module.css";
@@ -96,7 +97,11 @@ export default function TodayPage() {
         setData(null);
         return;
       }
-      const today = await api.get<TodayResponse>("/v1/today");
+      const tz = browserTimeZone();
+      if (me.tz !== tz) {
+        void api.patch<WhoAmI>("/v1/me", { tz }).then((next) => setWho(next)).catch(() => undefined);
+      }
+      const today = await api.get<TodayResponse>(`/v1/today?tz=${encodeURIComponent(tz)}`);
       setData(today);
       setNeedsConnect(false);
       setLoadError(null);
@@ -176,7 +181,7 @@ export default function TodayPage() {
   }
 
   const dateLabel = data
-    ? new Date(data.date).toLocaleDateString([], {
+    ? formatDateOnly(data.date, {
         weekday: "long",
         month: "short",
         day: "numeric",
@@ -187,9 +192,7 @@ export default function TodayPage() {
     savedName && !/^(you|me|self|myself|a parent)$/i.test(savedName)
       ? savedName
       : (who?.email?.split("@")[0] ?? "there");
-  const weekday = data
-    ? new Date(data.date).toLocaleDateString([], { weekday: "long" })
-    : null;
+  const weekday = data ? formatDateOnly(data.date, { weekday: "long" }) : null;
 
   const hasMissing = !dismissMissing && missingByDay.length > 0;
 

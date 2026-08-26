@@ -355,6 +355,83 @@
   padding: 1.5rem 0;
 }
 
+.onboardingCard {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  background: linear-gradient(180deg, rgba(45, 159, 138, 0.12), rgba(255, 255, 255, 0.55) 80%);
+  border-radius: var(--radius-lg);
+  padding: 1.25rem 1.15rem 1.35rem;
+  margin: 1.25rem 0;
+  animation: rise 0.4s ease-out both;
+}
+
+.onboardingCard h1 {
+  margin: 0;
+  font-size: 1.35rem;
+}
+
+.onboardingCard p {
+  margin: 0;
+  color: var(--mist);
+  line-height: 1.5;
+}
+
+.onboardingSteps {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.onboardingSteps li {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  color: var(--mist);
+  font-size: 0.95rem;
+}
+
+.onboardingSteps li.done {
+  color: var(--text);
+}
+
+.stepDot {
+  display: inline-block;
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  background: rgba(45, 159, 138, 0.35);
+  flex-shrink: 0;
+}
+
+.onboardingSteps li.done .stepDot {
+  background: var(--fern, #2d9f8a);
+}
+
+.stepDot.active {
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 0.35; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.25); }
+}
+
+.classifyingChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.75rem;
+  color: var(--mist);
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  background: rgba(45, 159, 138, 0.14);
+  margin-left: 0.4rem;
+}
+
 .chatBlock {
   display: flex;
   flex-direction: column;

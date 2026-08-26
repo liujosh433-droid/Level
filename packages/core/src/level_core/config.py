@@ -69,6 +69,12 @@ class Settings(BaseSettings):
 
     level_cal_days_back: int = Field(default=14, ge=1, le=365)
     level_cal_days_forward: int = Field(default=28, ge=1, le=365)
+    # Onboarding UX: on first Google connect we pull the calendar
+    # synchronously so the homepage renders with populated events
+    # instead of "Pulling your calendar...". If the pull exceeds this
+    # timeout, we fall back to background and the frontend polls.
+    # Enrichment (LLM classification) is always background.
+    level_oauth_refresh_timeout_s: float = Field(default=6.0, ge=1.0, le=30.0)
 
     level_daily_cost_cap_usd: float = 2.00
     level_user_rate_per_hour: int = 60

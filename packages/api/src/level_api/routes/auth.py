@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 
 from fastapi import APIRouter, BackgroundTasks, Cookie, HTTPException, Query, Response
@@ -15,13 +16,26 @@ from level_core.auth.sessions import (
     verify_state,
 )
 from level_core.auth.tokens import save_tokens
+from level_core.calendar.enrich import enrich_agenda
+from level_core.calendar.sync import refresh_agenda
 from level_core.config import get_settings
+from level_core.observability import get_logger
 from level_core.schemas import UserSession
+from level_core.storage.base import UserStore
 from level_core.storage.care_store import ensure_self_person
 from level_core.storage.factory import get_store
 from level_api.routes.today import refresh_and_enrich_safe
 
 router = APIRouter()
+logger = get_logger(__name__)
+
+
+async def _enrich_only(store: UserStore) -> None:
+    """Run classification after the OAuth response has been sent."""
+    try:
+        await enrich_agenda(store)
+    except Exception as exc:  # noqa: BLE001 - never let this break onboarding
+        logger.warning("oauth.background_enrich_failed", error=str(exc)[:300])
 
 
 @router.get("/google/start")
@@ -84,7 +98,44 @@ async def google_callback(
     await ensure_self_person(store)
 
     session = UserSession(user_id=user_id, email=email)
-    background.add_task(refresh_and_enrich_safe, store)
+
+    # First-connect UX: pull the calendar synchronously (with a strict
+    # timeout) so the homepage renders with events instead of an empty
+    # "Pulling..." state. LLM classification is always background - it's
+    # the slow leg. If the sync pull times out or errors, fall back to
+    # the classic background-both path; the frontend already handles the
+    # empty state with a 1200ms poll loop.
+    existing_events = await store.agenda.list()
+    sync_ok = False
+    if not existing_events:
+        try:
+            result = await asyncio.wait_for(
+                refresh_agenda(store),
+                timeout=settings.level_oauth_refresh_timeout_s,
+            )
+            sync_ok = True
+            logger.info(
+                "oauth.sync_refresh_ok",
+                added=result.added,
+                incremental_hits=result.incremental_hits,
+                full_pulls=result.full_pulls,
+            )
+        except TimeoutError:
+            logger.warning(
+                "oauth.sync_refresh_timeout",
+                timeout_s=settings.level_oauth_refresh_timeout_s,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("oauth.sync_refresh_failed", error=str(exc)[:300])
+
+    # Enrichment (LLM classification) always in background. If the sync
+    # refresh failed / timed out, run the classic full path in background
+    # so the frontend's poll loop still finds fresh data.
+    if sync_ok:
+        background.add_task(_enrich_only, store)
+    else:
+        background.add_task(refresh_and_enrich_safe, store)
+
     redirect = RedirectResponse(url=settings.level_web_app_url, status_code=307)
     redirect.set_cookie(
         key=SESSION_COOKIE_NAME,

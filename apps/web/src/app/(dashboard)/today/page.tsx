@@ -82,6 +82,38 @@ function EmptyCalendarHint({
   );
 }
 
+/**
+ * Onboarding progress card. Renders on first-connect while the OAuth
+ * callback's sync refresh + background enrich are still in flight.
+ * Communicates progress instead of a generic "Loading..." spinner - this
+ * is where new users spend their first few seconds with Level.
+ */
+function OnboardingProgress({ step }: { step: "connecting" | "pulling" }) {
+  const pullingActive = step === "pulling";
+  return (
+    <section className={styles.onboardingCard}>
+      <h1>Welcome to Level</h1>
+      <p>Level is getting set up. This usually takes about 5 seconds.</p>
+      <ul className={styles.onboardingSteps}>
+        <li className={styles.done}>
+          <span className={styles.stepDot} />
+          Connected to Google
+        </li>
+        <li className={pullingActive ? styles.done : ""}>
+          <span
+            className={`${styles.stepDot} ${!pullingActive ? styles.active : ""}`}
+          />
+          Pulling your calendar
+        </li>
+        <li>
+          <span className={`${styles.stepDot} ${pullingActive ? styles.active : ""}`} />
+          Recognizing your usual rhythm
+        </li>
+      </ul>
+    </section>
+  );
+}
+
 export default function TodayPage() {
   const [who, setWho] = useState<WhoAmI | null>(null);
   const [data, setData] = useState<TodayResponse | null>(null);
@@ -171,7 +203,18 @@ export default function TodayPage() {
   }, [data?.missing_usuals_week]);
 
   if (initialLoading && !data) {
-    return <p className={styles.meta}>Loading today&hellip;</p>;
+    return <OnboardingProgress step="connecting" />;
+  }
+  // Post-connect, pre-first-pull: agenda cache is empty but we know a
+  // background pull is in flight. Show the same rich progress card
+  // instead of the generic "Loading today..." fallback.
+  if (
+    data &&
+    (data.sync?.total_cached ?? 0) === 0 &&
+    !data.sync?.last_error &&
+    !needsConnect
+  ) {
+    return <OnboardingProgress step="pulling" />;
   }
   if (loadError && !data) {
     return (

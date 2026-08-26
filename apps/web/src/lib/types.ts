@@ -145,9 +145,19 @@ export type LearnedRow = {
   created_at: string;
 };
 
+export type MemoryRow = {
+  kind: "memory";
+  id: string;
+  text: string;
+  tags: string[];
+  created_at?: string | null;
+};
+
 export type LearnedResponse = {
   total: number;
-  recent: LearnedRow[];
+  memories_total?: number;
+  recent: (LearnedRow & { kind?: "negative" })[];
+  memories?: MemoryRow[];
 };
 
 export type SourcesStatus = {

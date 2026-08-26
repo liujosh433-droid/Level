@@ -108,7 +108,14 @@ everything else. That's what keeps the daily cost cap defensible.
 **Gemma is a great safety net.** When AI Studio's free tier 429s
 mid-demo (it will), Vertex 2.5 catches it. When Vertex 2.5 is also
 rate-limited (Model Garden hasn't been happy this week), I fall
-through to Gemma via Model Garden for the five extraction agents.
+through to Gemma via Model Garden for the extraction-shaped agents
+whose small strict schemas Gemma 3-4B handles fine (ChatRouter,
+ActivityAgent, PriorityAgent, ReminderAgent, UsualAgent — see
+`_GEMMA_ELIGIBLE` in `agents/base.py`). Generator agents that write
+prose (EmailAgent, SummaryAgent) and structured proposers whose
+schemas are too rich for Gemma's context (RoleAgent, BookAgent,
+PersonEditAgent) stay on the Gemini path — soft-degrading rather
+than emitting bad JSON.
 Same schema, slightly different prose, and the demo doesn't stop.
 The audit row's `fallback_used` field surfaces this in the trace
 waterfall live.

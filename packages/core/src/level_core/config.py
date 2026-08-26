@@ -72,9 +72,14 @@ class Settings(BaseSettings):
     # Onboarding UX: on first Google connect we pull the calendar
     # synchronously so the homepage renders with populated events
     # instead of "Pulling your calendar...". If the pull exceeds this
-    # timeout, we fall back to background and the frontend polls.
-    # Enrichment (LLM classification) is always background.
-    level_oauth_refresh_timeout_s: float = Field(default=6.0, ge=1.0, le=30.0)
+    # timeout, we fall back to background and the frontend polls every
+    # 1200ms. Enrichment (LLM classification) is always background.
+    #
+    # v2: dropped from 6.0s -> 3.0s. Typical calendars finish in
+    # <1s with syncToken, and calendars slow enough to exceed 3s were
+    # already going to feel slow in the foreground - background +
+    # OnboardingProgress card handles them gracefully.
+    level_oauth_refresh_timeout_s: float = Field(default=3.0, ge=1.0, le=30.0)
 
     level_daily_cost_cap_usd: float = 2.00
     level_user_rate_per_hour: int = 60
@@ -107,7 +112,23 @@ class Settings(BaseSettings):
         return self.level_env == "cloud"
 
 
+_INSECURE_SESSION_SECRET = "change-me-to-a-long-random-string"
+
+
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    """Cached Settings singleton. Reset with `get_settings.cache_clear()` in tests."""
-    return Settings()
+    """Cached Settings singleton. Reset with `get_settings.cache_clear()` in tests.
+
+    In cloud mode we refuse to boot with the default `LEVEL_SESSION_SECRET`.
+    That secret signs both session cookies (via `URLSafeSerializer`) and
+    the HMAC agent-identity token audit rows use for tamper detection;
+    leaving the default in a deployed environment would let anyone forge
+    both. Local dev keeps the default for zero-config startup.
+    """
+    settings = Settings()
+    if settings.is_cloud and settings.level_session_secret == _INSECURE_SESSION_SECRET:
+        raise RuntimeError(
+            "LEVEL_SESSION_SECRET is still the insecure default. "
+            "Set it to a long random string before deploying to cloud."
+        )
+    return settings

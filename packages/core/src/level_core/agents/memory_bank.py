@@ -57,47 +57,58 @@ async def remember(
     tags: list[str] | None = None,
     source: str = "chat",
 ) -> dict[str, Any] | None:
-    """Persist one memory. Dedupes on lowercased text; noop when duplicate."""
+    """Persist one memory. Dedupes on lowercased text; noop when duplicate.
+
+    Uses `profile.mutate()` so concurrent `record_charge()` gate counter
+    updates (also on `profile`) don't clobber each other.
+    """
     text = (text or "").strip()
     if not text or len(text) > MAX_MEMORY_TEXT:
         return None
     lower = text.lower()
     now = datetime.now(UTC).isoformat()
 
-    profile = dict(await store.profile.read() or {})
-    bank = profile.get(MEMORY_KEY) if isinstance(profile.get(MEMORY_KEY), dict) else {}
-    memories = list(bank.get("memories") or []) if isinstance(bank, dict) else []
+    memory_id = _new_id()
+    saved: dict[str, Any] | None = None
 
-    for existing in memories:
-        if isinstance(existing, dict) and str(existing.get("text", "")).lower() == lower:
-            existing["last_used_at"] = now
-            profile[MEMORY_KEY] = {"memories": memories}
-            await store.profile.write(profile)
-            return existing
+    def _apply(profile: dict[str, Any]) -> dict[str, Any]:
+        nonlocal saved
+        profile = dict(profile)
+        bank = profile.get(MEMORY_KEY) if isinstance(profile.get(MEMORY_KEY), dict) else {}
+        memories = list(bank.get("memories") or []) if isinstance(bank, dict) else []
 
-    memory = {
-        "id": _new_id(),
-        "text": text,
-        "tags": [t.strip().lower() for t in (tags or []) if t.strip()],
-        "created_at": now,
-        "last_used_at": now,
-        "source": source,
-    }
-    memories.append(memory)
+        for existing in memories:
+            if isinstance(existing, dict) and str(existing.get("text", "")).lower() == lower:
+                existing["last_used_at"] = now
+                profile[MEMORY_KEY] = {"memories": memories}
+                saved = existing
+                return profile
 
-    if len(memories) > MAX_MEMORIES:
-        memories.sort(key=lambda m: m.get("last_used_at", ""))
-        memories = memories[-MAX_MEMORIES:]
+        memory = {
+            "id": memory_id,
+            "text": text,
+            "tags": [t.strip().lower() for t in (tags or []) if t.strip()],
+            "created_at": now,
+            "last_used_at": now,
+            "source": source,
+        }
+        memories.append(memory)
+        if len(memories) > MAX_MEMORIES:
+            memories.sort(key=lambda m: m.get("last_used_at", ""))
+            memories = memories[-MAX_MEMORIES:]
+        profile[MEMORY_KEY] = {"memories": memories}
+        saved = memory
+        return profile
 
-    profile[MEMORY_KEY] = {"memories": memories}
-    await store.profile.write(profile)
-    logger.info(
-        "memory.remembered",
-        user=store.user_id,
-        memory_id=memory["id"],
-        source=source,
-    )
-    return memory
+    await store.profile.mutate(_apply)
+    if saved:
+        logger.info(
+            "memory.remembered",
+            user=store.user_id,
+            memory_id=saved.get("id"),
+            source=source,
+        )
+    return saved
 
 
 async def recall(
@@ -131,34 +142,45 @@ async def touch(store: UserStore, *, memory_ids: list[str]) -> None:
     """Bump `last_used_at` on the given memories. Best-effort, no error."""
     if not memory_ids:
         return
-    try:
-        profile = dict(await store.profile.read() or {})
+    now = datetime.now(UTC).isoformat()
+    ids = set(memory_ids)
+
+    def _apply(profile: dict[str, Any]) -> dict[str, Any]:
+        profile = dict(profile)
         bank = profile.get(MEMORY_KEY)
         if not isinstance(bank, dict):
-            return
+            return profile
         memories = [m for m in (bank.get("memories") or []) if isinstance(m, dict)]
-        now = datetime.now(UTC).isoformat()
-        ids = set(memory_ids)
         for m in memories:
             if m.get("id") in ids:
                 m["last_used_at"] = now
         profile[MEMORY_KEY] = {"memories": memories}
-        await store.profile.write(profile)
-    except Exception:  # noqa: BLE001
+        return profile
+
+    try:
+        await store.profile.mutate(_apply)
+    except Exception:  # noqa: BLE001 - touch is best-effort
         return
 
 
 async def forget(store: UserStore, *, memory_id: str) -> bool:
     """Remove one memory. Used when the caregiver explicitly retracts."""
-    profile = dict(await store.profile.read() or {})
-    bank = profile.get(MEMORY_KEY)
-    if not isinstance(bank, dict):
-        return False
-    memories = [
-        m for m in (bank.get("memories") or []) if isinstance(m, dict) and m.get("id") != memory_id
-    ]
-    if len(memories) == len(bank.get("memories") or []):
-        return False
-    profile[MEMORY_KEY] = {"memories": memories}
-    await store.profile.write(profile)
-    return True
+    removed = False
+
+    def _apply(profile: dict[str, Any]) -> dict[str, Any]:
+        nonlocal removed
+        profile = dict(profile)
+        bank = profile.get(MEMORY_KEY)
+        if not isinstance(bank, dict):
+            return profile
+        before = bank.get("memories") or []
+        memories = [
+            m for m in before if isinstance(m, dict) and m.get("id") != memory_id
+        ]
+        if len(memories) != len(before):
+            removed = True
+            profile[MEMORY_KEY] = {"memories": memories}
+        return profile
+
+    await store.profile.mutate(_apply)
+    return removed

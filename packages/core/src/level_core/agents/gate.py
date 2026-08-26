@@ -199,35 +199,49 @@ async def check_gate(
 async def record_charge(store: UserStore, charge: Charge) -> None:
     """Increment the counter for one accepted call.
 
-    O(1): read + increment + write of the counter doc. Under Firestore
-    this is a single RMW; we don't need a transaction because a per-user
-    counter has no cross-user contention. Under our local JSON backend
-    it's an atomic-per-process update.
-
-    Robust to loss: if the counter blows up mid-write, `check_gate`
-    bootstraps from ai_audit on the very next call.
+    O(1) and atomic: previously this was a blind read-modify-write on
+    `profile`, which under concurrent LLM traffic could lose increments
+    (both callers read counter=5, both write counter=6). We now route
+    through `profile.mutate()`, which wraps the RMW in a Firestore
+    transaction (cloud) or a per-process file lock (local). Robust to
+    loss: if the counter blows up mid-write, `check_gate` bootstraps
+    from ai_audit on the very next call.
     """
     now = datetime.now(UTC)
     try:
-        profile = await store.profile.read() or {}
-        counters = profile.get(GATE_COUNTER_KEY)
-        if not isinstance(counters, dict) or "day_bucket" not in counters:
-            counters = await _hydrate_from_audit(store, now)
-        counters = dict(counters)
-        if counters.get("hour_bucket") != _hour_bucket(now):
-            counters["hour_bucket"] = _hour_bucket(now)
-            counters["hour_calls"] = 0
-        if counters.get("day_bucket") != _day_bucket(now):
-            counters["day_bucket"] = _day_bucket(now)
-            counters["day_calls"] = 0
-            counters["day_cost_usd"] = 0.0
-        counters["hour_calls"] = int(counters.get("hour_calls", 0)) + 1
-        counters["day_calls"] = int(counters.get("day_calls", 0)) + 1
-        counters["day_cost_usd"] = float(counters.get("day_cost_usd", 0.0)) + float(
-            charge.cost_usd
-        )
-        counters["updated_at"] = now.isoformat()
-        profile[GATE_COUNTER_KEY] = counters
-        await store.profile.write(profile)
+        # Hydrate BEFORE the transaction (async ai_audit read can't run
+        # inside a Firestore sync transaction body). This does mean a
+        # freshly-upgraded user might hydrate twice under contention,
+        # which is fine - it's a one-time bootstrap.
+        existing_profile = await store.profile.read() or {}
+        existing_counters = existing_profile.get(GATE_COUNTER_KEY)
+        if not isinstance(existing_counters, dict) or "day_bucket" not in existing_counters:
+            hydrated: dict[str, Any] = await _hydrate_from_audit(store, now)
+        else:
+            hydrated = existing_counters
+
+        def _bump(profile: dict[str, Any]) -> dict[str, Any]:
+            profile = dict(profile)
+            counters = profile.get(GATE_COUNTER_KEY)
+            if not isinstance(counters, dict) or "day_bucket" not in counters:
+                counters = hydrated
+            counters = dict(counters)
+            if counters.get("hour_bucket") != _hour_bucket(now):
+                counters["hour_bucket"] = _hour_bucket(now)
+                counters["hour_calls"] = 0
+            if counters.get("day_bucket") != _day_bucket(now):
+                counters["day_bucket"] = _day_bucket(now)
+                counters["day_calls"] = 0
+                counters["day_cost_usd"] = 0.0
+            counters["hour_calls"] = int(counters.get("hour_calls", 0)) + 1
+            counters["day_calls"] = int(counters.get("day_calls", 0)) + 1
+            counters["day_cost_usd"] = float(counters.get("day_cost_usd", 0.0)) + float(
+                charge.cost_usd
+            )
+            counters["updated_at"] = now.isoformat()
+            profile[GATE_COUNTER_KEY] = counters
+            return profile
+
+        await store.profile.mutate(_bump)
     except Exception:  # noqa: BLE001 - counter must never break a call
         return None

@@ -56,8 +56,10 @@ The mermaid source is at [`docs/architecture.mmd`](docs/architecture.mmd).
   feedback, injected into generator prompts.
 - **Feedback chips** (keep / adjust / not-me) below every AI artifact
   in chat write to `/v1/feedback` and adapt the next agent call.
-- **Live SSE streaming** on `/v1/chat/stream`; the frontend renders
-  incremental tokens with a blinking caret.
+- **SSE-chunked replies** on `/v1/chat/stream`; the frontend renders
+  ~64-char chunks with a blinking caret. Same agent pipeline serves
+  the sync and SSE routes; streaming is a UI adapter, not a separate
+  model path.
 - **Trace waterfall** at `/admin/traces` grouped by `trace_id` with
   expandable JSON.
 - **Proactive nudges**: nightly job detects missing usuals and stashes

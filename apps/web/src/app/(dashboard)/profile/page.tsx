@@ -161,15 +161,24 @@ export default function ProfilePage() {
         usuals_added: number;
         usuals_removed: number;
         up_to_date?: boolean;
+        refresh_error?: string | null;
       }>("/v1/profile/refresh", {});
       await load();
-      if (result.up_to_date) {
+      if (result.refresh_error) {
+        setStatus(`Couldn't reach Google: ${result.refresh_error}`);
+      } else if (result.up_to_date) {
         setStatus("You're up to date.");
       } else {
         const parts: string[] = [];
         if (result.people_added) parts.push(`${result.people_added} new people`);
-        const usualsDelta = result.usuals_added - result.usuals_removed;
-        if (usualsDelta > 0) parts.push(`${usualsDelta} new usuals`);
+        const netUsuals = result.usuals_added - result.usuals_removed;
+        if (result.usuals_added) {
+          parts.push(
+            netUsuals !== result.usuals_added
+              ? `${result.usuals_added} new usuals (${result.usuals_removed} retired)`
+              : `${result.usuals_added} new usuals`,
+          );
+        }
         setStatus(parts.length ? `Found ${parts.join(", ")}.` : "Re-read your calendar.");
       }
     } catch (err) {

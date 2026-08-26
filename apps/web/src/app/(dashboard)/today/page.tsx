@@ -358,20 +358,29 @@ export default function TodayPage() {
             </section>
           )}
 
-          {learned && learned.total > 0 && (
+          {learned && (learned.total > 0 || (learned.memories && learned.memories.length > 0)) && (
             <section
               className={`${styles.block} ${styles.learned}`}
               aria-label="What Level learned"
             >
               <div className={styles.learnedHead}>
                 <h2>What Level learned</h2>
-                <span className={styles.learnedCount}>{learned.total} corrections applied</span>
+                <span className={styles.learnedCount}>
+                  {learned.total} corrections
+                  {learned.memories_total ? ` · ${learned.memories_total} memories` : ""}
+                </span>
               </div>
               <ul className={styles.learnedList}>
+                {(learned.memories ?? []).map((m) => (
+                  <li key={m.id} className={styles.learnedRow}>
+                    <span className={styles.learnedAgent}>remembered</span>
+                    <span className={styles.learnedValue}>&ldquo;{m.text}&rdquo;</span>
+                  </li>
+                ))}
                 {learned.recent.map((row) => (
                   <li key={row.negative_id} className={styles.learnedRow}>
                     <span className={styles.learnedAgent}>{row.agent}</span>
-                    <span className={styles.learnedValue}>“{row.value}”</span>
+                    <span className={styles.learnedValue}>&ldquo;{row.value}&rdquo;</span>
                     {row.reason ? (
                       <span className={styles.meta}>&mdash; {row.reason}</span>
                     ) : null}

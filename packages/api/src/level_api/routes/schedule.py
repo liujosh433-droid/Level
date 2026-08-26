@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import secrets
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException
@@ -18,7 +18,21 @@ from level_api.deps import get_user_store
 
 router = APIRouter()
 
+# In-process pending-booking table. Confirmation tokens expire after
+# PENDING_BOOKING_TTL to bound memory and to prevent a token issued
+# hours ago from being redeemed against stale slot data.
 _pending_bookings: dict[str, dict[str, Any]] = {}
+PENDING_BOOKING_TTL = timedelta(minutes=10)
+
+
+def _prune_pending(now: datetime) -> None:
+    """Drop expired tokens. O(N) but N is per-process, capped by TTL."""
+    expired = [
+        t for t, p in _pending_bookings.items()
+        if isinstance(p, dict) and (p.get("_expires_at") or now) < now
+    ]
+    for t in expired:
+        _pending_bookings.pop(t, None)
 
 
 class FindBody(BaseModel):
@@ -62,9 +76,11 @@ async def find(body: FindBody, store: UserStore = Depends(get_user_store)) -> di
     )
     top = ranked[:3]
     token = secrets.token_urlsafe(24)
+    _prune_pending(now)
     _pending_bookings[token] = {
         "activity_type": body.activity_type,
         "summary_hint": body.summary_hint,
+        "_expires_at": now + PENDING_BOOKING_TTL,
         "top": [
             {
                 "start_iso": s.start.isoformat(),
@@ -87,9 +103,10 @@ async def book(
     store: UserStore = Depends(get_user_store),
     x_idempotency_key: str | None = Header(default=None),
 ) -> dict[str, Any]:
+    _prune_pending(datetime.now(UTC))
     pending = _pending_bookings.pop(body.confirmation_token, None)
     if not pending:
-        raise HTTPException(status_code=400, detail="unknown_confirmation_token")
+        raise HTTPException(status_code=400, detail="unknown_or_expired_confirmation_token")
 
     start = datetime.fromisoformat(body.start_iso)
     end = datetime.fromisoformat(body.end_iso)

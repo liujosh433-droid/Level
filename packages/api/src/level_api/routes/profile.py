@@ -175,28 +175,28 @@ async def refresh_profile(store: UserStore = Depends(get_user_store)) -> dict[st
     # cache without hitting Google. Now it does what it says, and thanks
     # to persistent syncToken this is typically <500ms.
     refresh_error: str | None = None
+    current_fp: str = ""
     try:
         refresh_result = await refresh_agenda(store)
         current_fp = refresh_result.fingerprint
     except Exception as exc:  # noqa: BLE001
         refresh_error = str(exc)[:200]
         logger.warning("profile.refresh_agenda_failed", error=refresh_error)
-        sync_state = await store.calendar_sync.read() or {}
-        current_fp = sync_state.get("events_fingerprint") or ""
 
     events = await store.agenda.list()
     tz = await tz_for_store(store)
 
-    # Step 2: fingerprint short-circuit. If we just ran the full analysis
-    # for this exact event set, there is nothing new to propose - short
-    # out at ~500ms instead of running two enrich passes + role_run.
+    # Step 2: fingerprint short-circuit. Only fire when the Google pull
+    # actually succeeded - otherwise we'd falsely tell the user "up to
+    # date" while serving stale data.
     sync_state = await store.calendar_sync.read() or {}
     last_role_fp = sync_state.get("last_role_run_fingerprint")
     all_classified = all(
         e.activity_type is not None for e in events if e.summary
     )
     if (
-        last_role_fp
+        refresh_error is None
+        and last_role_fp
         and current_fp
         and last_role_fp == current_fp
         and all_classified
@@ -281,17 +281,23 @@ async def refresh_profile(store: UserStore = Depends(get_user_store)) -> dict[st
 
     usuals_removed = await sync_usuals(store, fresh_ids)
 
-    # Remember this fingerprint so the next rescan can short-circuit.
-    if current_fp:
-        sync_state = await store.calendar_sync.read() or {}
-        sync_state["last_role_run_fingerprint"] = current_fp
-        await store.calendar_sync.write(sync_state)
+    # Only remember the fingerprint when Google actually succeeded AND
+    # we ran role_run. `update_fields` merges just this one key so we
+    # don't clobber a concurrent refresh's `sync_tokens`.
+    if current_fp and refresh_error is None and last_role_fp != current_fp:
+        await store.calendar_sync.update_fields(
+            last_role_run_fingerprint=current_fp
+        )
 
     return {
         "people_added": people_added,
-        "usuals_added": len(candidates),
+        # `usuals_added` == freshly written usuals (excludes ones that
+        # already existed unchanged). Was previously len(candidates),
+        # which overcounted every no-op refresh.
+        "usuals_added": len(usuals_to_write),
         "usuals_removed": usuals_removed,
         "up_to_date": False,
+        "refresh_error": refresh_error,
     }
 
 

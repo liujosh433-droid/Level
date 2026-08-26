@@ -219,24 +219,25 @@ async def refresh_agenda(
     await _rebuild_daily_agenda(store, remaining, tz=tz)
 
     last_error = "; ".join(errors) if errors else None
-    await store.calendar_sync.write(
-        {
-            **prev_state,
-            "events_fingerprint": fingerprint,
-            "last_pull_at": now.isoformat(),
-            "calendar_id": calendars[0]["id"] if calendars else "primary",
-            "calendars": [
-                {
-                    "id": c["id"],
-                    "summary": c.get("summary"),
-                    "primary": bool(c.get("primary")),
-                }
-                for c in calendars
-            ],
-            "last_error": last_error,
-            "sync_tokens": sync_tokens,
-            "sync_token": None,  # legacy field; kept for backward-compat readers
-        }
+    # `update_fields` merges only the sync-owned keys and leaves
+    # `last_role_run_fingerprint` (owned by profile.py) untouched. Blind
+    # `write(prev_state | new)` would clobber a concurrent role-run
+    # write if two requests race.
+    await store.calendar_sync.update_fields(
+        events_fingerprint=fingerprint,
+        last_pull_at=now.isoformat(),
+        calendar_id=calendars[0]["id"] if calendars else "primary",
+        calendars=[
+            {
+                "id": c["id"],
+                "summary": c.get("summary"),
+                "primary": bool(c.get("primary")),
+            }
+            for c in calendars
+        ],
+        last_error=last_error,
+        sync_tokens=sync_tokens,
+        sync_token=None,  # legacy field; kept for backward-compat readers
     )
 
     logger.info(
@@ -639,12 +640,12 @@ async def ensure_watch(store: UserStore, *, calendar_id: str = "primary") -> boo
         service.events().watch, calendarId=calendar_id, body=body
     )
     resp = await asyncio.to_thread(resp.execute)
-    state = await store.calendar_sync.read() or {}
-    state["watch_channel"] = {
-        "id": channel_id,
-        "resource_id": resp.get("resourceId"),
-        "expiration": resp.get("expiration"),
-        "token": channel_token,
-    }
-    await store.calendar_sync.write(state)
+    await store.calendar_sync.update_fields(
+        watch_channel={
+            "id": channel_id,
+            "resource_id": resp.get("resourceId"),
+            "expiration": resp.get("expiration"),
+            "token": channel_token,
+        }
+    )
     return True

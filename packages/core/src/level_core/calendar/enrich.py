@@ -23,10 +23,14 @@ from level_core.storage.base import UserStore
 
 logger = get_logger(__name__)
 
-# Maximum concurrent activity-classification LLM calls per refresh. Small
-# enough to respect the per-user rate cap; large enough that a new user
-# with ~500 events finishes in ~5s instead of ~20s.
-CLASSIFY_CONCURRENCY = 4
+# Maximum concurrent activity-classification LLM calls per refresh.
+# Sized so a fresh 500-event calendar finishes cold classification in
+# ~2-3s instead of ~5s (v1: 4-way, ~5s). We can go this wide because
+# ActivityAgent is Gemma-eligible (see `_GEMMA_ELIGIBLE` in
+# `agents/base.py`) - if AI Studio 429s, Tier-3 Gemma keeps the wave
+# moving without eating additional Gemini quota. Per-user hourly cap
+# (60/hr) still bounds total spend.
+CLASSIFY_CONCURRENCY = 8
 
 
 @dataclass

@@ -106,6 +106,53 @@ def scan(user_input: str) -> ArmorResult:
     return ArmorResult(verdict=ArmorVerdict.CLEAN)
 
 
+def _walk_strings(obj: object) -> list[str]:
+    """Yield every string leaf in a nested structure (dicts/lists/tuples).
+
+    Used to scan `context` blobs (e.g. RoleAgent's calendar rollup)
+    where a malicious event title could smuggle "ignore all previous"
+    into the LLM prompt via an otherwise-trusted field.
+    """
+    out: list[str] = []
+    stack: list[object] = [obj]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, str):
+            out.append(node)
+        elif isinstance(node, dict):
+            stack.extend(node.values())
+        elif isinstance(node, (list, tuple, set, frozenset)):
+            stack.extend(node)
+    return out
+
+
+def scan_context(context: object) -> ArmorResult:
+    """Run the prefilter across every string leaf inside a context blob.
+
+    Escalation: any leaf BLOCK -> BLOCK. Otherwise any leaf FLAG -> FLAG.
+    Otherwise CLEAN. This means untrusted calendar-derived strings can
+    trip the same defenses as raw user_input.
+    """
+    if context is None:
+        return ArmorResult(verdict=ArmorVerdict.CLEAN)
+    flagged_patterns: list[str] = []
+    flagged_reason: str = ""
+    for leaf in _walk_strings(context):
+        result = scan(leaf)
+        if result.verdict == ArmorVerdict.BLOCK:
+            return result
+        if result.verdict == ArmorVerdict.FLAG:
+            flagged_patterns.extend(result.matched_patterns)
+            flagged_reason = flagged_reason or result.reason
+    if flagged_patterns:
+        return ArmorResult(
+            verdict=ArmorVerdict.FLAG,
+            reason=f"context:{flagged_reason}",
+            matched_patterns=tuple(dict.fromkeys(flagged_patterns)),
+        )
+    return ArmorResult(verdict=ArmorVerdict.CLEAN)
+
+
 BLOCK_REPLY = (
     "That message looks like a prompt-injection attempt. I don\u2019t follow "
     "instructions that ask me to reveal my prompt, change roles, or run code. "

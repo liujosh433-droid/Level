@@ -58,7 +58,15 @@ async def get_daily_summary(store: UserStore) -> str:
     )
     text = result.value.summary if result.value else "Today looks quiet."  # type: ignore[union-attr]
 
-    summary_cache[today] = {"text": text, "fingerprint": fingerprint}
-    cache["summary_cache"] = summary_cache
-    await store.calendar_sync.write(cache)
+    # Use `mutate` so a concurrent sync writing sync_tokens or a role
+    # run writing last_role_run_fingerprint doesn't clobber this cache
+    # (or vice versa). The txn re-reads the doc under contention.
+    def _bump(current: dict[str, Any]) -> dict[str, Any]:
+        current = dict(current)
+        merged = dict(current.get("summary_cache") or {})
+        merged[today] = {"text": text, "fingerprint": fingerprint}
+        current["summary_cache"] = merged
+        return current
+
+    await store.calendar_sync.mutate(_bump)
     return text

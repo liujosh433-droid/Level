@@ -44,9 +44,7 @@ async def refresh_and_enrich_safe(store: UserStore) -> None:
         result = await refresh_agenda(store)
     except Exception as exc:  # noqa: BLE001
         logger.warning("today.refresh_failed", error=str(exc)[:300])
-        state = await store.calendar_sync.read() or {}
-        state["last_error"] = str(exc)[:400]
-        await store.calendar_sync.write(state)
+        await store.calendar_sync.update_fields(last_error=str(exc)[:400])
         return
     try:
         existing = await store.agenda.list()
@@ -418,20 +416,33 @@ async def summary(store: UserStore = Depends(get_user_store)) -> dict[str, str]:
 async def what_level_learned(
     store: UserStore = Depends(get_user_store),
 ) -> dict[str, Any]:
-    """Return the 3 most recent corrections Level applied, plus total count.
+    """Return the 3 most recent corrections + memories Level applied.
 
-    Powers the "What Level learned" strip on /today. This is the visible
-    manifestation of the Collaborative Partner rubric's "constantly adapts"
-    bullet — the same negatives get injected into the next matching agent
-    call as few-shot, but here they're also surfaced to the user.
+    Powers the "What Level learned" strip on /today. This surfaces BOTH:
+      * negatives - things Level tried and the user rejected. Get
+        injected as few-shot into the next matching agent call.
+      * memories - long-lived facts the user confirmed via a keep chip.
+        Get recalled by EmailAgent + SummaryAgent as context.
+
+    Both are the visible manifestation of the "constantly adapts to
+    user" rubric bullet.
     """
+    from level_core.agents.memory_bank import recall as recall_memories
+
     negatives = await store.negatives.list()
     negatives.sort(key=lambda n: n.created_at, reverse=True)
-    latest = negatives[:3]
+    latest_neg = negatives[:3]
+
+    memories = await recall_memories(store, limit=3)
+
     return {
         "total": len(negatives),
+        "memories_total": (
+            len((await store.profile.read() or {}).get("memory_bank", {}).get("memories") or [])
+        ),
         "recent": [
             {
+                "kind": "negative",
                 "negative_id": n.negative_id,
                 "agent": n.agent.value,
                 "field": n.field,
@@ -439,6 +450,16 @@ async def what_level_learned(
                 "reason": n.reason,
                 "created_at": n.created_at.isoformat(),
             }
-            for n in latest
+            for n in latest_neg
+        ],
+        "memories": [
+            {
+                "kind": "memory",
+                "id": m["id"],
+                "text": m["text"],
+                "tags": m.get("tags") or [],
+                "created_at": m.get("created_at"),
+            }
+            for m in memories
         ],
     }

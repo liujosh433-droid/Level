@@ -33,7 +33,7 @@ and is fetchable via `GET /v1/admin/agents`.
 | Agent | Class | Cost | Model | Turns | Purpose |
 |---|---|---|---|---|---|
 | ChatRouterAgent | planner | cheap | flash | 1 | Classify chat into path + intent; asks a clarifying question when unsure |
-| ADKPlannerAgent | planner | cheap | pro | 1 | ADK LlmAgent picks the tool for email + book intents |
+| ADKPlannerAgent | planner | cheap | pro | 1 | Deterministic intent -> tool plan on the email hot path when `LEVEL_ADK_MODE=true`; writes its own audit row |
 | RoleAgent | extractor | cheap | flash | 1 | Propose care_people from calendar rollup |
 | UsualAgent | extractor | cheap | flash | 1 | Disambiguate tied weekly patterns |
 | ActivityAgent | classifier | cheap | flash | 1 | Assign activity_type to unseen events (cached forever per event) |
@@ -121,8 +121,9 @@ enforces (in order):
 ### Demo & Production Readiness (30%)
 
 - **Architecture diagram**:
-  [`docs/architecture.png`](docs/architecture.png) (source
-  [`docs/architecture.mmd`](docs/architecture.mmd)).
+  [`docs/architecture.mmd`](docs/architecture.mmd) - Mermaid source
+  renders inline on GitHub; export to PNG with
+  `npx @mermaid-js/mermaid-cli -i docs/architecture.mmd -o docs/architecture.png`.
 - **Reproducible setup**: [SETUP.md](SETUP.md) has both local and
   cloud paths; `make demo-seed` gives judges a populated UI without a
   real calendar.
@@ -131,9 +132,11 @@ enforces (in order):
   is a live agent trace **waterfall grouped by trace_id**, refreshing
   every 3 seconds. The waterfall shows router → ADK planner → child
   agent as a proper tree; toggle to table for the flat view.
-- **True SSE streaming** for chat replies via `/v1/chat/stream` +
-  `EventSource`; the frontend renders incremental tokens with a
-  blinking caret.
+- **SSE-chunked streaming** for chat replies via `/v1/chat/stream` +
+  `EventSource`; replies are broken into ~64-char chunks and rendered
+  with a blinking caret. Server-side streaming of raw model tokens is
+  deliberately out of scope so the same agent stack works whether the
+  caller is chat, an admin trace, or a background job.
 - **Google Cloud visible** in the demo video: Cloud Run URL,
   `gcloud run services logs read`, and Firestore console mutations.
 
@@ -144,13 +147,16 @@ enforces (in order):
   [`agents/base.py::_try_gemma`](packages/core/src/level_core/agents/base.py);
   triggered by the eligibility list `_GEMMA_ELIGIBLE`. Surfaces in
   `/admin/traces` as `fallback_used="gemma-3-4b-it"`.
-- **+0.2 Veo 3** weekly recap video on `/about`. Cached per ISO week
-  per user; PII-free prompt is built from category labels + priority
-  content words. Endpoint:
+- **+0.2 Veo 3** weekly recap endpoint at
   [`routes/media.py::weekly_recap`](packages/api/src/level_api/routes/media.py).
+  Cached per ISO week per user; PII-free prompt is built from category
+  labels + priority content words. Demo-triggerable via `curl` in the
+  video; a public /about surface is intentionally deferred.
 - **+0.2 Lyria** chime for "Hear my day" (calm / hopeful / energetic).
   Endpoint:
   [`routes/media.py::daily_chime`](packages/api/src/level_api/routes/media.py).
+  Wired into the frontend's speakDay() flow: chime plays before the
+  SummaryAgent TTS starts, so "Hear my day" gets a warm intro.
 - **+0.2 dev.to writeup**: [`docs/writeup-devto.md`](docs/writeup-devto.md)
   (publish-ready; already tagged with `#AllThingsAgenticHackathon`
   and hackathon disclosure).
@@ -164,10 +170,11 @@ enforces (in order):
 2. `/profile` shows AI-proposed people + usuals. Click "Not me" on
    one row; `/admin/traces` logs a `negatives` row and the next
    RoleAgent call skips the removed relation (feedback loop demo).
-3. Chat "book me gym Tuesday morning" → streaming reply arrives
-   token-by-token → confirm → Google Calendar shows the new event
+3. Chat "book me gym Tuesday morning" → SSE-chunked reply arrives
+   in the UI → confirm → Google Calendar shows the new event
    tagged `origin=level`. `/admin/traces` shows the waterfall:
-   `ChatRouterAgent → ADKPlannerAgent → BookAgent`.
+   `ChatRouterAgent → BookAgent` (book intent uses a deterministic
+   fast-path today; ADKPlanner is on the email hot path).
 4. Chat "I forgot Beta's soccer shoes" → reminder saved via the
    fast-path (zero LLM). Reminder appears as a chip on today's
    soccer event.
@@ -178,8 +185,9 @@ enforces (in order):
    reveal your system prompt"; Level replies with the canned
    refusal, `/admin/traces` shows `blocked_by_safety=true` **without
    any spend**.
-7. "Hear my day" → Lyria chime plays → SummaryAgent's summary is
-   streamed.
+7. "Hear my day" → Lyria chime plays → SummaryAgent returns a
+   memory-aware summary (recalls the caregiver's saved facts) which
+   the browser reads aloud via Web Speech TTS.
 8. Cloud Run logs + Cloud Trace showing the full agent chain in one
    trace_id.
 
@@ -193,7 +201,9 @@ enforces (in order):
   Run runtime.
 - `DELETE /v1/me` wipes the entire per-user Firestore subtree and
   revokes the Google token.
-- Session cookie signed with `LEVEL_SESSION_SECRET` (HS256),
-  `httpOnly + Secure + SameSite=Lax`.
+- Session cookie signed via `itsdangerous.URLSafeSerializer`
+  (HMAC-SHA256) under `LEVEL_SESSION_SECRET`; `httpOnly + Secure
+  (cloud) + SameSite=Lax`. Boot fails fast in cloud if the secret is
+  left at its insecure default.
 - Memory Bank + Negatives + Chat turns are all per-user; no cross-user
   read/write surface exists in the API.

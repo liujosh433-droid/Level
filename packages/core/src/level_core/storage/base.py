@@ -6,7 +6,7 @@ All API routes hold a `UserStore` handle. Backend selection happens in
 
 from __future__ import annotations
 
-from typing import Any, Generic, Protocol, TypeVar
+from typing import Any, Awaitable, Callable, Generic, Protocol, TypeVar
 
 from pydantic import BaseModel
 
@@ -36,10 +36,26 @@ class Repo(Protocol, Generic[T]):
 
 
 class KVStore(Protocol):
-    """Single-doc key/value slot (calendar_sync, user profile bits)."""
+    """Single-doc key/value slot (calendar_sync, user profile bits).
+
+    Two atomicity primitives beyond blind `write()`:
+      * `update_fields()` merges the given top-level fields into the
+        existing doc atomically. Use this when you only want to change a
+        subset of the doc (e.g. `last_role_run_fingerprint`) - blind
+        `write(entire_dict)` on the read result races against every
+        other writer to the same slot.
+      * `mutate(fn)` runs a full read-modify-write inside a lock (local)
+        or transaction (Firestore), retrying under contention. Use this
+        when the new value depends on the old (counters, rollovers).
+    """
 
     async def read(self) -> dict[str, Any] | None: ...
     async def write(self, value: dict[str, Any]) -> None: ...
+    async def update_fields(self, **fields: Any) -> None: ...
+    async def mutate(
+        self,
+        fn: Callable[[dict[str, Any]], dict[str, Any] | Awaitable[dict[str, Any]]],
+    ) -> dict[str, Any]: ...
 
 
 class UserStore:

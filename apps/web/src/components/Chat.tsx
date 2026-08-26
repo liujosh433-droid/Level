@@ -597,6 +597,28 @@ export default function Chat({
   async function speakDay() {
     if (onSpeakDay) return onSpeakDay();
     try {
+      // Play a Lyria chime (best-effort) BEFORE the TTS starts so the
+      // "Hear my day" moment has a warm intro. If Lyria isn't ready
+      // (media disabled locally, or first call still generating),
+      // we skip silently and go straight to the summary.
+      const chime = await api
+        .get<{ ready: boolean; audio_url?: string | null }>("/v1/media/chime?mood=calm")
+        .catch(() => ({ ready: false as boolean, audio_url: null }));
+      if (chime.ready && chime.audio_url) {
+        try {
+          const audio = new Audio(chime.audio_url);
+          audio.volume = 0.6;
+          await new Promise<void>((resolve) => {
+            audio.onended = () => resolve();
+            audio.onerror = () => resolve();
+            void audio.play().catch(() => resolve());
+            // Absolute ceiling: chime shouldn't hold up TTS more than 4s.
+            window.setTimeout(() => resolve(), 4000);
+          });
+        } catch {
+          // Ignore chime failures - never block "Hear my day".
+        }
+      }
       const { summary } = await api.get<{ summary: string }>("/v1/today/summary");
       speak(summary);
     } catch {

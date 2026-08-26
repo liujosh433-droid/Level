@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Generic, TypeVar
+from typing import Any, Awaitable, Callable, Generic, TypeVar
 
 from pydantic import BaseModel
 
@@ -154,20 +155,49 @@ class LocalKV(KVStore):
         self._path = _root_dir() / user_id / f"{slot}.json"
         self._path.parent.mkdir(parents=True, exist_ok=True)
 
+    def _read_unlocked(self) -> dict[str, Any] | None:
+        if not self._path.exists():
+            return None
+        raw = self._path.read_text().strip()
+        if not raw:
+            return None
+        return json.loads(raw)
+
+    def _write_unlocked(self, value: dict[str, Any]) -> None:
+        tmp = self._path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(value, default=str, indent=2))
+        tmp.replace(self._path)
+
     async def read(self) -> dict[str, Any] | None:
         async with _lock_for(self._path):
-            if not self._path.exists():
-                return None
-            raw = self._path.read_text().strip()
-            if not raw:
-                return None
-            return json.loads(raw)
+            return self._read_unlocked()
 
     async def write(self, value: dict[str, Any]) -> None:
         async with _lock_for(self._path):
-            tmp = self._path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(value, default=str, indent=2))
-            tmp.replace(self._path)
+            self._write_unlocked(value)
+
+    async def update_fields(self, **fields: Any) -> None:
+        """Atomic top-level merge of the given fields into the doc."""
+        if not fields:
+            return
+        async with _lock_for(self._path):
+            current = self._read_unlocked() or {}
+            current.update(fields)
+            self._write_unlocked(current)
+
+    async def mutate(
+        self,
+        fn: Callable[[dict[str, Any]], dict[str, Any] | Awaitable[dict[str, Any]]],
+    ) -> dict[str, Any]:
+        """Atomic read -> transform -> write, all under the file lock."""
+        async with _lock_for(self._path):
+            current = self._read_unlocked() or {}
+            result = fn(dict(current))
+            if inspect.isawaitable(result):
+                result = await result
+            assert isinstance(result, dict)
+            self._write_unlocked(result)
+            return result
 
 
 def make_local_store(user_id: str) -> UserStore:

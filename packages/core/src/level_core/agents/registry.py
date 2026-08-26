@@ -223,7 +223,7 @@ register(
         model="pro",
         safety_class=SafetyClass.GENERATOR,
         cost_tier=CostTier.STANDARD,
-        max_turns=3,
+        max_turns=2,
         schema="DraftedEmail",
         description="Drafts an editable email to a saved contact. Never sends.",
     )
@@ -236,7 +236,7 @@ register(
         model="pro",
         safety_class=SafetyClass.GENERATOR,
         cost_tier=CostTier.STANDARD,
-        max_turns=3,
+        max_turns=2,
         schema="DaySummary",
         description="Composes the 'Hear my day' spoken summary from today's agenda + priorities.",
     )

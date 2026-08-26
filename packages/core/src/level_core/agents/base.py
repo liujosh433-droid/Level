@@ -28,7 +28,11 @@ from pydantic import BaseModel, ValidationError
 
 from level_core.agents.gate import Charge, GateDecision, check_gate, record_charge
 from level_core.agents.identity import sign as sign_identity
-from level_core.agents.model_armor import ArmorVerdict, scan as armor_scan
+from level_core.agents.model_armor import (
+    ArmorVerdict,
+    scan as armor_scan,
+    scan_context as armor_scan_context,
+)
 from level_core.agents.pii import strip_pii
 from level_core.agents.registry import get as registry_get
 from level_core.config import get_settings
@@ -182,7 +186,18 @@ async def call_agent(
     # BEFORE PII stripping, BEFORE any LLM call. On BLOCK we return a
     # canned reply and never spend budget. FLAG proceeds but is logged
     # so /admin/traces shows the guard live.
+    #
+    # Scan both user_input AND context. Calendar-sourced strings
+    # (e.g. RoleAgent's rollup lines, ActivityAgent's event summaries)
+    # are otherwise-trusted fields where a hostile event title could
+    # smuggle in "ignore previous instructions" and reach the model.
     armor = armor_scan(user_input)
+    if armor.verdict != ArmorVerdict.BLOCK:
+        ctx_armor = armor_scan_context(context)
+        if ctx_armor.verdict == ArmorVerdict.BLOCK:
+            armor = ctx_armor
+        elif armor.verdict == ArmorVerdict.CLEAN and ctx_armor.verdict == ArmorVerdict.FLAG:
+            armor = ctx_armor
     if armor.verdict == ArmorVerdict.BLOCK:
         logger.warning(
             "agent.model_armor_block",
@@ -261,9 +276,10 @@ async def call_agent(
         hallucinated = False
         dropped: list[str] = []
         # max_turns enforcement: extraction agents (max_turns=1) run once.
-        # Generative agents (max_turns=3) can refine when the first draft
-        # fails schema validation or source_span echo, because model
-        # noise on structured output is a real failure mode.
+        # Generative agents (max_turns=2) get one refinement attempt when
+        # the first draft fails schema validation or source_span echo -
+        # model noise on structured output is a real failure mode, but
+        # a third round rarely helped (see registry entries).
         max_turns = max(1, min(int(spec.max_turns), 5))
         try:
             for turn in range(max_turns):

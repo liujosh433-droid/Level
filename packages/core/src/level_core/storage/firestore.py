@@ -6,8 +6,9 @@ KV slots live at `users/{uid}/state/{slot}`.
 
 from __future__ import annotations
 
+import inspect
 from datetime import datetime
-from typing import Any, Generic, TypeVar
+from typing import Any, Awaitable, Callable, Generic, TypeVar
 
 from pydantic import BaseModel
 
@@ -148,6 +149,44 @@ class FirestoreKV(KVStore):
 
     async def write(self, value: dict[str, Any]) -> None:
         self._doc().set(value)
+
+    async def update_fields(self, **fields: Any) -> None:
+        """Atomic top-level merge (Firestore native `set(..., merge=True)`)."""
+        if not fields:
+            return
+        self._doc().set(fields, merge=True)
+
+    async def mutate(
+        self,
+        fn: Callable[[dict[str, Any]], dict[str, Any] | Awaitable[dict[str, Any]]],
+    ) -> dict[str, Any]:
+        """Atomic read -> transform -> write via a Firestore transaction.
+
+        The transaction body must be synchronous: Firestore's
+        `@transactional` decorator drives it synchronously with
+        auto-retry on contention. If a caller needs to `await` inside
+        the transform, they must hoist that work above the mutate call
+        (see `agents/gate.py::record_charge`).
+        """
+        from google.cloud import firestore
+
+        doc = self._doc()
+
+        @firestore.transactional  # type: ignore[misc]
+        def _txn(transaction: Any) -> dict[str, Any]:
+            snap = doc.get(transaction=transaction)
+            current = snap.to_dict() if snap.exists else {}
+            result = fn(dict(current))
+            if inspect.isawaitable(result):
+                raise RuntimeError(
+                    "FirestoreKV.mutate does not support async transform "
+                    "functions; do async work outside the transaction."
+                )
+            assert isinstance(result, dict)
+            transaction.set(doc, result)
+            return result
+
+        return _txn(self._client.transaction())
 
 
 def make_firestore_store(user_id: str) -> UserStore:

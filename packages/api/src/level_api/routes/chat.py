@@ -15,6 +15,7 @@ from level_core.agents.adk_runner import is_adk_enabled, plan_and_dispatch
 from level_core.agents.base import QuotaExhausted
 from level_core.agents.book import run as book_run
 from level_core.agents.chat_router import run as router_run
+from level_core.agents.model_armor import BLOCK_REPLY as ARMOR_BLOCK_REPLY
 from level_core.agents.person_edit import run as person_edit_run
 from level_core.agents.priority import run as priority_run
 from level_core.agents.reminder import run as reminder_run
@@ -182,7 +183,7 @@ async def _handle_message(
             user=store.user_id,
             retry_after_s=err.retry_after_s,
         )
-        return _ack_no_agent(
+        return await _ack_no_agent(
             store,
             f"I\u2019m at my daily Gemini quota{wait}. Your message is saved in the box \u2014 try again shortly, or I can still book times without the model.",
         )
@@ -234,7 +235,13 @@ async def _dispatch_message(
         # Router blocked (quota/gate) OR no value returned: soft-degrade
         # with a canned reply so chat never goes silent. This is the
         # rubric-mandated failure isolation for the Gateway component.
-        if decision.soft_degraded:
+        if decision.blocked_by_safety:
+            # Model Armor tripped. Return the injection-specific canned
+            # reply so the user knows what happened; the budget message
+            # would confuse the user by claiming a resource issue when
+            # the actual gate was security.
+            reply = ARMOR_BLOCK_REPLY
+        elif decision.soft_degraded:
             reply = (
                 "I\u2019m at my model budget for the moment. Your message is "
                 "saved \u2014 try again in a few minutes, or ask me to book a "
@@ -242,7 +249,7 @@ async def _dispatch_message(
             )
         else:
             reply = "I heard you. I'll remember that."
-        return _ack_no_agent(store, reply)
+        return await _ack_no_agent(store, reply)
 
     # Collaborative Partner: honor the router's clarifying-question exit.
     # This is the "asks clarifying questions, guides step-by-step" bullet.
@@ -287,7 +294,7 @@ async def _extract_priority(
 ) -> dict[str, Any]:
     result = await priority_run(store=store, message=message, history=history)
     if not result.value or result.value.priority is None:
-        return _ack_no_agent(store, "I hear you. Say more when you're ready.")
+        return await _ack_no_agent(store, "I hear you. Say more when you're ready.")
     ep = result.value.priority
     prio = await add_priority(
         store,
@@ -443,7 +450,7 @@ async def _extract_reminder(
             activity_type=parsed.activity_type,
             source_span=parsed.source_span,
         )
-    return _ack_no_agent(store, "Tell me the thing you might forget and I'll surface it.")
+    return await _ack_no_agent(store, "Tell me the thing you might forget and I'll surface it.")
 
 
 async def _try_fast_reminder(
@@ -522,7 +529,7 @@ async def _person_update(
             return await _remember_person(
                 store, name=name, relation=relation, source_span=message[:200]
             )
-        return _ack_no_agent(
+        return await _ack_no_agent(
             store,
             "Tell me who they are \u2014 \u201cAlex is my co-parent\u201d or \u201cRobert is my kid, not my dad\u201d.",
         )
@@ -539,7 +546,7 @@ async def _person_update(
                 relation=relation,
                 source_span=edit.source_span,
             )
-        return _ack_no_agent(
+        return await _ack_no_agent(
             store,
             f"I don\u2019t have {edit.target_name} yet. Try \u201c{edit.target_name} is my co-parent\u201d (or kid, elder, partner).",
         )
@@ -624,7 +631,7 @@ async def _person_update(
         await _write_reply(store, reply)
         return {"reply": reply, "path": "profile", "intent": "person_update"}
 
-    return _ack_no_agent(store, "I heard you, but I'm not sure how to change that yet.")
+    return await _ack_no_agent(store, "I heard you, but I'm not sure how to change that yet.")
 
 
 async def _book(
@@ -648,7 +655,7 @@ async def _book(
     booking = result.value.booking if (result.value and result.value.booking) else None  # type: ignore[union-attr]
     if booking is None:
         logger.info("chat.book.no_extract", user=store.user_id, message_len=len(message))
-        return _ack_no_agent(
+        return await _ack_no_agent(
             store,
             "Tell me the day and time (e.g. \u201cTuesday 7:45\u201312am, Nova drop-off\u201d) and I\u2019ll add it.",
         )
@@ -663,7 +670,7 @@ async def _book(
             end=booking.end_hhmm,
             err=str(err),
         )
-        return _ack_no_agent(store, f"I couldn\u2019t work out the time: {err}. Try again with a clearer range?")
+        return await _ack_no_agent(store, f"I couldn\u2019t work out the time: {err}. Try again with a clearer range?")
 
     return await _propose_cal_change(
         store,
@@ -917,8 +924,9 @@ def _fmt_hm_time(t: time) -> str:
 
 
 async def _clarify(store: UserStore, text: str) -> dict[str, Any]:
-    await _write_reply(store, text)
-    return _ack_no_agent(store, text)
+    # _ack_no_agent now handles persistence; the standalone _write_reply
+    # would double-persist.
+    return await _ack_no_agent(store, text)
 
 
 async def _try_fast_calendar(
@@ -1524,7 +1532,7 @@ async def _finalize_cal_change(
     tokens = await store.tokens.read() or {}
     if not tokens.get("access_token"):
         logger.info("chat.cal.no_google", user=store.user_id, action=action)
-        return _ack_no_agent(
+        return await _ack_no_agent(
             store,
             "I can\u2019t reach your Google Calendar yet \u2014 connect Google in Sources and try again.",
         )
@@ -1546,7 +1554,7 @@ async def _finalize_cal_change(
             html_link = booked.html_link
         elif action == "move":
             if not event_id:
-                return _ack_no_agent(store, "I lost track of which event to move. Try again?")
+                return await _ack_no_agent(store, "I lost track of which event to move. Try again?")
             booked = await move_event(
                 store,
                 event_id=event_id,
@@ -1558,7 +1566,7 @@ async def _finalize_cal_change(
             html_link = booked.html_link
         else:
             if not event_id:
-                return _ack_no_agent(store, "I lost track of which event to remove. Try again?")
+                return await _ack_no_agent(store, "I lost track of which event to remove. Try again?")
             await delete_event(store, event_id=event_id, calendar_id=cal_id)
             await store.agenda.delete(event_id)
     except Exception as err:
@@ -1571,7 +1579,7 @@ async def _finalize_cal_change(
             err=str(err),
         )
         verb = {"create": "booking", "move": "move", "delete": "delete"}[action]
-        return _ack_no_agent(
+        return await _ack_no_agent(
             store,
             f"Google didn\u2019t accept the {verb} ({err}). Try again in a moment?",
         )
@@ -2417,7 +2425,17 @@ def _fmt_local(dt: datetime) -> str:
     return dt.strftime(fmt).lower()
 
 
-def _ack_no_agent(store: UserStore, text: str) -> dict[str, Any]:
+async def _ack_no_agent(store: UserStore, text: str) -> dict[str, Any]:
+    """Short-circuit reply from a non-agent handler.
+
+    Previously this was sync and only shaped the response dict, which
+    meant every `return _ack_no_agent(...)` site silently dropped the
+    assistant turn from `chat_turns`. The SSE reconstruct path
+    (`_load_history`) then rebuilt future prompts without the reply,
+    producing "I forgot what we were talking about" behavior after
+    soft-degrade, quota, or fast-path acknowledgements. Now it persists.
+    """
+    await _write_reply(store, text)
     return {"reply": text, "path": "general", "intent": "ask"}
 
 

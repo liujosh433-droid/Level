@@ -17,28 +17,35 @@ Level is a **per-user document graph** with a small number of dumb
 CRUD repos and one KV per user. There's no cross-user query surface.
 
 ```
-UserStore                              backing
-├── people             Repo[CarePerson]      → users/{uid}/people/{id}
+UserStore                              cloud backing (Firestore)
+├── people             Repo[CarePerson]      → users/{uid}/care_people/{id}
 ├── usuals             Repo[Usual]            → users/{uid}/usuals/{id}
 ├── priorities        Repo[Priority]          → users/{uid}/priorities/{id}
 ├── reminders         Repo[Reminder]          → users/{uid}/reminders/{id}
 ├── contacts          Repo[Contact]           → users/{uid}/contacts/{id}
-├── agenda            Repo[CachedEvent]       → users/{uid}/agenda/{id}
+├── agenda            Repo[CachedEvent]       → users/{uid}/agenda_cache/{id}
 ├── daily_agenda      Repo[DailyAgenda]       → users/{uid}/daily_agenda/{id}
 ├── chat_turns        Repo[ChatMessage]       → users/{uid}/chat_turns/{id}
 ├── negatives         Repo[NegativeFeedback]  → users/{uid}/negatives/{id}
 ├── ai_audit          Repo[AiAuditEntry]      → users/{uid}/ai_audit/{id}
-├── calendar_sync     KVStore                 → users/{uid}/kv/calendar_sync
-├── profile           KVStore                 → users/{uid}/kv/profile
-└── tokens            KVStore (encrypted)     → users/{uid}/kv/tokens
+├── calendar_sync     KVStore                 → users/{uid}/state/calendar_sync
+├── profile           KVStore                 → users/{uid}/state/profile
+└── tokens            KVStore                 → users/{uid}/state/google_oauth
 ```
+
+Cloud collection names are historical (predate the KV/Repo split);
+feature code addresses them by logical name (`store.people`,
+`store.agenda`, ...), never by their Firestore path.
 
 Two backends implement `UserStore`:
 
-- **local** (`LEVEL_ENV=local`): JSON files under `.level/local_store/{uid}/`.
-  Same layout as Firestore; useful for tests and offline dev.
-- **cloud** (`LEVEL_ENV=cloud`): Firestore Native Mode in
-  `google_cloud_project` under database `level_firestore_database`.
+- **local** (`LEVEL_ENV=local`): one JSON file per collection under
+  `.level/local_store/{uid}/`. Uses per-file `asyncio.Lock` so
+  concurrent RMW inside one process is safe.
+- **cloud** (`LEVEL_ENV=cloud`): Firestore Native Mode. `KVStore`
+  writes go through `update_fields()` (native `set(merge=True)`) or
+  `mutate()` (native transaction with auto-retry) so concurrent
+  writers to the same slot never lose fields.
 
 Backend selection lives in one file (`storage/factory.py`). Feature
 code NEVER branches on env.
@@ -76,10 +83,20 @@ Every piece of state has an explicit lifecycle:
 
 - Populated by GCal delta sync (`level_core.calendar.sync`), triggered
   by (a) user opening `/today`, (b) GCal push webhook, (c) nightly job.
-- Trimmed to `level_cal_days_back` + `level_cal_days_forward` (14 back
-  + 28 forward by default). Events outside the window are deleted.
-- `origin=level` events (Level-authored) never get purged by the sync
-  fingerprint - only by explicit delete.
+- Bounded by `level_cal_days_back` + `level_cal_days_forward` (14
+  back + 28 forward by default). Google only returns events inside
+  the window on full pulls, and cache entries INSIDE the window that
+  Google didn't return on a full pull are removed. Cache rows that
+  drift OUTSIDE the window as time moves forward are left to age out
+  on the next full pull (they simply won't match a future full-pull
+  seen-set); a future nightly sweep could clean these up if the
+  storage cost grows.
+- `origin=level` events are tagged (`_to_cached_event` sets
+  `origin="level"` when Google returns
+  `extendedProperties.private.origin == "level"`) so /admin/traces
+  can distinguish Level-authored bookings. They follow the same sync
+  lifecycle as Google-native events - explicit deletes flow through
+  the cache the same way.
 
 ### 2.2 `chat_turns`
 
@@ -130,11 +147,16 @@ Every piece of state has an explicit lifecycle:
 
 ### 2.8 `tokens` (Google OAuth)
 
-- Access + refresh tokens stored under `users/{uid}/kv/tokens`.
-- **Encrypted at rest** by Firestore + rotated by our refresh flow.
+- Access + refresh tokens stored under `users/{uid}/state/google_oauth`
+  in cloud (`.level/local_store/{uid}/tokens.json` locally).
+- **Encrypted at rest** by Firestore Native Mode's default encryption
+  (Google-managed KMS). Refresh tokens rotate transparently.
 - Never logged, never sent to Gemini (strip_pii is redundant here
   because the tokens path never touches an LLM prompt).
-- Deleted on `/v1/auth/logout?revoke=true`.
+- Full-user erasure: `DELETE /v1/me` wipes the entire per-user
+  subtree (including tokens) and revokes the Google grant. Logout
+  clears the session cookie without touching the tokens so
+  reconnect is one click.
 
 ---
 
@@ -358,17 +380,23 @@ fan-out. Not in scope for the hackathon.
 | O(1) hot-counter gate                | `agents/gate.py`     | -50-500x reads per turn on ai_audit |
 | Per-calendar syncToken (410 fallback) | `calendar/sync.py`   | Rescans go from full 500-event pull -> ~0-5 delta events; ~10x fewer Google API calls |
 | Parallel per-calendar `asyncio.gather`| `calendar/sync.py`   | Multi-calendar users get 1x latency, not Nx |
-| Semaphore(4) parallel classification | `calendar/enrich.py` | New user first sync: LLM leg 20s -> ~5s |
+| Semaphore(8) parallel classification | `calendar/enrich.py` | New user first sync: LLM leg 20s -> ~2-3s (v3; was 4-way -> ~5s in v2). Safe because ActivityAgent is Gemma-eligible, so Tier-3 fallback absorbs any AI-Studio 429 pressure |
 | Diff-only agenda + daily_agenda writes | `calendar/sync.py` | Rescan when nothing changed: 0 writes instead of ~500 |
 | Single agenda.list() per refresh     | `calendar/sync.py`   | -2 full-cache reads per refresh |
 | ADK planner audit row (parent_audit_id) | `agents/adk_runner.py` | Traceable waterfall without a spans store |
 | `_client_cache` for Gemini client    | `agents/base.py`     | -200ms per call (TCP + auth reuse) |
-| Multi-turn refinement bounded by max_turns | `agents/base.py` | Bounded worst-case latency for generators |
+| Multi-turn refinement bounded by max_turns | `agents/base.py` | Bounded worst-case latency for generators (v3: dropped Email + Summary from 3 -> 2 turns; -5s at the tail with negligible quality delta) |
 | Tiered fallback (2.5 → Gemma)        | `agents/base.py`     | Chat stays responsive during 429s |
 | SSE streaming on `/v1/chat/stream`   | `api/routes/chat.py` | Perceived latency drops from ~2s → <500ms |
 | Nightly proactive cards              | `jobs/nightly.py`    | Zero LLM at request time for /today nudges |
 | Chat history reconstructed from `chat_turns` on SSE | `api/routes/chat.py` | GET-safe context (EventSource) without a second POST |
 | Name-vs-noun guard (RoleAgent)       | `calendar/person_guard.py` | Drops "Grocery"/"Commute" hallucinations at 2.2µs/name; auto-writes negative |
+| Sync calendar pull in OAuth callback | `api/routes/auth.py` | First-connect homepage renders with events populated (was: 7s of "Loading today..."). v3: sync budget tightened 6s -> 3s so heavy calendars fall back to background sooner, where the OnboardingProgress card already communicates intent |
+| refresh_profile fingerprint short-circuit | `api/routes/profile.py` | "Re-read calendar" with no changes: ~20s -> <500ms (skips 2 enrich passes + role_run LLM) |
+| enrich_agenda: 3 reads -> 1 read     | `calendar/enrich.py` | -2N Firestore doc reads per refresh; in-memory events flow through classify -> person-match -> reminder-match |
+| Defensive resolve_person_ids        | `calendar/person_match.py` | Late-added people (e.g. Jordan) correctly tag existing events instead of falling back to caregiver-Me |
+| Atomic KV writes (`update_fields`, `mutate`) | `storage/*` | calendar_sync + gate_counters no longer clobber each other under concurrent writers; gate transaction stops quota-cap bypass |
+| Model Armor context scan            | `agents/base.py`, `agents/model_armor.py` | Calendar-derived strings (event titles) get the same injection prefilter as raw user_input |
 
 ### 5.2 Costs
 

@@ -33,10 +33,12 @@ async def test_propose_person_is_idempotent_by_display_and_relation(store) -> No
 
 @pytest.mark.asyncio
 async def test_propose_person_matches_by_alias(store) -> None:  # type: ignore[no-untyped-def]
+    # `MIN_ALIAS_LEN = 2` in care_store; single-character aliases get
+    # filtered on ingestion so they cannot dedupe.
     p1 = await propose_person(
-        store, display_name="Alpha", relation=CareRelation.CHILD, aliases=["A"]
+        store, display_name="Alpha", relation=CareRelation.CHILD, aliases=["Al"]
     )
-    p2 = await propose_person(store, display_name="A", relation=CareRelation.CHILD)
+    p2 = await propose_person(store, display_name="Al", relation=CareRelation.CHILD)
     assert p1.person_id == p2.person_id
 
 

@@ -22,12 +22,25 @@ type EmailDraft = {
   kind?: string | null;
 };
 
+type FeedbackVerdict = "keep" | "adjust" | "not_me";
+
 type Message = {
   id: string;
   role: "user" | "assistant";
   text: string;
   emailDraft?: EmailDraft;
   emailSent?: boolean;
+  path?: string;
+  intent?: string;
+  needsClarify?: boolean;
+  streaming?: boolean;
+  feedback?: {
+    agent: string;
+    field: string;
+    value: string;
+    verdict?: FeedbackVerdict;
+    submitting?: FeedbackVerdict;
+  };
 };
 
 type Props = {
@@ -82,6 +95,79 @@ const SpeakerIcon = ({ className }: { className?: string }) => (
 );
 
 let messageSeq = 0;
+
+function nextId(prefix: string): string {
+  messageSeq += 1;
+  return `${prefix}-${Date.now()}-${messageSeq}`;
+}
+
+// How many prior turns we ship to the backend for context. Kept short so
+// the LLM prompt stays cheap; the backend re-caps this to 8 anyway.
+const HISTORY_TURNS = 8;
+
+// SSE endpoint we prefer when the browser supports EventSource. Falls
+// back to plain POST when SSE isn't reachable (also nice for debugging).
+const STREAM_ENDPOINT = "/v1/chat/stream";
+
+// Best-effort feature detection: EventSource must exist AND the page
+// wasn't opened via file:// (which breaks credentials). Server rewrites
+// keep /v1 same-origin in dev + prod so we don't need to worry about CORS.
+function streamingSupported(): boolean {
+  return typeof window !== "undefined" && typeof window.EventSource !== "undefined";
+}
+
+function feedbackTargetFromResult(result: ChatResult): Message["feedback"] | undefined {
+  if (result?.email_draft) {
+    return {
+      agent: "EmailAgent",
+      field: "email.body",
+      value: `${result.email_draft.subject}: ${result.email_draft.body.slice(0, 200)}`,
+    };
+  }
+  if (result?.priority_id) {
+    return {
+      agent: "PriorityAgent",
+      field: "priority.text",
+      value: (result.reply || "").slice(0, 200),
+    };
+  }
+  if (result?.reminder_id) {
+    return {
+      agent: "ReminderAgent",
+      field: "reminder.text",
+      value: (result.reply || "").slice(0, 200),
+    };
+  }
+  if (result?.person_id) {
+    return {
+      agent: "PersonEditAgent",
+      field: "person.relation",
+      value: (result.reply || "").slice(0, 200),
+    };
+  }
+  if (result?.event_id) {
+    return {
+      agent: "BookAgent",
+      field: "booking.title",
+      value: (result.reply || "").slice(0, 200),
+    };
+  }
+  return undefined;
+}
+
+type ChatResult = {
+  reply: string;
+  path?: string;
+  intent?: string;
+  needs_clarification?: boolean;
+  clarifying_question?: string | null;
+  email_draft?: EmailDraft;
+  priority_id?: string;
+  reminder_id?: string;
+  person_id?: string;
+  event_id?: string;
+};
+
 function EmailDraftCard({
   draft,
   sent,
@@ -180,14 +266,58 @@ function EmailDraftCard({
   );
 }
 
-function nextId(prefix: string): string {
-  messageSeq += 1;
-  return `${prefix}-${Date.now()}-${messageSeq}`;
-}
+/**
+ * FeedbackChips — three-button chip row (keep / adjust / not-me) below
+ * anything Level generated. Every click POSTs to /v1/feedback which
+ * writes a NegativeFeedback row on adjust/not-me; the corresponding
+ * agent's next call receives it as few-shot "do not propose this again."
+ *
+ * We render nothing after a submission, only a small ack line, so the
+ * transcript stays readable when the user is scrolling back.
+ */
+function FeedbackChips({
+  target,
+  onSubmit,
+}: {
+  target: NonNullable<Message["feedback"]>;
+  onSubmit: (verdict: FeedbackVerdict) => Promise<void>;
+}) {
+  const submitted = target.verdict;
+  const submitting = target.submitting;
 
-// How many prior turns we ship to the backend for context. Kept short so
-// the LLM prompt stays cheap; the backend re-caps this to 8 anyway.
-const HISTORY_TURNS = 8;
+  if (submitted) {
+    return (
+      <p className={styles.feedbackAck}>
+        {submitted === "keep"
+          ? "Kept — thanks."
+          : submitted === "adjust"
+            ? "Got it — I’ll adjust next time."
+            : "Removed — I won’t propose that again."}
+      </p>
+    );
+  }
+
+  return (
+    <div className={styles.feedbackRow} aria-label="Feedback on this reply">
+      <span className={styles.feedbackLabel}>How is this?</span>
+      {(["keep", "adjust", "not_me"] as FeedbackVerdict[]).map((v) => (
+        <button
+          key={v}
+          type="button"
+          className={
+            submitting === v
+              ? `${styles.feedbackChip} ${styles.feedbackChipActive}`
+              : styles.feedbackChip
+          }
+          disabled={Boolean(submitting)}
+          onClick={() => void onSubmit(v)}
+        >
+          {v === "keep" ? "Keep" : v === "adjust" ? "Adjust" : "Not me"}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 export default function Chat({
   title = "Ask Level",
@@ -205,6 +335,7 @@ export default function Chat({
   const [error, setError] = useState<string | null>(null);
   const [hintIndex, setHintIndex] = useState(0);
   const threadRef = useRef<HTMLDivElement | null>(null);
+  const activeEventSource = useRef<EventSource | null>(null);
 
   useEffect(() => {
     if (!busy || busyHints.length === 0) {
@@ -222,54 +353,216 @@ export default function Chat({
     const el = threadRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
-  }, [messages.length, busy]);
+  }, [messages, busy]);
+
+  useEffect(() => {
+    return () => {
+      // Kill any in-flight EventSource on unmount so a cross-page
+      // navigation doesn't leak a socket in the browser.
+      activeEventSource.current?.close();
+      activeEventSource.current = null;
+    };
+  }, []);
+
+  const submitFeedback = useCallback(
+    async (messageId: string, verdict: FeedbackVerdict) => {
+      const msg = messages.find((m) => m.id === messageId);
+      if (!msg?.feedback) return;
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === messageId && m.feedback
+            ? { ...m, feedback: { ...m.feedback, submitting: verdict } }
+            : m,
+        ),
+      );
+      try {
+        await api.post("/v1/feedback", {
+          agent: msg.feedback.agent,
+          field: msg.feedback.field,
+          value: msg.feedback.value,
+          verdict,
+        });
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === messageId && m.feedback
+              ? {
+                  ...m,
+                  feedback: {
+                    ...m.feedback,
+                    submitting: undefined,
+                    verdict,
+                  },
+                }
+              : m,
+          ),
+        );
+      } catch {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === messageId && m.feedback
+              ? { ...m, feedback: { ...m.feedback, submitting: undefined } }
+              : m,
+          ),
+        );
+      }
+    },
+    [messages],
+  );
+
+  // POST fallback used when SSE isn't supported OR the SSE call fails
+  // partway through. Returns the same shape as the streaming path.
+  const sendViaPost = useCallback(
+    async (text: string, history: Array<{ role: string; text: string }>): Promise<ChatResult> => {
+      return await api.post<ChatResult>("/v1/chat", { message: text, history });
+    },
+    [],
+  );
+
+  // Streaming SSE path. Falls back to POST on any error so the user
+  // always gets a reply. Progressively updates the last assistant bubble
+  // as `delta` events arrive; `done` supplies the final structured
+  // payload (email_draft, etc).
+  const sendViaSSE = useCallback(
+    (
+      text: string,
+      pendingMessageId: string,
+      onFinalize: (result: ChatResult) => void,
+      onError: () => void,
+    ) => {
+      const url = `${STREAM_ENDPOINT}?message=${encodeURIComponent(text)}`;
+      const es = new EventSource(url, { withCredentials: true });
+      activeEventSource.current = es;
+      let final: ChatResult | null = null;
+
+      es.addEventListener("delta", (evt) => {
+        try {
+          const data = JSON.parse((evt as MessageEvent).data);
+          if (typeof data.text === "string") {
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === pendingMessageId
+                  ? { ...m, text: (m.text ?? "") + data.text, streaming: true }
+                  : m,
+              ),
+            );
+          }
+        } catch {
+          // Malformed frame: ignore; keep listening.
+        }
+      });
+
+      es.addEventListener("done", (evt) => {
+        try {
+          final = JSON.parse((evt as MessageEvent).data) as ChatResult;
+        } catch {
+          final = null;
+        }
+        es.close();
+        activeEventSource.current = null;
+        if (final) {
+          onFinalize(final);
+        } else {
+          onError();
+        }
+      });
+
+      es.onerror = () => {
+        es.close();
+        activeEventSource.current = null;
+        onError();
+      };
+    },
+    [],
+  );
+
+  const finalizeMessage = useCallback(
+    (pendingId: string, text: string, result: ChatResult) => {
+      const feedback = feedbackTargetFromResult(result);
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === pendingId
+            ? {
+                ...m,
+                text,
+                streaming: false,
+                emailDraft: result.email_draft,
+                path: result.path,
+                intent: result.intent,
+                needsClarify: Boolean(result.needs_clarification),
+                feedback,
+              }
+            : m,
+        ),
+      );
+    },
+    [],
+  );
 
   const send = useCallback(
     async (message: string) => {
       const text = message.trim();
       if (!text || busy) return;
       const userMsg: Message = { id: nextId("u"), role: "user", text };
-      // Snapshot of history at send-time, BEFORE we append the new user
-      // message, so the backend sees "prior_turns" that lead up to `text`.
       const history = messages.slice(-HISTORY_TURNS).map((m) => ({
         role: m.role,
         text: m.text,
       }));
-      setMessages((prev) => [...prev, userMsg]);
+      const pendingId = nextId("a");
+      const pendingMsg: Message = {
+        id: pendingId,
+        role: "assistant",
+        text: "",
+        streaming: true,
+      };
+      setMessages((prev) => [...prev, userMsg, pendingMsg]);
       setBusy(true);
       setError(null);
       setDraft("");
-      try {
-        const res = await api.post<{ reply: string; email_draft?: EmailDraft }>(
-          "/v1/chat",
-          {
-            message: text,
-            history,
-          },
-        );
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: nextId("a"),
-            role: "assistant",
-            text: res.reply,
-            emailDraft: res.email_draft,
-          },
-        ]);
-        onAfterReply?.();
-      } catch (err) {
-        const detail = err instanceof Error ? err.message : String(err);
+
+      const removePending = () => {
+        setMessages((prev) => prev.filter((m) => m.id !== pendingId && m.id !== userMsg.id));
+        setDraft(text);
+      };
+      const handleFailure = (detail: string) => {
         const friendly = /timeout|aborted|failed to fetch|ApiError 5\d\d/i.test(detail)
           ? "That took longer than expected. Your message is back in the box \u2014 try Send again."
           : detail;
         setError(friendly);
-        setDraft(text);
-        setMessages((prev) => prev.filter((m) => m.id !== userMsg.id));
-      } finally {
-        setBusy(false);
+        removePending();
+      };
+
+      // Prefer SSE. On any SSE failure, fall back to POST so the user
+      // still gets an answer — the pending bubble carries over.
+      const finishPost = async () => {
+        try {
+          const result = await sendViaPost(text, history);
+          finalizeMessage(pendingId, result.reply, result);
+          onAfterReply?.();
+        } catch (err) {
+          handleFailure(err instanceof Error ? err.message : String(err));
+        } finally {
+          setBusy(false);
+        }
+      };
+
+      if (streamingSupported()) {
+        sendViaSSE(
+          text,
+          pendingId,
+          (result) => {
+            finalizeMessage(pendingId, result.reply, result);
+            onAfterReply?.();
+            setBusy(false);
+          },
+          () => {
+            void finishPost();
+          },
+        );
+      } else {
+        void finishPost();
       }
     },
-    [busy, messages, onAfterReply],
+    [busy, messages, sendViaPost, sendViaSSE, finalizeMessage, onAfterReply],
   );
 
   function handleSubmit(e: FormEvent) {
@@ -327,6 +620,9 @@ export default function Chat({
     </button>
   );
 
+  const anyStreaming = messages.some((m) => m.streaming);
+  const showTypingIndicator = busy && !anyStreaming;
+
   return (
     <section className={styles.panel} aria-label={title}>
       <div className={styles.head}>
@@ -356,7 +652,13 @@ export default function Chat({
                 m.role === "user" ? styles.bubbleUser : styles.bubbleLevel
               } ${m.emailDraft ? styles.bubbleWide : ""}`}
             >
-              <p>{m.text}</p>
+              <p>
+                {m.text}
+                {m.streaming ? <span className={styles.streamCaret} aria-hidden="true" /> : null}
+              </p>
+              {m.needsClarify ? (
+                <span className={styles.clarifyChip}>Level is asking</span>
+              ) : null}
               {m.emailDraft ? (
                 <EmailDraftCard
                   draft={m.emailDraft}
@@ -378,10 +680,16 @@ export default function Chat({
                   }}
                 />
               ) : null}
+              {m.role === "assistant" && m.feedback && !m.streaming ? (
+                <FeedbackChips
+                  target={m.feedback}
+                  onSubmit={(verdict) => submitFeedback(m.id, verdict)}
+                />
+              ) : null}
             </div>
           ))}
 
-          {busy && statusLine ? (
+          {showTypingIndicator && statusLine ? (
             <div
               className={`${styles.bubble} ${styles.bubbleLevel} ${styles.bubbleTyping}`}
               aria-label="Level is thinking"

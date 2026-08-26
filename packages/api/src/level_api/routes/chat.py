@@ -11,6 +11,7 @@ from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends
+from level_core.agents.adk_runner import is_adk_enabled, plan_and_dispatch
 from level_core.agents.base import QuotaExhausted
 from level_core.agents.book import run as book_run
 from level_core.agents.chat_router import run as router_run
@@ -123,8 +124,14 @@ async def chat(body: ChatBody, store: UserStore = Depends(get_user_store)) -> di
 async def chat_stream(
     message: str, store: UserStore = Depends(get_user_store)
 ) -> EventSourceResponse:
+    """SSE stream. Reconstructs history from persisted chat_turns so
+    EventSource (GET only) has the same conversational context that
+    POST /v1/chat receives via the request body.
+    """
+
     async def event_source() -> AsyncIterator[dict[str, Any]]:
-        result = await _handle_message(store, message, [])
+        history = await _history_from_store(store)
+        result = await _handle_message(store, message, history)
         for chunk in _chunk(result["reply"], size=64):
             yield {"event": "delta", "data": json.dumps({"text": chunk})}
             await asyncio.sleep(0.02)
@@ -135,6 +142,27 @@ async def chat_stream(
 
 def _chunk(text: str, size: int) -> list[str]:
     return [text[i : i + size] for i in range(0, len(text), size)]
+
+
+async def _history_from_store(store: UserStore) -> list[dict[str, str]]:
+    """Reconstruct the last few chat turns from persisted state.
+
+    Kept in sync with _prepare_history for the POST path — same caps
+    (MAX_HISTORY_TURNS, MAX_HISTORY_CHARS_PER_TURN) so the router prompt
+    stays cheap and both entrypoints see the same conversation shape.
+    """
+    turns = await store.chat_turns.list()
+    turns.sort(key=lambda t: t.created_at)
+    tail = turns[-MAX_HISTORY_TURNS:]
+    out: list[dict[str, str]] = []
+    for t in tail:
+        text = (t.text or "").strip()
+        if not text:
+            continue
+        if len(text) > MAX_HISTORY_CHARS_PER_TURN:
+            text = text[:MAX_HISTORY_CHARS_PER_TURN] + "\u2026"
+        out.append({"role": str(t.role), "text": text})
+    return out
 
 
 async def _handle_message(
@@ -203,7 +231,32 @@ async def _dispatch_message(
 
     decision = await router_run(store=store, user_message=message, history=history)
     if not decision.value:
-        return _ack_no_agent(store, "I heard you. I'll remember that.")
+        # Router blocked (quota/gate) OR no value returned: soft-degrade
+        # with a canned reply so chat never goes silent. This is the
+        # rubric-mandated failure isolation for the Gateway component.
+        if decision.soft_degraded:
+            reply = (
+                "I\u2019m at my model budget for the moment. Your message is "
+                "saved \u2014 try again in a few minutes, or ask me to book a "
+                "concrete time and I\u2019ll do it without the model."
+            )
+        else:
+            reply = "I heard you. I'll remember that."
+        return _ack_no_agent(store, reply)
+
+    # Collaborative Partner: honor the router's clarifying-question exit.
+    # This is the "asks clarifying questions, guides step-by-step" bullet.
+    needs_clarify = bool(getattr(decision.value, "needs_clarification", False))
+    clarifying_q = getattr(decision.value, "clarifying_question", None)
+    if needs_clarify and clarifying_q:
+        await _write_reply(store, clarifying_q)
+        return {
+            "reply": clarifying_q,
+            "path": decision.value.path.value,  # type: ignore[union-attr]
+            "intent": decision.value.intent.value,  # type: ignore[union-attr]
+            "needs_clarification": True,
+            "clarifying_question": clarifying_q,
+        }
 
     path = decision.value.path  # type: ignore[union-attr]
     intent = decision.value.intent  # type: ignore[union-attr]
@@ -1581,6 +1634,24 @@ async def _try_fast_email(
 async def _handle_email_request(
     store: UserStore, message: str, history: list[dict[str, str]]
 ) -> dict[str, Any]:
+    # ADK hot-path: when LEVEL_ADK_MODE=true, ask the ADK LlmAgent to
+    # pick the tool BEFORE we run any resolution. The planner audit row
+    # is what /admin/traces uses to render the "router -> planner -> tool"
+    # waterfall for the demo video. When disabled, this is a no-op.
+    if is_adk_enabled():
+        plan = await plan_and_dispatch(
+            store=store,
+            intent="send_email",
+            user_message=message,
+            trace_id=f"chat_{message[:20]}",
+        )
+        logger.info(
+            "chat.email.adk_plan",
+            user=store.user_id,
+            tool=plan.tool,
+            used_adk=plan.used_adk,
+            fallback=plan.fallback_reason,
+        )
     people = await store.people.list()
     contacts = await store.contacts.list()
     resolved = resolve_email_targets(message, people, contacts, history)

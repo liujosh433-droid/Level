@@ -21,8 +21,10 @@ from level_api.routes import (
     chat,
     contacts,
     email,
+    feedback,
     healthz,
     me,
+    media,
     profile,
     reminders,
     schedule,
@@ -76,6 +78,8 @@ def create_app() -> FastAPI:
     app.include_router(schedule.router, prefix="/v1/schedule")
     app.include_router(sources.router, prefix="/v1/sources")
     app.include_router(today.router, prefix="/v1/today")
+    app.include_router(feedback.router, prefix="/v1/feedback")
+    app.include_router(media.router, prefix="/v1/media")
     app.include_router(admin.router, prefix="/v1/admin")
 
     @app.exception_handler(Exception)

@@ -1,40 +1,82 @@
 # Social post drafts
 
-Copy either and post before the submission deadline. Both include the
-required `#AllThingsAgenticHackathon` hashtag.
+Both drafts already include the required `#AllThingsAgenticHackathon`
+hashtag and hackathon disclosure. Post before the submission deadline.
 
-## X / Twitter
+## X / Twitter (thread)
 
-> Shipped Level for #AllThingsAgenticHackathon: a caregiver partner that
-> reads your Google Calendar, learns your family's usual rhythm, and
-> nudges you when something's missing (like the soccer shoes you keep
-> forgetting).
+**1/**
+> Shipped Level for #AllThingsAgenticHackathon: a caregiver partner
+> that reads your Google Calendar, learns your family's usual rhythm,
+> and nudges you when something's missing — like the soccer shoes you
+> keep forgetting.
 >
-> Gemini 3.5 + Google ADK + Cloud Run + Firestore.
+> Built on Gemini 3.5 + ADK + Cloud Run + Firestore.
+
+**2/**
+> Three design bets:
 >
-> Not-me clicks teach the agent in-session, no fine-tune required.
+> • Loop closes on the *user*: Keep/Adjust/Not-me chips write to a
+>   Memory Bank + Negatives that flow back as few-shot on the next
+>   call. Adapts without fine-tune.
+> • O(1) rate/cost gate via a hot counter (was O(N) over ai_audit).
+> • ADK on the hot path, not the shelf.
+
+**3/**
+> Model soup:
 >
-> [demo] [repo]
+> • Gemini 3.5 Flash + Pro (primary)
+> • Vertex 2.5 (tier-2 fallback on 429)
+> • Gemma via Vertex Model Garden (tier-3 extraction fallback)
+> • Veo 3 for the weekly recap video
+> • Lyria for the "Hear my day" chime
+>
+> Every fallback is visible in /admin/traces.
+
+**4/**
+> Demo: [YOUTUBE]
+> Writeup: [DEVTO-LINK]
+> Code: [GITHUB]
+>
+> #AllThingsAgenticHackathon
 
 ## LinkedIn
 
-> Just finished my submission for the All Things Agentic Hackathon: Level,
-> a caregiver's second set of hands.
+> Just finished my submission for the All Things Agentic Hackathon:
+> **Level**, a caregiver's second set of hands.
+>
+> The problem: a busy caregiver's Google Calendar carries pickups,
+> therapy, sports, and school events for 2–3 people in parallel with
+> their own life. When something slips the cost is a 3pm text chain.
+>
+> Level watches the calendar and speaks up gently when something is
+> missing. It also drafts the email, blocks the conflict, and
+> remembers the correction the next time.
 >
 > A few design bets worth calling out:
-> - Structured everything: a shared `activity_type` enum joins usuals,
->   priorities, reminders, and agenda events - so reminder matching is
->   `(person_id, activity_type)` equality, no per-event LLM.
-> - Every "Not me" click writes a negative that becomes few-shot on the
->   next agent call. The system adapts to a family shape without a
->   fine-tune.
-> - Every AI call is guarded: `<user_input>` fence, `source_span`
->   hallucination check, PII scrub, structured JSON output, daily cost
->   cap, human-in-the-loop for every external mutation.
 >
-> Built on Gemini 3.5 + Google ADK + Cloud Run + Firestore.
+> — **The loop closes on the user, not the model.** Every AI-authored
+> artifact carries Keep / Adjust / Not-me chips. Keep persists to a
+> Memory Bank; Adjust and Not-me write few-shot negatives. The
+> generator agents (email, day summary) start sounding like the
+> caregiver after ~3 chats.
+>
+> — **Guardrails belong in code, not the prompt.** Model Armor
+> (deterministic prompt-injection prefilter), signed Agent Identity
+> in every audit row, `source_span` hallucination guard, PII scrub
+> before every call, human-in-the-loop for every external mutation,
+> O(1) rate/cost gate, tiered fallback ending in Gemma.
+>
+> — **ADK is on the hot path.** `LEVEL_ADK_MODE=true` routes email +
+> book intents through a `google.adk.LlmAgent`. Planner audit rows
+> carry a parent_audit_id so /admin/traces renders a real waterfall.
+>
+> Built on Gemini 3.5 (Pro + Flash), Google ADK, Cloud Run, Cloud Run
+> Jobs, Firestore, Vertex AI, Cloud Trace, Cloud Scheduler, plus
+> Gemma, Veo 3, and Lyria as bonus Google models.
 >
 > #AllThingsAgenticHackathon
 >
-> Demo: [link]
-> Repo: [link]
+> Demo: [YOUTUBE]
+> Writeup: [DEVTO-LINK]
+> Code: [GITHUB]

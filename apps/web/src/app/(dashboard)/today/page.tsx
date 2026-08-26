@@ -8,7 +8,14 @@ import RoleLoadBar from "@/components/RoleLoadBar";
 import { api, ApiError } from "@/lib/api";
 import { browserTimeZone, formatDateOnly } from "@/lib/dates";
 import { buildPersonColorMap } from "@/lib/personColor";
-import type { CalendarSyncInfo, MissingUsualWeek, TodayResponse, WhoAmI } from "@/lib/types";
+import type {
+  CalendarSyncInfo,
+  LearnedResponse,
+  MissingUsualWeek,
+  ProactiveCard,
+  TodayResponse,
+  WhoAmI,
+} from "@/lib/types";
 import styles from "./today.module.css";
 
 const WEEKDAY_LABEL = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
@@ -86,6 +93,8 @@ export default function TodayPage() {
   const [resolvingId, setResolvingId] = useState<string | null>(null);
 
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [learned, setLearned] = useState<LearnedResponse | null>(null);
+  const [dismissedCardIds, setDismissedCardIds] = useState<Set<string>>(() => new Set());
   const emptyPolls = useRef(0);
 
   const load = useCallback(async () => {
@@ -106,6 +115,12 @@ export default function TodayPage() {
       setNeedsConnect(false);
       setLoadError(null);
       setDismissMissing(Boolean(today.missing_usuals_week_dismissed));
+      // "What Level learned" strip — non-blocking; a failure here just
+      // hides the section, it doesn't turn into a page-level error.
+      void api
+        .get<LearnedResponse>("/v1/today/learned")
+        .then(setLearned)
+        .catch(() => undefined);
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         setNeedsConnect(true);
@@ -195,6 +210,9 @@ export default function TodayPage() {
   const weekday = data ? formatDateOnly(data.date, { weekday: "long" }) : null;
 
   const hasMissing = !dismissMissing && missingByDay.length > 0;
+  const activeCards = (data?.proactive_cards ?? []).filter(
+    (c) => !dismissedCardIds.has(c.card_id),
+  );
 
   async function dismissMissingWeek() {
     setDismissMissing(true);
@@ -202,6 +220,19 @@ export default function TodayPage() {
       await api.post("/v1/today/missing-week/dismiss", {});
     } catch {
       setDismissMissing(false);
+    }
+  }
+
+  async function dismissProactiveCard(cardId: string) {
+    setDismissedCardIds((prev) => new Set(prev).add(cardId));
+    try {
+      await api.post("/v1/today/proactive-cards/dismiss", { card_id: cardId });
+    } catch {
+      setDismissedCardIds((prev) => {
+        const next = new Set(prev);
+        next.delete(cardId);
+        return next;
+      });
     }
   }
 
@@ -240,6 +271,72 @@ export default function TodayPage() {
             </p>
             <RoleLoadBar load={data?.week_load} />
           </header>
+
+          {activeCards.length > 0 && (
+            <section
+              className={`${styles.block} ${styles.proactive}`}
+              aria-label="Level noticed"
+            >
+              <div className={styles.proactiveHead}>
+                <h2>Level noticed while you slept</h2>
+                <p className={styles.missingHint}>
+                  Autonomous nudges from the nightly job. Tap a card to act, or dismiss to hide until next week.
+                </p>
+              </div>
+              <ul className={styles.proactiveList}>
+                {activeCards.map((card: ProactiveCard) => (
+                  <li key={card.card_id} className={styles.proactiveCard}>
+                    <div>
+                      <p className={styles.proactiveText}>{card.text}</p>
+                      <p className={styles.meta}>{card.category_label} &middot; {card.day}</p>
+                    </div>
+                    <div className={styles.proactiveActions}>
+                      <button
+                        type="button"
+                        className="button-primary"
+                        onClick={() => {
+                          const payload = { detail: card.text } as CustomEventInit;
+                          window.dispatchEvent(new CustomEvent("level:proactive_ask", payload));
+                        }}
+                      >
+                        Yes, put it back
+                      </button>
+                      <button
+                        type="button"
+                        className="button-ghost"
+                        onClick={() => void dismissProactiveCard(card.card_id)}
+                      >
+                        Not this week
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
+
+          {learned && learned.total > 0 && (
+            <section
+              className={`${styles.block} ${styles.learned}`}
+              aria-label="What Level learned"
+            >
+              <div className={styles.learnedHead}>
+                <h2>What Level learned</h2>
+                <span className={styles.learnedCount}>{learned.total} corrections applied</span>
+              </div>
+              <ul className={styles.learnedList}>
+                {learned.recent.map((row) => (
+                  <li key={row.negative_id} className={styles.learnedRow}>
+                    <span className={styles.learnedAgent}>{row.agent}</span>
+                    <span className={styles.learnedValue}>“{row.value}”</span>
+                    {row.reason ? (
+                      <span className={styles.meta}>&mdash; {row.reason}</span>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
 
           {hasMissing && (
             <section className={`${styles.block} ${styles.missing}`}>

@@ -4,6 +4,196 @@
   gap: 18px;
 }
 
+.headerRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.viewToggle {
+  display: inline-flex;
+  gap: 4px;
+  background: var(--paper-warm);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  padding: 3px;
+}
+
+.viewToggle button {
+  border: none;
+  background: transparent;
+  color: var(--ink-soft);
+  font-size: 13px;
+  font-weight: 500;
+  padding: 6px 12px;
+  border-radius: calc(var(--radius) - 2px);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.viewToggle button:hover {
+  color: var(--ink);
+}
+
+.viewToggle .toggleActive {
+  background: var(--card);
+  color: var(--ink);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 6%);
+}
+
+.groupList {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.group {
+  background: var(--card);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.groupHeader {
+  display: grid;
+  grid-template-columns: 140px 1fr auto auto auto;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  cursor: pointer;
+  background: var(--paper-warm);
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 13px;
+}
+
+.groupHeader:hover {
+  background: var(--paper);
+}
+
+.groupAgent {
+  font-weight: 500;
+  color: var(--ink);
+}
+
+.groupMeta {
+  color: var(--ink-mute);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+}
+
+.groupCost,
+.groupLatency,
+.groupCount {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
+.groupCount {
+  color: var(--ink-mute);
+}
+
+.pillRow {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.pill {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--paper-warm);
+  color: var(--ink-soft);
+  font-size: 11px;
+  font-weight: 500;
+  border: 1px solid var(--line-soft);
+}
+
+.pillWarn {
+  background: color-mix(in oklab, var(--alert) 12%, transparent);
+  color: var(--alert);
+  border-color: color-mix(in oklab, var(--alert) 30%, transparent);
+}
+
+.pillGood {
+  background: color-mix(in oklab, var(--accent) 12%, transparent);
+  color: var(--accent);
+  border-color: color-mix(in oklab, var(--accent) 30%, transparent);
+}
+
+.pillInfo {
+  background: color-mix(in oklab, #6b8afd 14%, transparent);
+  color: #4a63cc;
+  border-color: color-mix(in oklab, #6b8afd 30%, transparent);
+}
+
+.spans {
+  padding: 8px 14px 14px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.span {
+  display: grid;
+  grid-template-columns: 200px 90px 1fr;
+  gap: 12px;
+  align-items: center;
+  padding: 6px 0;
+  border-bottom: 1px dashed var(--line-soft);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+}
+
+.span:last-child {
+  border-bottom: none;
+}
+
+.spanBarWrap {
+  position: relative;
+  height: 8px;
+  background: var(--paper-warm);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.spanBar {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: linear-gradient(90deg, var(--accent) 0%, color-mix(in oklab, var(--accent) 60%, transparent) 100%);
+  border-radius: 4px;
+}
+
+.spanLabel {
+  color: var(--ink);
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.spanChildIndent {
+  padding-left: 16px;
+  border-left: 2px solid color-mix(in oklab, var(--accent) 30%, transparent);
+}
+
+.raw {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  color: var(--ink-mute);
+  white-space: pre-wrap;
+  word-break: break-all;
+  padding: 6px 8px;
+  background: var(--paper);
+  border-radius: 4px;
+  border: 1px solid var(--line-soft);
+  max-height: 200px;
+  overflow: auto;
+}
+
 .table {
   width: 100%;
   border-collapse: collapse;

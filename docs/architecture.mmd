@@ -1,38 +1,156 @@
-flowchart TD
-  User([Caregiver])
-  Web[Next.js dashboard\napps/web]
-  Api[FastAPI on Cloud Run\npackages/api]
-  Job[Nightly Cloud Run Job\npackages/jobs]
-  Store[(Firestore\nusers/uid/**)]
-  Vertex[Gemini 3.5\nvia Vertex AI]
-  Cal[Google Calendar API]
-  Gmail[Gmail API]
-  Browser[Browser\nWeb Speech API]
+%% Level - agent architecture (v2)
+%% Every named box in this diagram maps to a real file. See
+%% docs/STATE_AND_LIFECYCLE.md for the paths.
 
-  User -->|"HTTPS + cookie"| Web
-  Web -->|"/v1/*"| Api
-  Web <-->|"mic + TTS"| Browser
+flowchart TB
+  classDef user fill:#f8f4e8,stroke:#c2b898,color:#1a1a1a
+  classDef web fill:#e5efe9,stroke:#7fae8a,color:#1a1a1a
+  classDef api fill:#e6ecf5,stroke:#7f97c4,color:#1a1a1a
+  classDef agent fill:#f1ebd6,stroke:#c9b673,color:#1a1a1a
+  classDef guard fill:#f7dfd0,stroke:#e1957f,color:#1a1a1a
+  classDef data fill:#e8e0f0,stroke:#a493c1,color:#1a1a1a
+  classDef google fill:#fff7d6,stroke:#c9b673,color:#1a1a1a
+  classDef job fill:#dceaf3,stroke:#6b95b5,color:#1a1a1a
 
-  Api -->|"read/write"| Store
-  Api -->|"events + watch"| Cal
-  Api -->|"send"| Gmail
-  Api -->|"call_agent\n(structured JSON,\nsource_span guard,\ncost cap)"| Vertex
+  User(["Caregiver"]):::user
 
-  Cal -->|"push"| Webhook[/v1/calendar/webhook/]
-  Webhook --> Api
-
-  subgraph Agents [ADK agents]
-    Router[ChatRouterAgent]
-    Role[RoleAgent]
-    Usual[UsualAgent]
-    Activity[ActivityAgent]
-    Priority[PriorityAgent]
-    Reminder[ReminderAgent]
-    Email[EmailAgent]
-    Summary[SummaryAgent]
+  subgraph Client [Next.js dashboard - apps/web]
+    direction TB
+    Today["/today - Chat + proactive cards + What Level learned"]
+    Traces["/admin/traces - live waterfall"]
+    Voice["Web Speech API - STT + TTS"]
   end
-  Api --> Agents
-  Agents --> Vertex
 
-  Job -->|"nightly recompute\n+ TTL + watch renew"| Store
-  Job --> Cal
+  subgraph Gateway [FastAPI Gateway - packages/api]
+    direction TB
+    Chat["/v1/chat + /v1/chat/stream - SSE"]
+    Feedback["/v1/feedback - keep / adjust / not-me"]
+    Media["/v1/media/recap + /v1/media/chime"]
+    Admin["/v1/admin - agents, traces, verify"]
+    RestOfAPI["/v1/{today,me,sources,email,schedule,contacts,reminders,profile,auth,calendar}"]
+    SecHeaders["Security headers + Trace-Id middleware"]
+  end
+
+  subgraph Guardrails [Guardrails - packages/core]
+    direction TB
+    Armor["ModelArmor - prompt-injection prefilter"]:::guard
+    Gate["O(1) Rate + Cost Gate - hot counter"]:::guard
+    PII["strip_pii - regex prefilter"]:::guard
+    Fence["Anti-injection fence + system directive"]:::guard
+    Span["source_span hallucination guard"]:::guard
+    Identity["AgentIdentity - HMAC-signed identity token"]:::guard
+    Safety["Vertex safety filters"]:::guard
+    HITL["Human-in-the-loop - confirmation tokens"]:::guard
+  end
+
+  subgraph Runtime [Agent Runtime - packages/core/level_core/agents]
+    direction TB
+    Registry["AgentRegistry - declarative catalog"]:::agent
+    Base["call_agent - retry + refinement + tiered fallback"]:::agent
+    ADKPlan["ADKPlannerAgent - LEVEL_ADK_MODE=true"]:::agent
+
+    subgraph Extractors [Extractors]
+      direction LR
+      Router["ChatRouterAgent + needs_clarification"]:::agent
+      Role["RoleAgent"]:::agent
+      Usual["UsualAgent"]:::agent
+      Activity["ActivityAgent"]:::agent
+      Priority["PriorityAgent"]:::agent
+      Reminder["ReminderAgent"]:::agent
+      Book["BookAgent"]:::agent
+      PersonEdit["PersonEditAgent"]:::agent
+    end
+
+    subgraph Generators [Generators - max_turns=3]
+      direction LR
+      Email["EmailAgent"]:::agent
+      Summary["SummaryAgent"]:::agent
+    end
+  end
+
+  subgraph Google [Google models]
+    direction TB
+    Gemini["Gemini 3.5 Flash + Pro - Vertex or AI Studio"]:::google
+    Vertex25["Gemini 2.5 - Tier-2 fallback"]:::google
+    Gemma["Gemma 3 - Tier-3 extraction fallback"]:::google
+    Veo["Veo 3 - weekly recap"]:::google
+    Lyria["Lyria - chime for Hear my day"]:::google
+    ADK["Google ADK - LlmAgent + FunctionTool"]:::google
+  end
+
+  subgraph MemoryLayer [Memory + State - packages/core/storage]
+    direction TB
+    People["people, usuals, priorities, reminders, contacts"]:::data
+    Agenda["agenda cache + daily_agenda"]:::data
+    ChatTurns["chat_turns (capped at 20)"]:::data
+    Audit["ai_audit (30d TTL) + parent_audit_id"]:::data
+    Neg["negatives - few-shot on next agent call"]:::data
+    Bank["MemoryBank - long-lived facts (40 LRU)"]:::data
+    GateCtr["_gate_counters - O(1) hot counter"]:::data
+    Tokens["tokens - encrypted OAuth"]:::data
+  end
+
+  subgraph External [External Google surfaces]
+    Cal["Google Calendar API + push watch"]:::google
+    Gmail["Gmail API - draft + send with confirmation token"]:::google
+  end
+
+  Nightly["Nightly Cloud Run Job - refresh + trim + proactive cards"]:::job
+  Sched["Cloud Scheduler"]:::job
+  OTel["Cloud Trace + structured logs"]:::job
+
+  User -->|HTTPS + signed cookie| Client
+  Client <-->|mic + TTS| Voice
+  Client -->|SSE| Chat
+  Client --> Feedback
+  Client --> Media
+  Client --> Admin
+  Client --> RestOfAPI
+  Gateway --- SecHeaders
+
+  Chat --> Armor
+  Feedback --> Armor
+  RestOfAPI --> Armor
+  Armor --> Gate
+  Gate --> PII
+  PII --> Fence
+  Fence --> Base
+
+  Base --> Registry
+  Base --> Identity
+  Base --> Extractors
+  Base --> Generators
+  Base --> Safety
+  Base --> Span
+  Extractors --> Gemini
+  Generators --> Gemini
+
+  Gemini -.429/quota.-> Vertex25
+  Vertex25 -.429/quota.-> Gemma
+  Gemma -.results.-> Extractors
+
+  Chat --> ADKPlan
+  ADKPlan --> ADK
+  ADKPlan --> Extractors
+  ADKPlan --> Generators
+
+  Chat --> HITL
+  HITL --> Cal
+  Chat --> Gmail
+  Media --> Veo
+  Media --> Lyria
+
+  Base --> Audit
+  Base --> GateCtr
+  Feedback --> Neg
+  Feedback --> Bank
+  Generators <-.recall.- Bank
+  Extractors <-.few-shot.- Neg
+
+  Cal -->|push webhook| Chat
+  Sched --> Nightly
+  Nightly --> MemoryLayer
+  Nightly --> Cal
+
+  Base --> OTel
+  Chat --> OTel

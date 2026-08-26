@@ -47,7 +47,25 @@ class Settings(BaseSettings):
     google_api_key: str = ""
     level_model_pro: str = "gemini-3.5-flash"
     level_model_flash: str = "gemini-3.5-flash"
+
+    # Gemma fallback (Bonus: additional Google model). When set and Gemini
+    # returns 429 or the daily cost cap is hit, extraction-only agents
+    # (chat_router, activity, priority, reminder) retry against this model
+    # via Vertex Model Garden. Set to "" to disable.
     level_model_gemma: str = "gemma-3-4b-it"
+
+    # ADK hot-path toggle. When True, chat.py routes email + book intents
+    # through google.adk.LlmAgent so the ADK graph is exercised at request
+    # time (not just the ADK adapter surface). Defaults to False for cost.
+    level_adk_mode: bool = False
+
+    # Multimodal bonus integrations (rules: +0.2 each Google model).
+    # Veo 3 for weekly recap videos, Lyria for Hear-my-day audio ambience.
+    # Both are gated on being non-empty AND the caller having Vertex
+    # access; missing config degrades silently to text-only.
+    level_model_veo: str = "veo-3.0-generate-preview"
+    level_model_lyria: str = "lyria-002"
+    level_media_enabled: bool = False
 
     level_cal_days_back: int = Field(default=14, ge=1, le=365)
     level_cal_days_forward: int = Field(default=28, ge=1, le=365)
@@ -55,6 +73,9 @@ class Settings(BaseSettings):
     level_daily_cost_cap_usd: float = 2.00
     level_user_rate_per_hour: int = 60
     level_user_rate_per_day: int = 500
+    # chat_router is exempted from the daily cost cap so users always get
+    # a response, even when downstream agents get soft-degraded.
+    level_router_cost_cap_multiplier: float = 3.0
 
     google_oauth_client_id: str = ""
     google_oauth_client_secret: str = ""

@@ -104,6 +104,20 @@ export type CalendarSyncInfo = {
   pulling?: boolean;
 };
 
+export type ProactiveCard = {
+  card_id: string;
+  kind: "missing_usual" | string;
+  week_start: string;
+  day: string;
+  weekday: number;
+  category: string;
+  category_label: string;
+  person_id: string;
+  person_name: string;
+  text: string;
+  created_at: string;
+};
+
 export type TodayResponse = {
   date: string;
   tz?: string;
@@ -118,7 +132,22 @@ export type TodayResponse = {
   missing_usuals_week: MissingUsualWeek[];
   missing_usuals_week_dismissed?: boolean;
   week_load: WeekLoadRow[];
+  proactive_cards?: ProactiveCard[];
   sync?: CalendarSyncInfo;
+};
+
+export type LearnedRow = {
+  negative_id: string;
+  agent: string;
+  field: string;
+  value: string;
+  reason: string | null;
+  created_at: string;
+};
+
+export type LearnedResponse = {
+  total: number;
+  recent: LearnedRow[];
 };
 
 export type SourcesStatus = {
@@ -142,5 +171,26 @@ export type TraceEntry = {
   latency_ms: number;
   hallucinated: boolean;
   blocked_by_safety: boolean;
+  fallback_used?: string | null;
+  turns_taken?: number;
+  parent_audit_id?: string | null;
+  trace_id?: string | null;
   created_at: string;
+};
+
+export type TraceGroup = {
+  trace_id: string;
+  root: TraceEntry;
+  children: TraceEntry[];
+  row_count: number;
+  total_cost_usd: number;
+  total_latency_ms: number;
+  any_hallucinated: boolean;
+  any_fallback: boolean;
+  started_at: string;
+};
+
+export type TracesResponse = {
+  traces: TraceEntry[];
+  grouped: TraceGroup[];
 };

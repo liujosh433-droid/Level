@@ -162,6 +162,20 @@ async def get_today(
 
     sync_meta = await store.calendar_sync.read() or {}
     calendars = sync_meta.get("calendars") or []
+    # Proactive cards are populated by the nightly job (packages/jobs).
+    # We only surface cards for the CURRENT week so a stale run doesn't
+    # keep nudging after Monday rolls over.
+    proactive_raw = profile.get("proactive_cards") or {}
+    week_start_iso = week_start.isoformat()
+    proactive_cards: list[dict[str, Any]] = []
+    if (
+        isinstance(proactive_raw, dict)
+        and proactive_raw.get("week_start") == week_start_iso
+    ):
+        for card in (proactive_raw.get("cards") or [])[:5]:
+            if card.get("card_id") in _dismissed_card_ids(profile, week_start_iso):
+                continue
+            proactive_cards.append(card)
     return {
         "date": today.isoformat(),
         "tz": tz.key,
@@ -179,6 +193,7 @@ async def get_today(
         "missing_usuals_week": missing_week_view,
         "missing_usuals_week_dismissed": dismissed_this_week,
         "week_load": _week_load(week),
+        "proactive_cards": proactive_cards,
         "sync": {
             "calendars": calendars,
             "last_error": sync_meta.get("last_error"),
@@ -187,6 +202,47 @@ async def get_today(
             "pulling": pulling,
         },
     }
+
+
+def _dismissed_card_ids(profile: dict[str, Any], week_start_iso: str) -> set[str]:
+    """Return card ids the user dismissed this week."""
+    raw = profile.get("dismissed_proactive_cards")
+    if not isinstance(raw, dict) or raw.get("week_start") != week_start_iso:
+        return set()
+    return {str(x) for x in (raw.get("card_ids") or []) if x}
+
+
+class DismissCardBody(BaseModel):
+    card_id: str = Field(min_length=1, max_length=160)
+
+
+@router.post("/proactive-cards/dismiss")
+async def dismiss_proactive_card(
+    body: DismissCardBody, store: UserStore = Depends(get_user_store)
+) -> dict[str, str]:
+    """Hide one proactive card for the rest of this ISO week.
+
+    We keep the dismissal per-card (not global) so unrelated cards keep
+    working. Next week the nightly job regenerates fresh cards.
+    """
+    profile = await store.profile.read() or {}
+    tz = resolve_tz(profile.get("tz") if isinstance(profile.get("tz"), str) else None)
+    today = datetime.now(tz).date()
+    week_start, _week_end = current_week_bounds(today)
+    week_start_iso = week_start.isoformat()
+    raw = profile.get("dismissed_proactive_cards")
+    if not isinstance(raw, dict) or raw.get("week_start") != week_start_iso:
+        ids: list[str] = []
+    else:
+        ids = [str(x) for x in (raw.get("card_ids") or []) if x]
+    if body.card_id not in ids:
+        ids.append(body.card_id)
+    profile["dismissed_proactive_cards"] = {
+        "week_start": week_start_iso,
+        "card_ids": ids,
+    }
+    await store.profile.write(profile)
+    return {"status": "dismissed", "card_id": body.card_id}
 
 
 @router.post("/missing-week/dismiss")
@@ -356,3 +412,33 @@ def _week_load(week_events: list[Any]) -> list[dict[str, Any]]:
 async def summary(store: UserStore = Depends(get_user_store)) -> dict[str, str]:
     text = await get_daily_summary(store)
     return {"summary": text}
+
+
+@router.get("/learned")
+async def what_level_learned(
+    store: UserStore = Depends(get_user_store),
+) -> dict[str, Any]:
+    """Return the 3 most recent corrections Level applied, plus total count.
+
+    Powers the "What Level learned" strip on /today. This is the visible
+    manifestation of the Collaborative Partner rubric's "constantly adapts"
+    bullet — the same negatives get injected into the next matching agent
+    call as few-shot, but here they're also surfaced to the user.
+    """
+    negatives = await store.negatives.list()
+    negatives.sort(key=lambda n: n.created_at, reverse=True)
+    latest = negatives[:3]
+    return {
+        "total": len(negatives),
+        "recent": [
+            {
+                "negative_id": n.negative_id,
+                "agent": n.agent.value,
+                "field": n.field,
+                "value": n.value,
+                "reason": n.reason,
+                "created_at": n.created_at.isoformat(),
+            }
+            for n in latest
+        ],
+    }

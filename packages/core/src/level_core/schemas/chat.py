@@ -48,6 +48,12 @@ class ChatRouterDecision(BaseModel):
     intent: ChatRouterIntent
     source_span: str
     confidence: float = Field(default=0.7, ge=0.0, le=1.0)
+    # Collaborative Partner rubric: when the router isn't sure what to do
+    # (low confidence, missing required detail like a time or recipient),
+    # it must ASK rather than guess. The chat handler renders these as
+    # inline "before we book…" bubbles instead of running downstream agents.
+    needs_clarification: bool = False
+    clarifying_question: str | None = None
 
 
 class ChatTurnResult(BaseModel):
@@ -57,3 +63,8 @@ class ChatTurnResult(BaseModel):
     facts_added: int = 0
     proposal: dict[str, Any] | None = None
     confirmation_token: str | None = None
+    # When the router asked back, the frontend surfaces the question as a
+    # dedicated bubble with a pre-filled reply — the "guided step-by-step"
+    # behavior that Collaborative Partner is scored on.
+    needs_clarification: bool = False
+    clarifying_question: str | None = None

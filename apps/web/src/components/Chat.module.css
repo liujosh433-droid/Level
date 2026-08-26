@@ -371,6 +371,85 @@
   background: var(--chrome);
 }
 
+.streamCaret {
+  display: inline-block;
+  width: 0.15rem;
+  height: 0.9rem;
+  margin-left: 2px;
+  background: var(--signal-deep);
+  vertical-align: text-bottom;
+  animation: caretBlink 0.9s steps(2, end) infinite;
+}
+
+.feedbackRow {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+  margin-top: 0.55rem;
+  padding-top: 0.55rem;
+  border-top: 1px dashed var(--line);
+}
+
+.feedbackLabel {
+  font-size: 0.72rem;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--mist);
+  margin-right: 0.15rem;
+}
+
+.feedbackChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.28rem 0.65rem;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  background: transparent;
+  color: var(--foam);
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+
+.feedbackChip:hover:not(:disabled) {
+  border-color: var(--signal);
+  color: var(--signal-deep);
+  background: var(--signal-soft);
+}
+
+.feedbackChipActive {
+  border-color: var(--signal);
+  color: var(--signal-deep);
+  background: var(--signal-soft);
+}
+
+.feedbackAck {
+  font-size: 0.78rem;
+  color: var(--signal-deep);
+}
+
+.clarifyChip {
+  display: inline-block;
+  margin-top: 0.4rem;
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--signal-soft) 65%, transparent);
+  color: var(--signal-deep);
+  font-size: 0.72rem;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+@keyframes caretBlink {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
 @keyframes waitingPulse {
   0%,
   100% {

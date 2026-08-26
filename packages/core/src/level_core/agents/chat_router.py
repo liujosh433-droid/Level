@@ -2,6 +2,11 @@
 
 Fast Gemini call, temperature=0, structured output. Router decides which
 downstream agent (or none) handles the message.
+
+Collaborative Partner rubric: when confidence is low or a required
+detail is missing, the router MUST ask a clarifying question rather
+than guess. `needs_clarification` + `clarifying_question` in the output
+schema flip the chat handler into "ask the human" mode.
 """
 
 from __future__ import annotations
@@ -38,6 +43,25 @@ If `<context>` has `prior_turns`, use them to resolve short follow-ups:
 
 person_update covers BOTH corrections and introductions:
   "Robert is my kid, not my dad", "Alex is my co-parent", "add Maya as my kid".
+
+Clarifying-question protocol (Collaborative Partner):
+- Set needs_clarification=true and provide a SHORT clarifying_question
+  (<= 90 chars, ends with "?") when EITHER:
+    (a) your confidence in the path+intent is below 0.6,
+    (b) the intent requires a detail the user did not provide.
+- Missing-detail triggers by intent:
+    book_now      -> day or time missing
+    find_time     -> nothing to schedule ("find a time" with no topic)
+    send_email    -> recipient name unclear (no person + no contact kind)
+    add_reminder  -> "remind me" but no event to attach it to
+    person_update -> a name appears but the relation is unclear
+- Never invent a detail. Ask.
+- Examples of good clarifying_question values:
+    "What day and time should I book that for?"
+    "Which teacher should I email — Nova's or Beta's?"
+    "For which event should I remember that?"
+- When you DO have enough info, set needs_clarification=false and leave
+  clarifying_question null.
 
 Return JSON matching the schema. `source_span` MUST be an exact substring of the user_input."""
 

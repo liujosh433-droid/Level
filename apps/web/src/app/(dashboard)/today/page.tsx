@@ -10,7 +10,6 @@ import { browserTimeZone, formatDateOnly } from "@/lib/dates";
 import { buildPersonColorMap } from "@/lib/personColor";
 import type {
   CalendarSyncInfo,
-  LearnedResponse,
   MissingUsualWeek,
   ProactiveCard,
   TodayResponse,
@@ -125,7 +124,6 @@ export default function TodayPage() {
   const [resolvingId, setResolvingId] = useState<string | null>(null);
 
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [learned, setLearned] = useState<LearnedResponse | null>(null);
   const [dismissedCardIds, setDismissedCardIds] = useState<Set<string>>(() => new Set());
   const emptyPolls = useRef(0);
 
@@ -147,12 +145,10 @@ export default function TodayPage() {
       setNeedsConnect(false);
       setLoadError(null);
       setDismissMissing(Boolean(today.missing_usuals_week_dismissed));
-      // "What Level learned" strip — non-blocking; a failure here just
-      // hides the section, it doesn't turn into a page-level error.
-      void api
-        .get<LearnedResponse>("/v1/today/learned")
-        .then(setLearned)
-        .catch(() => undefined);
+      // Note: "What Level learned" used to render here as a strip.
+      // Removed - the same signal (people + usuals + corrections) is
+      // already visible in the /profile sidebar, and stacking it on
+      // /today made the home page feel crowded.
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         setNeedsConnect(true);
@@ -352,38 +348,6 @@ export default function TodayPage() {
                         Not this week
                       </button>
                     </div>
-                  </li>
-                ))}
-              </ul>
-            </section>
-          )}
-
-          {learned && (learned.total > 0 || (learned.memories && learned.memories.length > 0)) && (
-            <section
-              className={`${styles.block} ${styles.learned}`}
-              aria-label="What Level learned"
-            >
-              <div className={styles.learnedHead}>
-                <h2>What Level learned</h2>
-                <span className={styles.learnedCount}>
-                  {learned.total} corrections
-                  {learned.memories_total ? ` · ${learned.memories_total} memories` : ""}
-                </span>
-              </div>
-              <ul className={styles.learnedList}>
-                {(learned.memories ?? []).map((m) => (
-                  <li key={m.id} className={styles.learnedRow}>
-                    <span className={styles.learnedAgent}>remembered</span>
-                    <span className={styles.learnedValue}>&ldquo;{m.text}&rdquo;</span>
-                  </li>
-                ))}
-                {learned.recent.map((row) => (
-                  <li key={row.negative_id} className={styles.learnedRow}>
-                    <span className={styles.learnedAgent}>{row.agent}</span>
-                    <span className={styles.learnedValue}>&ldquo;{row.value}&rdquo;</span>
-                    {row.reason ? (
-                      <span className={styles.meta}>&mdash; {row.reason}</span>
-                    ) : null}
                   </li>
                 ))}
               </ul>

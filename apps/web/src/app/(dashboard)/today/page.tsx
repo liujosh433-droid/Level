@@ -472,7 +472,7 @@ export default function TodayPage() {
           <section className={styles.railBlock}>
             <Chat
               lead="Ask about your day, book a time, or draft an email &mdash; and Level will draft here."
-              placeholder='"What&rsquo;s crowding this week?" or "put back Tuesday Nova pickup"'
+              placeholder='"When&rsquo;s the best time to book team-dinner this week?" or "put back Tuesday Nova pickup"'
               busyHints={[
                 "Looking at your calendar\u2026",
                 "Weighing what this would crowd out\u2026",

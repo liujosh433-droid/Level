@@ -405,14 +405,13 @@ async def _remember_person(
         is_self=relation == CareRelation.SELF,
         source_span=source_span,
     )
-    # Roster changed - re-run enrich so cached matched_person_ids on
-    # existing events stops pointing at [self_id] for events whose summary
-    # names the person we just added / updated.
+    # Roster changed - re-run enrich in the BACKGROUND so cached
+    # matched_person_ids on existing events stops pointing at
+    # [self_id] for events whose summary names the person we just
+    # added. Doing this inline made "remember Alex" feel like a
+    # ~15s hang on cold caches.
     if existing is None:
-        try:
-            await enrich_agenda(store)
-        except Exception:  # noqa: BLE001
-            pass
+        _background_enrich(store, source="remember_person")
     label = relation_label(person.relation)
     if existing is None:
         reply = f"Got it \u2014 I\u2019ll remember {person.display_name} as your {label}."
@@ -498,7 +497,9 @@ async def _save_reminder(
         lead_minutes=lead_minutes,
         source_span=source_span,
     )
-    await enrich_agenda(store)
+    # Reminder-match runs in the background; matched_reminder_ids on
+    # /today updates on the next load rather than blocking this reply.
+    _background_enrich(store, source="add_reminder")
     where = activity_type.category.label.lower()
     if activity_type == ActivityType.OTHER:
         reply = (
@@ -594,10 +595,8 @@ async def _person_update(
                 }
             )
         )
-        try:
-            await enrich_agenda(store)  # display_name changed, rematch events
-        except Exception:  # noqa: BLE001
-            pass
+        # display_name changed, rematch events in the background
+        _background_enrich(store, source="person_rename")
         reply = f"Got it \u2014 calling them {updated.display_name}."
         await _write_reply(store, reply)
         return {"reply": reply, "path": "profile", "intent": "person_update"}
@@ -606,10 +605,9 @@ async def _person_update(
         updated = await store.people.upsert(
             target.model_copy(update={"is_self": True, "status": "kept"})
         )
-        try:
-            await enrich_agenda(store)  # events previously tagged to X now tag to Me
-        except Exception:  # noqa: BLE001
-            pass
+        # Events previously tagged to X should now tag to Me; do it
+        # in the background so the chat reply is instant.
+        _background_enrich(store, source="mark_self")
         reply = f"Marked {updated.display_name} as you."
         await _write_reply(store, reply)
         return {"reply": reply, "path": "profile", "intent": "person_update"}
@@ -623,10 +621,10 @@ async def _person_update(
             value=target.display_name,
             reason="user removed",
         )
-        try:
-            await enrich_agenda(store)  # events tagged to removed person fall back to self
-        except Exception:  # noqa: BLE001
-            pass
+        # Events tagged to the removed person will fall back to self
+        # once enrich re-runs; do it in the background so this reply
+        # lands immediately.
+        _background_enrich(store, source="person_remove")
         reply = f"Removed {target.display_name} from your care list."
         await _write_reply(store, reply)
         return {"reply": reply, "path": "profile", "intent": "person_update"}
@@ -1633,6 +1631,32 @@ async def _refresh_after_book(store: UserStore) -> None:
             await enrich_agenda(store)
     except Exception as err:
         logger.warning("chat.book.post_sync_failed", user=store.user_id, err=str(err))
+
+
+def _background_enrich(store: UserStore, *, source: str) -> None:
+    """Fire enrich_agenda without blocking the chat reply.
+
+    enrich_agenda re-runs classify + person-match + reminder-match over
+    the whole cached agenda. Even on a warm cache it's ~200-500ms; on
+    unclassified events it can hit ~5-15s. The user-visible effect
+    (updated tags on /today or /profile) is eventually-consistent -
+    the next page load picks it up - so blocking the chat POST on it
+    is what made "Alex is no longer a coparent" feel like a 20-second
+    hang.
+    """
+
+    async def _run() -> None:
+        try:
+            await enrich_agenda(store)
+        except Exception as err:  # noqa: BLE001
+            logger.warning(
+                "chat.background_enrich_failed",
+                user=store.user_id,
+                source=source,
+                err=str(err)[:200],
+            )
+
+    asyncio.create_task(_run())
 
 
 # =============================================================================

@@ -398,6 +398,14 @@ async def _remember_person(
         is_self=relation == CareRelation.SELF,
         source_span=source_span,
     )
+    # Roster changed - re-run enrich so cached matched_person_ids on
+    # existing events stops pointing at [self_id] for events whose summary
+    # names the person we just added / updated.
+    if existing is None:
+        try:
+            await enrich_agenda(store)
+        except Exception:  # noqa: BLE001
+            pass
     label = relation_label(person.relation)
     if existing is None:
         reply = f"Got it \u2014 I\u2019ll remember {person.display_name} as your {label}."
@@ -579,6 +587,10 @@ async def _person_update(
                 }
             )
         )
+        try:
+            await enrich_agenda(store)  # display_name changed, rematch events
+        except Exception:  # noqa: BLE001
+            pass
         reply = f"Got it \u2014 calling them {updated.display_name}."
         await _write_reply(store, reply)
         return {"reply": reply, "path": "profile", "intent": "person_update"}
@@ -587,6 +599,10 @@ async def _person_update(
         updated = await store.people.upsert(
             target.model_copy(update={"is_self": True, "status": "kept"})
         )
+        try:
+            await enrich_agenda(store)  # events previously tagged to X now tag to Me
+        except Exception:  # noqa: BLE001
+            pass
         reply = f"Marked {updated.display_name} as you."
         await _write_reply(store, reply)
         return {"reply": reply, "path": "profile", "intent": "person_update"}
@@ -600,6 +616,10 @@ async def _person_update(
             value=target.display_name,
             reason="user removed",
         )
+        try:
+            await enrich_agenda(store)  # events tagged to removed person fall back to self
+        except Exception:  # noqa: BLE001
+            pass
         reply = f"Removed {target.display_name} from your care list."
         await _write_reply(store, reply)
         return {"reply": reply, "path": "profile", "intent": "person_update"}

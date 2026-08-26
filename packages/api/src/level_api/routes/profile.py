@@ -177,6 +177,16 @@ async def refresh_profile(store: UserStore = Depends(get_user_store)) -> dict[st
             )
             people_added += 1
 
+    # If we just added new people, matched_person_ids on existing events
+    # points at [self_id] as fallback. Re-enrich so usuals below get built
+    # against the real people, not Me. See docs/STATE_AND_LIFECYCLE.md §2.
+    if people_added:
+        try:
+            await enrich_agenda(store)
+            events = await store.agenda.list()
+        except Exception:  # noqa: BLE001 - enrich is best-effort
+            pass
+
     people = await store.people.list()
     candidates = compute_usuals_from_events(events, people, tz=tz)
 

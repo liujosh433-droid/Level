@@ -67,15 +67,40 @@ def resolve_person_ids(event: CachedEvent, people: list[CarePerson]) -> list[str
     A title like "Nova + Theo dropoff" must yield both kids, not whichever
     `matched_person_ids` happened to sort first. Falls back to self only
     when nobody is named (Work, commute, grocery).
+
+    The cache (`event.matched_person_ids`) is a HINT, not gospel. Two
+    subtle failure modes it must survive:
+
+      1. Stale [self_id] fallback: person X was added to the roster
+         AFTER an enrichment pass stamped `[self_id]` on an event
+         whose summary names X. Trusting the cache would leave the
+         event tagged as Me forever until the next enrich_agenda run.
+      2. Person promoted from proposed -> kept: same cache should
+         still map to that person; the cache holds up.
+
+    So: only trust the cache when it names at least one non-self
+    person. Otherwise, re-run `person_matches` and prefer real named
+    people over the self fallback.
     """
     known = {p.person_id for p in people}
+    self_ids = {p.person_id for p in people if p.is_self}
+
     if event.matched_person_ids:
-        ids = [pid for pid in event.matched_person_ids if pid in known]
-        if ids:
-            return list(dict.fromkeys(ids))
+        cached = [pid for pid in event.matched_person_ids if pid in known]
+        cached_has_non_self = any(pid not in self_ids for pid in cached)
+        if cached and cached_has_non_self:
+            return list(dict.fromkeys(cached))
+        # Fall through: cache is empty (after pruning removed people) or
+        # only points to self, both of which are ambiguous. Re-match.
+
     matched = [p.person_id for p in people if person_matches(event, p)]
     if matched:
-        return list(dict.fromkeys(matched))
+        # A named person always wins over the self fallback. This is
+        # what breaks the "School drop-off - Jordan tagged as Me" bug
+        # when the cache says [self_id] but Jordan is now in the roster.
+        non_self = [pid for pid in matched if pid not in self_ids]
+        return list(dict.fromkeys(non_self or matched))
+
     for p in people:
         if p.is_self:
             return [p.person_id]

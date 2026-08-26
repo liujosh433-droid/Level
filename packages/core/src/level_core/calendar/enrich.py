@@ -38,12 +38,16 @@ class EnrichResult:
 
 async def enrich_agenda(store: UserStore) -> EnrichResult:
     events = await store.agenda.list()
-    people = await store.people.list()
+    all_people = await store.people.list()
     reminders = [r for r in await store.reminders.list() if r.status == "active"]
 
     classified = await _classify_unseen(store, events)
     events = await store.agenda.list()
 
+    # A person the user marked "not_me" must NOT keep matching events -
+    # their name is exactly what they rejected. Include self even when
+    # status is "proposed" so bootstrap works before the user confirms.
+    people = [p for p in all_people if p.status != "not_me"]
     self_id = next((p.person_id for p in people if p.is_self), None)
 
     people_updates: list[CachedEvent] = []

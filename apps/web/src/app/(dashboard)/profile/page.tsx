@@ -156,9 +156,22 @@ export default function ProfilePage() {
     setBusy(true);
     setStatus(null);
     try {
-      await api.post("/v1/profile/refresh", {});
+      const result = await api.post<{
+        people_added: number;
+        usuals_added: number;
+        usuals_removed: number;
+        up_to_date?: boolean;
+      }>("/v1/profile/refresh", {});
       await load();
-      setStatus("Re-read your calendar.");
+      if (result.up_to_date) {
+        setStatus("You're up to date.");
+      } else {
+        const parts: string[] = [];
+        if (result.people_added) parts.push(`${result.people_added} new people`);
+        const usualsDelta = result.usuals_added - result.usuals_removed;
+        if (usualsDelta > 0) parts.push(`${usualsDelta} new usuals`);
+        setStatus(parts.length ? `Found ${parts.join(", ")}.` : "Re-read your calendar.");
+      }
     } catch (err) {
       setStatus(err instanceof Error ? err.message : String(err));
     } finally {

@@ -37,12 +37,20 @@ class EnrichResult:
 
 
 async def enrich_agenda(store: UserStore) -> EnrichResult:
+    """Classify + person-match + reminder-match in one in-memory sweep.
+
+    Previously this made THREE `agenda.list()` reads (one before classify,
+    one before person-match, one before reminder-match) plus two full
+    `upsert_many` passes on the whole collection - at Firestore scale
+    that's ~3N doc reads on every profile refresh. Now we read once,
+    keep the in-memory view up to date as we mutate, and only write the
+    events that actually changed.
+    """
     events = await store.agenda.list()
     all_people = await store.people.list()
     reminders = [r for r in await store.reminders.list() if r.status == "active"]
 
-    classified = await _classify_unseen(store, events)
-    events = await store.agenda.list()
+    classified, events = await _classify_unseen(store, events)
 
     # A person the user marked "not_me" must NOT keep matching events -
     # their name is exactly what they rejected. Include self even when
@@ -51,19 +59,18 @@ async def enrich_agenda(store: UserStore) -> EnrichResult:
     self_id = next((p.person_id for p in people if p.is_self), None)
 
     people_updates: list[CachedEvent] = []
-    for event in events:
+    for i, event in enumerate(events):
         matches: list[str] = [p.person_id for p in people if person_matches(event, p)]
         if not matches and self_id:
             matches = [self_id]
         sorted_matches = sorted(set(matches))
         if sorted_matches != event.matched_person_ids:
-            people_updates.append(
-                event.model_copy(update={"matched_person_ids": sorted_matches})
-            )
-    await store.agenda.upsert_many(people_updates)
+            new_event = event.model_copy(update={"matched_person_ids": sorted_matches})
+            events[i] = new_event
+            people_updates.append(new_event)
+    if people_updates:
+        await store.agenda.upsert_many(people_updates)
     people_matched = len(people_updates)
-
-    events = await store.agenda.list()
 
     reminder_updates: list[CachedEvent] = []
     for event in events:
@@ -76,7 +83,8 @@ async def enrich_agenda(store: UserStore) -> EnrichResult:
             reminder_updates.append(
                 event.model_copy(update={"matched_reminder_ids": matched})
             )
-    await store.agenda.upsert_many(reminder_updates)
+    if reminder_updates:
+        await store.agenda.upsert_many(reminder_updates)
     reminders_matched = len(reminder_updates)
 
     logger.info(
@@ -93,10 +101,17 @@ async def enrich_agenda(store: UserStore) -> EnrichResult:
     )
 
 
-async def _classify_unseen(store: UserStore, events: list[CachedEvent]) -> int:
+async def _classify_unseen(
+    store: UserStore, events: list[CachedEvent]
+) -> tuple[int, list[CachedEvent]]:
+    """Classify unseen events and return (count, updated in-memory events).
+
+    Returning the updated list lets the outer `enrich_agenda` skip a
+    redundant `agenda.list()` after this pass.
+    """
     unseen = [e for e in events if e.activity_type is None and e.summary]
     if not unseen:
-        return 0
+        return 0, events
 
     ai_by_id: dict[str, ActivityType] = {}
     ai_span_by_id: dict[str, str] = {}
@@ -129,6 +144,7 @@ async def _classify_unseen(store: UserStore, events: list[CachedEvent]) -> int:
         logger.warning("calendar.classify.ai_unavailable", error=str(exc)[:200])
 
     classified: list[CachedEvent] = []
+    updated_by_id: dict[str, CachedEvent] = {}
     for e in unseen:
         new_type = ai_by_id.get(e.event_id)
         span = ai_span_by_id.get(e.event_id, "")
@@ -144,16 +160,18 @@ async def _classify_unseen(store: UserStore, events: list[CachedEvent]) -> int:
             resolved = ActivityType.OTHER
         if resolved is None:
             continue
-        classified.append(
-            e.model_copy(
-                update={
-                    "activity_type": resolved,
-                    "classified_at": datetime.utcnow(),
-                }
-            )
+        new_event = e.model_copy(
+            update={
+                "activity_type": resolved,
+                "classified_at": datetime.utcnow(),
+            }
         )
-    await store.agenda.upsert_many(classified)
-    return len(classified)
+        classified.append(new_event)
+        updated_by_id[new_event.event_id] = new_event
+    if classified:
+        await store.agenda.upsert_many(classified)
+    updated_events = [updated_by_id.get(e.event_id, e) for e in events]
+    return len(classified), updated_events
 
 
 async def reclassify_all(store: UserStore) -> int:

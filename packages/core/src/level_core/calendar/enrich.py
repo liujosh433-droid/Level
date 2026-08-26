@@ -10,8 +10,10 @@ add-a-reminder / add-a-person chat turns).
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any
 
 from level_core.agents.activity import run as activity_run
 from level_core.calendar.person_match import person_matches
@@ -20,6 +22,11 @@ from level_core.schemas import ActivityType, CachedEvent, Reminder
 from level_core.storage.base import UserStore
 
 logger = get_logger(__name__)
+
+# Maximum concurrent activity-classification LLM calls per refresh. Small
+# enough to respect the per-user rate cap; large enough that a new user
+# with ~500 events finishes in ~5s instead of ~20s.
+CLASSIFY_CONCURRENCY = 4
 
 
 @dataclass
@@ -90,14 +97,27 @@ async def _classify_unseen(store: UserStore, events: list[CachedEvent]) -> int:
     ai_by_id: dict[str, ActivityType] = {}
     ai_span_by_id: dict[str, str] = {}
     ai_available = True
+    batches = [unseen[i : i + 25] for i in range(0, len(unseen), 25)]
+    semaphore = asyncio.Semaphore(CLASSIFY_CONCURRENCY)
+
+    async def _run_one(batch: list[CachedEvent]) -> Any:
+        payload = [{"event_id": e.event_id, "summary": e.summary} for e in batch]
+        async with semaphore:
+            return await activity_run(store=store, events=payload)
+
     try:
-        batches = [unseen[i : i + 25] for i in range(0, len(unseen), 25)]
-        for batch in batches:
-            payload = [{"event_id": e.event_id, "summary": e.summary} for e in batch]
-            result = await activity_run(store=store, events=payload)
-            if not result.value:
+        results = await asyncio.gather(
+            *(_run_one(b) for b in batches), return_exceptions=True
+        )
+        for res in results:
+            if isinstance(res, Exception):
+                logger.warning(
+                    "calendar.classify.batch_failed", error=str(res)[:200]
+                )
                 continue
-            for row in result.value.classifications:  # type: ignore[union-attr]
+            if not res or not res.value:
+                continue
+            for row in res.value.classifications:  # type: ignore[union-attr]
                 ai_by_id[row.event_id] = row.activity_type
                 ai_span_by_id[row.event_id] = row.source_span
     except Exception as exc:  # noqa: BLE001 - AI is best-effort

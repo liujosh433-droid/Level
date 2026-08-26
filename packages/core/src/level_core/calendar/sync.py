@@ -6,9 +6,20 @@ Two triggers:
   - `ensure_watch()` registers a Google Calendar push channel so future
     changes hit /v1/calendar/webhook.
 
-Uses incremental syncToken when available; falls back to time-window pull.
-Emits a fingerprint over event IDs+etags so downstream infer skips work
-when nothing changed.
+Sync strategy (v2, this session):
+  - Per-calendar Google `syncToken` PERSISTED in
+    `calendar_sync["sync_tokens"][calendar_id]`. After the first pull for
+    a calendar we save `nextSyncToken`; subsequent pulls send that token
+    and Google returns ONLY changed / deleted events. This drops the
+    typical rescan from ~500 events refetched to ~0-5.
+  - HTTP 410 on the token means "expired". We drop the token and fall
+    back to a full time-window pull automatically.
+  - Cancellations arrive with `status="cancelled"`; we honor them
+    incrementally by removing the cached row.
+  - Per-calendar pulls run through `asyncio.gather` so multi-calendar
+    users pay one Google round-trip, not N.
+  - The store is read ONCE at the start and every diff is computed in
+    memory - saves ~2*N Firestore doc reads per refresh vs. v1.
 """
 
 from __future__ import annotations
@@ -45,52 +56,100 @@ class RefreshResult:
     fingerprint_changed: bool
     calendars: list[str]
     last_error: str | None = None
+    # New in v2: surfaced so callers (and the SUBMISSION demo) can prove
+    # incremental sync is happening. `incremental_hits` == number of
+    # calendars that used a valid syncToken this pull.
+    incremental_hits: int = 0
+    full_pulls: int = 0
 
 
-async def refresh_agenda(store: UserStore, *, calendar_id: str | None = None) -> RefreshResult:
+@dataclass
+class _CalendarPull:
+    calendar_id: str
+    summary: str
+    primary: bool
+    events: list[dict[str, Any]]
+    next_sync_token: str | None
+    used_sync_token: bool
+    error: str | None = None
+
+
+async def refresh_agenda(
+    store: UserStore, *, calendar_id: str | None = None
+) -> RefreshResult:
     settings = get_settings()
     tz = await tz_for_store(store)
     now = datetime.now(UTC)
     time_min, time_max = await _sync_window(store, settings=settings, now=now)
 
+    prev_state = await store.calendar_sync.read() or {}
+    sync_tokens: dict[str, str] = dict(prev_state.get("sync_tokens") or {})
+
     with span("calendar.refresh", user=store.user_id, calendar=calendar_id or "all"):
         service = await build_calendar_client(store)
         calendars = await asyncio.to_thread(_resolve_calendars, service, calendar_id)
 
+    # Single full read at the start. Everything else diffs in memory.
+    existing_list = await store.agenda.list()
+    by_id: dict[str, CachedEvent] = {e.event_id: e for e in existing_list}
+    existing_ids: set[str] = set(by_id.keys())
+
+    # Parallel Google pulls, one per calendar. Google client is sync so
+    # asyncio.to_thread runs them on separate threads = concurrent HTTP.
+    pull_tasks = [
+        _pull_calendar(
+            service=service,
+            calendar=cal,
+            time_min=time_min,
+            time_max=time_max,
+            sync_token=sync_tokens.get(cal["id"]),
+        )
+        for cal in calendars
+    ]
+    pulls: list[_CalendarPull] = await asyncio.gather(*pull_tasks)
+
     added = 0
     updated = 0
-    seen_ids: set[str] = set()
-    pulled_ids: set[str] = set()
-    errors: list[str] = []
+    removed = 0
+    seen_by_calendar: dict[str, set[str]] = {}
+    incrementally_removed: set[str] = set()
     to_upsert: list[CachedEvent] = []
+    errors: list[str] = []
+    incremental_hits = 0
+    full_pulls = 0
 
-    existing_list = await store.agenda.list()
-    by_id = {e.event_id: e for e in existing_list}
-
-    for cal in calendars:
-        cal_id = cal["id"]
-        try:
-            events_page = await asyncio.to_thread(
-                _list_events,
-                service=service,
-                calendar_id=cal_id,
-                time_min=time_min,
-                time_max=time_max,
+    for pull in pulls:
+        if pull.error:
+            errors.append(f"{pull.summary}: {pull.error}")
+            logger.warning(
+                "calendar.refresh.calendar_failed",
+                calendar=pull.calendar_id,
+                error=pull.error[:200],
             )
-        except Exception as exc:  # noqa: BLE001 - one calendar must not wipe the rest
-            errors.append(f"{cal.get('summary') or cal_id}: {exc}")
-            logger.warning("calendar.refresh.calendar_failed", calendar=cal_id, error=str(exc)[:200])
             continue
 
-        pulled_ids.add(cal_id)
-        if cal.get("primary"):
-            pulled_ids.add("primary")
+        if pull.used_sync_token:
+            incremental_hits += 1
+        else:
+            full_pulls += 1
 
-        for item in events_page:
-            cached = _to_cached_event(item, calendar_id=cal_id, tz=tz)
+        seen: set[str] = set()
+        for item in pull.events:
+            # Cancellations arrive with status=cancelled. On incremental
+            # sync we MUST remove the cached row; on full pull, the
+            # missing-in-window scan below catches it.
+            if item.get("status") == "cancelled":
+                cached_id = _cached_event_id(
+                    pull.calendar_id, item.get("id") or ""
+                )
+                if cached_id in existing_ids:
+                    incrementally_removed.add(cached_id)
+                continue
+
+            cached = _to_cached_event(item, calendar_id=pull.calendar_id, tz=tz)
             if not cached:
                 continue
-            seen_ids.add(cached.event_id)
+            seen.add(cached.event_id)
             existing = by_id.get(cached.event_id)
             if existing and existing.etag == cached.etag:
                 continue
@@ -101,25 +160,61 @@ async def refresh_agenda(store: UserStore, *, calendar_id: str | None = None) ->
                 to_upsert.append(cached)
                 added += 1
 
-    await store.agenda.upsert_many(to_upsert)
+        seen_by_calendar[pull.calendar_id] = seen
+        # Only persist syncToken on a successful pull. If we hit 410 it's
+        # already been cleared by _pull_calendar.
+        if pull.next_sync_token:
+            sync_tokens[pull.calendar_id] = pull.next_sync_token
+        elif pull.used_sync_token:
+            # Successful incremental pull but no new nextSyncToken? Google
+            # sometimes omits it mid-stream; keep the old one.
+            pass
+        elif pull.calendar_id in sync_tokens:
+            # We just did a fresh full pull that returned no nextSyncToken;
+            # the old token (if any) is stale, drop it.
+            sync_tokens.pop(pull.calendar_id, None)
 
-    all_cached = await store.agenda.list()
-    to_remove = [
-        e
-        for e in all_cached
-        if e.event_id not in seen_ids
+    # Full-pull removal: events cached inside the window that Google
+    # didn't return this time. Only applies to calendars we successfully
+    # full-pulled (not incremental ones).
+    full_pulled_ids: set[str] = {
+        p.calendar_id for p in pulls if not p.used_sync_token and not p.error
+    }
+    full_pull_seen: set[str] = set()
+    for cid in full_pulled_ids:
+        full_pull_seen |= seen_by_calendar.get(cid, set())
+    window_removed: set[str] = {
+        e.event_id
+        for e in existing_list
+        if e.calendar_id in full_pulled_ids
+        and e.event_id not in full_pull_seen
         and _within_window(e, time_min, time_max)
-        and (e.calendar_id in pulled_ids or not pulled_ids)
-    ]
-    # Never wipe the cache because every calendar listing failed.
-    if errors and not pulled_ids:
-        to_remove = []
-    await store.agenda.delete_many([e.event_id for e in to_remove])
-    removed = len(to_remove)
+    }
 
-    remaining = await store.agenda.list()
+    all_removed = incrementally_removed | window_removed
+    # Never wipe the cache when every calendar failed.
+    if errors and not full_pulled_ids and incremental_hits == 0:
+        all_removed = set()
+
+    # Apply changes.
+    if to_upsert:
+        await store.agenda.upsert_many(to_upsert)
+    if all_removed:
+        await store.agenda.delete_many(sorted(all_removed))
+        removed = len(all_removed)
+
+    # Build the current in-memory view of the cache without another list().
+    upsert_by_id = {e.event_id: e for e in to_upsert}
+    remaining: list[CachedEvent] = [
+        upsert_by_id.get(e.event_id, e)
+        for e in existing_list
+        if e.event_id not in all_removed
+    ]
+    for e in to_upsert:
+        if e.event_id not in {x.event_id for x in remaining}:
+            remaining.append(e)
+
     fingerprint = _fingerprint(remaining)
-    prev_state = await store.calendar_sync.read() or {}
     fingerprint_changed = prev_state.get("events_fingerprint") != fingerprint
     await _rebuild_daily_agenda(store, remaining, tz=tz)
 
@@ -131,11 +226,16 @@ async def refresh_agenda(store: UserStore, *, calendar_id: str | None = None) ->
             "last_pull_at": now.isoformat(),
             "calendar_id": calendars[0]["id"] if calendars else "primary",
             "calendars": [
-                {"id": c["id"], "summary": c.get("summary"), "primary": bool(c.get("primary"))}
+                {
+                    "id": c["id"],
+                    "summary": c.get("summary"),
+                    "primary": bool(c.get("primary")),
+                }
                 for c in calendars
             ],
             "last_error": last_error,
-            "sync_token": None,
+            "sync_tokens": sync_tokens,
+            "sync_token": None,  # legacy field; kept for backward-compat readers
         }
     )
 
@@ -148,6 +248,8 @@ async def refresh_agenda(store: UserStore, *, calendar_id: str | None = None) ->
         total=len(remaining),
         calendars=[c["id"] for c in calendars],
         fingerprint_changed=fingerprint_changed,
+        incremental_hits=incremental_hits,
+        full_pulls=full_pulls,
         last_error=last_error,
     )
     return RefreshResult(
@@ -159,21 +261,103 @@ async def refresh_agenda(store: UserStore, *, calendar_id: str | None = None) ->
         fingerprint_changed=fingerprint_changed,
         calendars=[c["id"] for c in calendars],
         last_error=last_error,
+        incremental_hits=incremental_hits,
+        full_pulls=full_pulls,
     )
+
+
+async def _pull_calendar(
+    *,
+    service: Any,
+    calendar: dict[str, Any],
+    time_min: datetime,
+    time_max: datetime,
+    sync_token: str | None,
+) -> _CalendarPull:
+    """Pull one calendar. Prefer incremental syncToken; fall back on 410."""
+    calendar_id = calendar["id"]
+    summary = calendar.get("summary") or calendar_id
+    primary = bool(calendar.get("primary"))
+
+    try:
+        if sync_token:
+            try:
+                events, next_token = await asyncio.to_thread(
+                    _list_events_incremental,
+                    service=service,
+                    calendar_id=calendar_id,
+                    sync_token=sync_token,
+                )
+                return _CalendarPull(
+                    calendar_id=calendar_id,
+                    summary=summary,
+                    primary=primary,
+                    events=events,
+                    next_sync_token=next_token,
+                    used_sync_token=True,
+                )
+            except _SyncTokenExpired:
+                logger.info(
+                    "calendar.sync_token_expired",
+                    calendar=calendar_id,
+                )
+                # Fall through to full pull.
+
+        events, next_token = await asyncio.to_thread(
+            _list_events_full,
+            service=service,
+            calendar_id=calendar_id,
+            time_min=time_min,
+            time_max=time_max,
+        )
+        return _CalendarPull(
+            calendar_id=calendar_id,
+            summary=summary,
+            primary=primary,
+            events=events,
+            next_sync_token=next_token,
+            used_sync_token=False,
+        )
+    except Exception as exc:  # noqa: BLE001 - one calendar failing must not sink the rest
+        return _CalendarPull(
+            calendar_id=calendar_id,
+            summary=summary,
+            primary=primary,
+            events=[],
+            next_sync_token=None,
+            used_sync_token=False,
+            error=str(exc),
+        )
+
+
+class _SyncTokenExpired(Exception):
+    """HTTP 410 - Google says the token is too old, pull the window fresh."""
 
 
 async def _sync_window(
     store: UserStore, *, settings: Any, now: datetime
 ) -> tuple[datetime, datetime]:
     profile = await store.profile.read() or {}
-    days_back = int(profile.get("calendar_window_days_back") or settings.level_cal_days_back)
-    days_forward = int(profile.get("calendar_window_days_forward") or settings.level_cal_days_forward)
+    days_back = int(
+        profile.get("calendar_window_days_back") or settings.level_cal_days_back
+    )
+    days_forward = int(
+        profile.get("calendar_window_days_forward") or settings.level_cal_days_forward
+    )
     return now - timedelta(days=days_back), now + timedelta(days=days_forward)
 
 
-def _resolve_calendars(service: Any, calendar_id: str | None) -> list[dict[str, Any]]:
+def _resolve_calendars(
+    service: Any, calendar_id: str | None
+) -> list[dict[str, Any]]:
     if calendar_id:
-        return [{"id": calendar_id, "summary": calendar_id, "primary": calendar_id == "primary"}]
+        return [
+            {
+                "id": calendar_id,
+                "summary": calendar_id,
+                "primary": calendar_id == "primary",
+            }
+        ]
     try:
         return _list_writable_calendars(service)
     except Exception as exc:  # noqa: BLE001
@@ -212,11 +396,16 @@ def _list_writable_calendars(service: Any) -> list[dict[str, Any]]:
     return items
 
 
-def _list_events(
-    *, service: Any, calendar_id: str, time_min: datetime, time_max: datetime
-) -> list[dict[str, Any]]:
+def _list_events_full(
+    *,
+    service: Any,
+    calendar_id: str,
+    time_min: datetime,
+    time_max: datetime,
+) -> tuple[list[dict[str, Any]], str | None]:
     items: list[dict[str, Any]] = []
     page_token: str | None = None
+    next_sync_token: str | None = None
     while True:
         resp = (
             service.events()
@@ -234,8 +423,46 @@ def _list_events(
         items.extend(resp.get("items", []))
         page_token = resp.get("nextPageToken")
         if not page_token:
+            next_sync_token = resp.get("nextSyncToken")
             break
-    return items
+    return items, next_sync_token
+
+
+def _list_events_incremental(
+    *,
+    service: Any,
+    calendar_id: str,
+    sync_token: str,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Incremental pull with syncToken. Raises _SyncTokenExpired on 410."""
+    items: list[dict[str, Any]] = []
+    page_token: str | None = None
+    next_sync_token: str | None = None
+    current_token: str | None = sync_token
+    while True:
+        try:
+            resp = (
+                service.events()
+                .list(
+                    calendarId=calendar_id,
+                    syncToken=current_token if page_token is None else None,
+                    pageToken=page_token,
+                    singleEvents=True,
+                    maxResults=250,
+                )
+                .execute()
+            )
+        except Exception as exc:  # noqa: BLE001
+            status = getattr(getattr(exc, "resp", None), "status", None)
+            if status == 410:
+                raise _SyncTokenExpired() from exc
+            raise
+        items.extend(resp.get("items", []))
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            next_sync_token = resp.get("nextSyncToken") or current_token
+            break
+    return items, next_sync_token
 
 
 def _cached_event_id(calendar_id: str, google_id: str) -> str:
@@ -293,7 +520,9 @@ def _first_name_tokens(attendees: list[dict[str, Any]]) -> list[str]:
     """Stable first-name tokens; we never store emails."""
     out: list[str] = []
     for a in attendees:
-        name = (a.get("displayName") or a.get("email", "").split("@")[0] or "").strip()
+        name = (
+            a.get("displayName") or a.get("email", "").split("@")[0] or ""
+        ).strip()
         first = name.split()[0] if name else ""
         first = "".join(ch for ch in first if ch.isalpha())
         if first and first.lower() not in {"self", "me"}:
@@ -328,7 +557,9 @@ def _within_window(e: CachedEvent, lo: datetime, hi: datetime) -> bool:
 def _fingerprint(events: list[CachedEvent]) -> str:
     hasher = hashlib.sha256()
     for e in sorted(events, key=lambda x: x.event_id):
-        hasher.update(f"{e.event_id}:{e.etag}:{e.summary}:{e.time.start.isoformat()}".encode())
+        hasher.update(
+            f"{e.event_id}:{e.etag}:{e.summary}:{e.time.start.isoformat()}".encode()
+        )
     return hasher.hexdigest()[:16]
 
 
@@ -351,19 +582,39 @@ def agenda_is_fresh(sync_meta: dict[str, Any] | None, *, ttl_seconds: int = 45) 
 async def _rebuild_daily_agenda(
     store: UserStore, events: list[CachedEvent], *, tz: ZoneInfo
 ) -> None:
-    buckets: dict[str, list[str]] = {}
+    """Diff-only rebuild: only upsert buckets whose event_id list changed.
+
+    Previous impl upserted every bucket on every refresh even when nothing
+    moved - N doc writes per refresh at Firestore. Now we read once, diff,
+    and write only what actually changed.
+    """
+    new_buckets: dict[str, list[str]] = {}
     for e in events:
         start = e.time.start
         if start.tzinfo is None:
             start = start.replace(tzinfo=UTC)
         local = start.astimezone(tz)
         key = local.strftime("%Y-%m-%d")
-        buckets.setdefault(key, []).append(e.event_id)
-    await store.daily_agenda.upsert_many(
-        [DailyAgenda(date=date_key, event_ids=sorted(ids)) for date_key, ids in buckets.items()]
-    )
-    stale = [d.date for d in await store.daily_agenda.list() if d.date not in buckets]
-    await store.daily_agenda.delete_many(stale)
+        new_buckets.setdefault(key, []).append(e.event_id)
+    for k in new_buckets:
+        new_buckets[k].sort()
+
+    existing = await store.daily_agenda.list()
+    existing_by_date: dict[str, DailyAgenda] = {d.date: d for d in existing}
+
+    upserts: list[DailyAgenda] = []
+    for date_key, ids in new_buckets.items():
+        prev = existing_by_date.get(date_key)
+        if prev and prev.event_ids == ids:
+            continue
+        upserts.append(DailyAgenda(date=date_key, event_ids=ids))
+
+    stale = [d.date for d in existing if d.date not in new_buckets]
+
+    if upserts:
+        await store.daily_agenda.upsert_many(upserts)
+    if stale:
+        await store.daily_agenda.delete_many(stale)
 
 
 async def ensure_watch(store: UserStore, *, calendar_id: str = "primary") -> bool:

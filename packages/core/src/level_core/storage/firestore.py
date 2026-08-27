@@ -195,6 +195,23 @@ def make_firestore_store(user_id: str) -> UserStore:
             user_id=user_id, collection=collection, model=model, id_field=id_field
         )
 
+    async def _reset_all() -> None:
+        """Recursively delete every doc under ``users/{uid}``.
+
+        Fast path for the demo reset - one SDK call that batches
+        internally, replacing the previous "list every collection then
+        delete_many" dance (which was 10 sequential round trips at
+        ~50-150ms each before we could even start writing seed data).
+
+        ``recursive_delete`` walks the subtree in parallel via the
+        Firestore client's built-in batcher, so this is dramatically
+        faster in the warm-slot case (previous judge polluted).
+        """
+        client = _client()
+        client.recursive_delete(
+            client.collection("users").document(user_id)
+        )
+
     return UserStore(
         user_id=user_id,
         people=repo("care_people", CarePerson, "person_id"),
@@ -210,4 +227,5 @@ def make_firestore_store(user_id: str) -> UserStore:
         calendar_sync=FirestoreKV(user_id=user_id, slot="calendar_sync"),
         profile=FirestoreKV(user_id=user_id, slot="profile"),
         tokens=FirestoreKV(user_id=user_id, slot="google_oauth"),
+        reset_all=_reset_all,
     )

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Generic, TypeVar
@@ -204,6 +205,22 @@ def make_local_store(user_id: str) -> UserStore:
     def repo(collection: str, model: type[BaseModel], id_field: str) -> LocalRepo:
         return LocalRepo(user_id=user_id, collection=collection, model=model, id_field=id_field)
 
+    user_dir = _root_dir() / user_id
+
+    async def _reset_all() -> None:
+        """rmtree the user's whole subtree in one shot (fast path for demo reset).
+
+        Also drops any per-file locks we cached so a subsequent write
+        after reset opens a fresh lock on a fresh path.
+        """
+        if user_dir.exists():
+            shutil.rmtree(user_dir)
+        user_dir.mkdir(parents=True, exist_ok=True)
+        prefix = str(user_dir) + "/"
+        stale = [k for k in _path_locks if k.startswith(prefix)]
+        for k in stale:
+            _path_locks.pop(k, None)
+
     return UserStore(
         user_id=user_id,
         people=repo("people", CarePerson, "person_id"),
@@ -219,4 +236,5 @@ def make_local_store(user_id: str) -> UserStore:
         calendar_sync=LocalKV(user_id=user_id, slot="calendar_sync"),
         profile=LocalKV(user_id=user_id, slot="profile"),
         tokens=LocalKV(user_id=user_id, slot="tokens"),
+        reset_all=_reset_all,
     )

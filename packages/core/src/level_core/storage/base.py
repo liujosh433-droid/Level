@@ -95,6 +95,7 @@ class UserStore:
         calendar_sync: KVStore,
         profile: KVStore,
         tokens: KVStore,
+        reset_all: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self.user_id = user_id
         self.people = people
@@ -110,3 +111,23 @@ class UserStore:
         self.calendar_sync = calendar_sync
         self.profile = profile
         self.tokens = tokens
+        self._reset_all_impl = reset_all
+
+    async def reset_all(self) -> None:
+        """Wipe every document under this user's subtree.
+
+        Storage-native fast path used by the demo seeder to reset a
+        session in one shot instead of the slow "list every collection,
+        then delete every doc" dance. Both concrete backends provide
+        an implementation - local rmtrees the user's directory,
+        Firestore uses ``client.recursive_delete`` under the user doc.
+
+        Callers MUST authorize before invoking - this method assumes
+        the caller has already confirmed it's safe to wipe (e.g. via a
+        demo-user prefix check in the demo seeder).
+        """
+        if self._reset_all_impl is None:
+            raise NotImplementedError(
+                "backend for UserStore did not provide reset_all()"
+            )
+        await self._reset_all_impl()

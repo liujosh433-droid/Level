@@ -184,19 +184,47 @@ Every piece of state has an explicit lifecycle:
   clears the session cookie without touching the tokens so
   reconnect is one click.
 
-### 2.9 Demo mode (local-only)
+### 2.9 Demo mode
 
 - `POST /v1/auth/demo` seeds a synthetic user from an ICS fixture in
   `example-data/` (family or solo scenario) and drops the same signed
   session cookie a real OAuth callback would. No `tokens` KV is ever
-  written. Idempotent: re-clicking the demo button on the same
-  scenario returns the same `u_demo_family`/`u_demo_solo` uid, same
-  people row IDs, and rewrites the agenda to re-anchor "today" inside
-  the ICS's demo week.
+  written.
+- **Every login resets to a pristine state, fast.** `reset_demo_state()`
+  runs at the top of `seed_demo_user`. Two fast paths:
+  - **Cold slot** (profile untouched): one `profile.read()` proves
+    the slot is empty and the reset returns immediately - avoids N
+    sequential Firestore round trips confirming zeroes.
+  - **Warm slot** (previous judge polluted): delegates to the
+    backend-native `store.reset_all()` - one call that wipes the
+    whole `users/{uid}` subtree (`client.recursive_delete` on
+    Firestore, `shutil.rmtree` on local JSON) rather than the old
+    "list every collection then delete_many" dance.
+
+  Between them, both paths wipe every session-mutable slot for the
+  demo user: `chat_turns`, `priorities`, `reminders`, `negatives`,
+  `ai_audit`, `contacts`, `usuals`, `people`, `agenda`,
+  `daily_agenda`, plus the entire `profile` KV. The seeder then
+  re-lays the scenario fixture and repopulates identity fields. This
+  is why multiple judges hitting the same demo slot (via IP hashing
+  in cloud mode) don't see each other's chat turns, priority edits,
+  or feedback verdicts — every click of "Try demo" is a clean slate.
+  The counts stay stable across re-seeds; `person_id` rotates on
+  purpose because a demo user is throwaway.
+- Defensive prefix guard: `reset_demo_state()` refuses to wipe any
+  store whose `user_id` doesn't start with `u_demo_`, so a code path
+  routing a real user's store through here by accident fails safe
+  rather than nuking their data.
+- **"Level noticed while you slept" on click 1.** The seeder also
+  invokes `regenerate_proactive_cards()` (the same helper the nightly
+  job uses; extracted into `level_core.calendar.proactive`) so
+  `profile["proactive_cards"]` is populated at seed time. A fresh
+  judge doesn't need to wait a night for the nightly job to run.
 - Marker: `profile["demo_scenario"]` (`"family"` or `"solo"`).
   `is_demo_user(profile)` is the single-line check used everywhere
   downstream code needs to fork behavior.
-- Data written: `profile`, `people` (5 or 4 rows with `status="kept"`),
+- Data written per session: `profile` (identity + `proactive_cards`
+  + `demo_scenario`), `people` (5 or 4 rows with `status="kept"`),
   `agenda` (250+ expanded events with `event_id` prefixed `demo:`),
   `daily_agenda`, `usuals` (37+ rows, deterministic). NO tokens, NO
   ai_audit, NO chat_turns. Guardrail agents work normally against a

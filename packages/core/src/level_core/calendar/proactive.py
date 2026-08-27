@@ -1,0 +1,155 @@
+"""Deterministic (no-LLM) generation of "Level noticed while you slept"
+proactive cards.
+
+Previously lived inside ``packages/jobs/src/level_jobs/nightly.py`` as
+a private helper. Extracted here so the demo seeder can also call it
+without a cross-package import (``level_core`` must not depend on
+``level_jobs``). Both callers share the same schema for
+``profile["proactive_cards"]``.
+
+Deterministic + cheap - no LLM, no external network. Safe to invoke
+inline from an HTTP request handler when needed.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta
+from typing import Any
+from zoneinfo import ZoneInfo
+
+from level_core.calendar.usuals import (
+    current_week_bounds,
+    missing_usuals_this_week,
+)
+from level_core.observability import get_logger
+from level_core.schemas.agenda import CachedEvent
+from level_core.schemas.care import CarePerson
+from level_core.storage.base import UserStore
+
+logger = get_logger(__name__)
+
+# Profile KV key + card cap. Kept as module constants so callers
+# (nightly job, demo seeder, admin snapshot) can reference the same
+# names without stringly-typed drift.
+PROACTIVE_CARDS_KEY = "proactive_cards"
+MAX_PROACTIVE_CARDS = 5
+
+
+async def regenerate_proactive_cards(
+    store: UserStore,
+    *,
+    tz: ZoneInfo,
+    events: list[CachedEvent],
+    people: list[CarePerson] | None = None,
+) -> int:
+    """Write this week's missing-usual cards to ``profile["proactive_cards"]``.
+
+    Returns the number of cards written. Zero means "no gaps found";
+    any previously-stored cards for a stale week are cleaned up in
+    that branch so /today stops rendering them.
+
+    Called from two places:
+    - The nightly Cloud Run Job runs against every real user once a
+      night.
+    - The demo seeder invokes it inline right after seeding usuals +
+      agenda so a judge who just clicked "Try demo" lands on a /today
+      with the "Level noticed while you slept" section already
+      populated - no need to wait for the nightly job to run.
+
+    ``people`` is optional context: callers that already loaded the
+    roster (the demo seeder does, right after ``_seed_people``) can
+    pass it in to skip one Firestore ``people.list()`` round trip.
+    When None we fall back to reading it here.
+    """
+    today = datetime.now(tz).date()
+    week_start, week_end = current_week_bounds(today)
+    usuals = await store.usuals.list()
+    if people is None:
+        people = await store.people.list()
+    events_by_id = {e.event_id: e for e in events}
+
+    week_events = [
+        e
+        for e in events
+        if week_start <= e.time.start.astimezone(tz).date() < week_end
+    ]
+    missing = missing_usuals_this_week(
+        usuals=usuals,
+        week_events=week_events,
+        as_of_date=today,
+        events_by_id=events_by_id,
+        people=people,
+        tz=tz,
+    )
+
+    if not missing:
+        profile = dict(await store.profile.read() or {})
+        if profile.pop(PROACTIVE_CARDS_KEY, None) is not None:
+            await store.profile.write(profile)
+        return 0
+
+    # Reuse the roster we already have instead of re-listing - this
+    # is what shaves a second full people.list() off every call.
+    people_by_id = {p.person_id: p for p in people}
+    cards: list[dict[str, Any]] = []
+    for g in missing[:MAX_PROACTIVE_CARDS]:
+        primary = people_by_id.get(g.person_id)
+        display_name = primary.display_name if primary else "someone"
+        day = (week_start + timedelta(days=int(g.weekday))).isoformat()
+        # Prefer the concrete title ("Grocery run", "Nova ballet") over
+        # the coarse category label ("Personal", "Sports"). The category
+        # on its own is too abstract to be a useful nudge - "Josh's
+        # personal is missing this week" reads like a therapist joke.
+        # Falls back to category when the underlying usual didn't carry
+        # a title (badly seeded data or LLM-less local dev).
+        activity_label = (g.title_hint or g.category.label).strip()
+        if primary and primary.is_self:
+            # Own-usual phrasing: "Your grocery run is missing" reads
+            # better than "Josh's grocery run is missing" when it's
+            # the caregiver themselves.
+            body_text = (
+                f"Your {activity_label.lower()} is missing this week. "
+                "Want me to put it back?"
+            )
+        else:
+            body_text = (
+                f"{display_name}'s {activity_label.lower()} is missing this week. "
+                "Want me to put it back?"
+            )
+        cards.append(
+            {
+                "card_id": f"missing:{g.weekday}:{g.category.value}",
+                "kind": "missing_usual",
+                "week_start": week_start.isoformat(),
+                "day": day,
+                "weekday": int(g.weekday),
+                "category": g.category.value,
+                "category_label": g.category.label,
+                "title_hint": g.title_hint,
+                "person_id": g.person_id,
+                "person_name": display_name,
+                "text": body_text,
+                "created_at": datetime.utcnow().isoformat(),
+            }
+        )
+
+    # ``update_fields`` merges the single key into the existing
+    # profile without a read-then-write cycle - matters on Firestore
+    # where each round trip is ~50-150ms of pure latency (the demo
+    # seeder calls this inline).
+    await store.profile.update_fields(
+        **{
+            PROACTIVE_CARDS_KEY: {
+                "week_start": week_start.isoformat(),
+                "generated_at": datetime.utcnow().isoformat(),
+                "cards": cards,
+            }
+        }
+    )
+    logger.info(
+        "proactive.cards_written",
+        user_id=store.user_id,
+        count=len(cards),
+        week_start=week_start.isoformat(),
+    )
+    return len(cards)

@@ -1,229 +1,175 @@
-# Level — demo script (target 4:00, hard cap 4:30)
+# Level — demo script (hard cap 4:00)
 
-> Judges watch dozens of demos. Every beat should either **prove a rubric bullet** or **land an emotional moment**. Nothing else earns its seconds.
+> Read this straight through into the mic. Every beat has one thing you're excited about + one line on how it's built. Nothing else is in here.
+
+Target pace **150 words per minute**. The spoken VO below totals **~540 words = 3:35**, leaving **25 seconds** of pauses for the app to actually respond. If you speak faster, insert a beat after each `—`.
 
 ## Pre-flight (30 minutes before recording)
 
 - [ ] `LEVEL_DEMO_IN_CLOUD=true` set on the deployed API (verify: `curl https://<api>/v1/config/features | jq .demo.available` → `true`)
 - [ ] Hard-refresh the hosted URL so the cached `/v1/config/features` isn't stale
-- [ ] Warm the demo user: click **Try demo: Solo caregiver** once, then log out. This pre-populates Firestore + warms the summary cache so live click-through is fast
-- [ ] Set your machine's time to **Thu Aug 27 2026** if the ICS anchor drifts — the demo week is Aug 24–30 2026
-- [ ] Close every other tab, mute Slack, run a `caffeinate -d` on macOS
+- [ ] Warm the summary cache: click **Try demo: Solo caregiver** once and run **Hear my day** so the first Lyria call is already amortized. (State resets on every login, so the click itself won't pollute the recording — just the summary cache.)
+- [ ] Set your machine's time to **Thu Aug 27 2026** if the ICS anchor drifts (demo week is Aug 24–30 2026)
+- [ ] Close every other tab, mute Slack, `caffeinate -d` on macOS
 - [ ] Record at 1440×900, 60fps if the tool allows — cursor motion sells more than resolution
 - [ ] Have `/admin/traces` open in a second Chrome window (pre-authed) for the "under the hood" beat
-- [ ] Backup screen recordings of Veo + Lyria in case Vertex is slow ([Veo B-roll shot list](#b-roll-shot-list))
+- [ ] Backup screen recordings of Veo + Lyria in case Vertex is slow (see [B-roll shot list](#b-roll-shot-list))
 
-## Timeline at a glance
+## Timeline
 
-| # | Beat | Duration | Rubric bucket |
+| # | Beat | End time | Rubric bucket |
 |---|---|---|---|
-| 0 | Cold open — "the 3pm text chain" | 0:25 | Innovation & Utility (framing) |
-| 1 | 10-second demo login | 0:20 | Demo Readiness |
-| 2 | Level noticed while you slept | 0:35 | Innovation (autonomous action) |
-| 3 | Chat — priority-aware booking | 0:45 | Innovation (asks clarifying qs) + Architecture (fast-path) |
-| 4 | The feedback loop | 0:40 | Innovation (adapts) + Architecture (audit trail) |
-| 5 | Email with human-in-the-loop | 0:35 | Innovation (mutates external systems) + Architecture (safety) |
-| 6 | Voice — Hear my day | 0:20 | Bonus (Lyria) + Innovation (voice) |
-| 7 | Under the hood — traces + registry | 0:30 | Architecture (30%) |
-| 8 | Bonus models, earned | 0:15 | Bonus (up to 0.6 pts) |
-| 9 | Close + CTA | 0:15 | — |
-
-**Total ~4:00.** Keeping each beat under-budget by 5s gives you a 30s cushion for the actual model roundtrips.
+| 0 | Cold open — the mental load | 0:24 | Innovation & Utility (framing) |
+| 1 | 10-second demo login | 0:36 | Demo Readiness |
+| 2 | Proactive noticing on messy calendars | 1:12 | Innovation (autonomous) + Architecture (nightly job) |
+| 3 | Priority-aware, sub-second booking | 1:48 | Innovation (clarifying qs) + Architecture (fast-path) |
+| 4 | Feedback loop that actually learns | 2:18 | Innovation (adapts) + Architecture (audit chain) |
+| 5 | Email drafts with real safety | 2:46 | Innovation (mutates external systems) + Architecture (HITL, idempotent) |
+| 6 | Voice + generative music | 3:04 | Bonus (Lyria) + Innovation (voice) |
+| 7 | Under the hood — guardrails + failover | 3:30 | Architecture (30%) |
+| 8 | Bonus models earned + close | 4:00 | Bonus (up to 0.6 pts) |
 
 ---
 
-## Beat 0 — Cold open (0:00 → 0:25)
+## The full voiceover (read this straight through)
 
-**[SCREEN]** Full-frame Google Calendar week view. Real calendar, real chaos: a co-parent, a kid's soccer at 4pm, a "Mom PT?" event with a `?`. Zoom slowly toward a Tuesday afternoon block.
+### Beat 0 — Cold open (0:00 → 0:24)
 
-**[VO]**
-> If you've ever been the person who runs a family's calendar, you know the moment. It's Tuesday, 2:47pm. Your kid has soccer at 4:00. You're in a meeting. And somewhere in your head, a small alarm goes off: *wait — are the shoes in the car?*
+*[SCREEN] Full-frame Google Calendar week view. Real chaos: a kid's soccer at 4pm, a "Mom PT?" event with a question mark, a co-parent's out-of-town block. Cursor drifts across it. Zoom on a Tuesday afternoon.*
+
+**VO:**
+> If you've ever run a family's calendar — a parent, a grown kid managing elder care, a partner holding a household together — you know the moment. A kid's soccer at four. Mom's PT at nine. And somewhere in your head, a small alarm goes off — *wait, are the shoes in the car?*
 >
-> Level is what would have caught that.
+> Three in four family caregivers say they feel stressed. Level is what catches the shoes.
 
-**[SUPER]** `Level · a caregiver's second set of hands · #AllThingsAgenticHackathon`
-
-**[TRANSITION]** Cut to Level's landing page.
+*[SUPER, bottom third]* `A Place for Mom · State of Caregiving 2025 · 75% of family caregivers feel stressed`
 
 ---
 
-## Beat 1 — 10-second demo login (0:25 → 0:45)
+### Beat 1 — 10-second demo login (0:24 → 0:36)
 
-**[SCREEN]**
-1. Level landing page. Cursor hovers over the **Try demo: Solo caregiver** button.
-2. Click. Full-page load; land on `/today` with a populated agenda, people chips, and the sidebar filled in.
-3. Highlight the "Demo mode" pill in the top nav.
+*[SCREEN] Landing page → click **Try demo: Solo caregiver** → `/today` loads with agenda, people chips, sidebar all populated. Highlight the **Demo mode** pill in the top nav.*
 
-**[VO]**
-> No OAuth, no Google Cloud project, no waiting. One click seeds a caregiver — Josh, two kids, an elder mom — and 200+ events pre-classified. Everything you're about to see runs against our production Gemini quota, live.
+**VO:**
+> One click. No sign-up. Level seeds a caregiver — two kids, an elder mom — and two hundred pre-classified events. Everything from here runs live against Gemini.
 
-**[SUPER]** *(bottom third)* `POST /v1/auth/demo · signed cookie · seeded from example-data/`
-
-**[RUBRIC]** *Demo Readiness*: judges see the app work in under 20 seconds.
+*[SUPER]* `POST /v1/auth/demo · seeded from example-data/`
 
 ---
 
-## Beat 2 — Level noticed while you slept (0:45 → 1:20)
+### Beat 2 — Proactive noticing on messy calendars (0:36 → 1:12)
 
-**[SCREEN]**
-1. Scroll to the **"Level noticed while you slept"** section. Two proactive cards visible.
-2. Zoom on card #1: *"Nova's ballet is missing this week. Want me to put it back?"* with `Nova ballet · Sports · Thu Aug 27`.
-3. Scroll to **"This week's missing"**: 2 rows for solo scenario — Nova ballet (Thu), Helen weekly grocery drop (Sun).
-4. Hover an event on the agenda: "Nova ballet class" (past week) — show the tooltip / activity chip = **Sports**.
-5. Hover a second past occurrence: "Ballet - Nova" (different wording, same event). Show it also tagged Sports.
+*[SCREEN] Scroll to **"Level noticed while you slept"**. Zoom card: *"Nova's ballet is missing this week."* Hover three past ballet events on the agenda: `Nova ballet`, `Ballet - Nova`, `Nova ballet class`. Same event, three different names.*
 
-**[VO]**
-> Level's nightly job noticed two things overnight. Nova has ballet every Thursday — but not this Thursday. Helen has a Sunday grocery drop — but not this Sunday. Neither is on the calendar.
+**VO:**
+> Overnight — without anyone asking — Level noticed something. Nova has ballet every Thursday. But not this Thursday. Nobody canceled it. It just isn't there.
 >
-> And here's the interesting part — Nova's ballet doesn't repeat on Google Calendar. The past weeks say *"Nova ballet"*, then *"Ballet - Nova"*, then *"Nova ballet class"*. Different wording every time. Level clustered them anyway — same person, same weekday, same hour band — and majority-voted the name.
+> And here's what I love — the ballet isn't a recurring event on Google Calendar. Three past weeks, three different names: *Nova ballet*, *Ballet - Nova*, *Nova ballet class*. Real families don't tidy their calendars. Level clustered them anyway — same person, same weekday, same hour band — and majority-voted the name. All from a nightly Cloud Run Job while you slept.
 
-**[SUPER]** *(callout)* `Usuals clustered from messy events · docs/STATE_AND_LIFECYCLE.md § 2.4`
-
-**[RUBRIC]** *Innovation (autonomous action)*: proactive cards are a real background write, not a chat trigger.
+*[SUPER]* `nightly Cloud Run Job · usuals clustered from messy events`
 
 ---
 
-## Beat 3 — Priority-aware booking (1:20 → 2:05)
+### Beat 3 — Priority-aware, sub-second booking (1:12 → 1:48)
 
-**[SCREEN]**
-1. Focus the chat box. Type: *"prioritize elder care over sports this week"*.
-2. Reply lands in ~1s (fast-path, no LLM). Show the reply + the three feedback chips underneath.
-3. In the sidebar, the **Priorities** section updates live.
-4. Type: *"when's the best time to book team dinner this week?"*.
-5. Reply lands with 3–4 slots, all in the 5–8pm dinner window. **No lunch or afternoon times.**
-6. If a slot conflicts with an evening care event, the reply includes: *"This would conflict with these priorities: elder care with Helen"* — with **"elder care with Helen"** highlighted teal.
+*[SCREEN] Focus chat. Type *"prioritize elder care over sports this week"* — sidebar's **Priorities** section updates in under a second. Type *"when's the best time to book team dinner this week?"* — three slots appear, all inside 5–8pm. If one slot brushes an evening Helen PT block, the reply reads *"This would conflict with these priorities: elder care with Helen"* with *elder care with Helen* highlighted teal.*
 
-**[VO]**
-> Priorities are one line of text. Level parsed it, wrote it to Firestore, and — critically — never called the LLM. That's a regex fast-path. In our test corpus, about 60% of chat turns never touch Gemini at all.
+**VO:**
+> Watch this — I set a priority, and it lands in under a second. Level didn't call the LLM for that. A regex fast-path caught it. About sixty percent of every chat turn in this app never touches Gemini — that's what makes it feel instant.
 >
-> Now — dinner. Level knows what dinner *is*. It knows Sunday, 7am is not dinner. It also knows a priority I set 20 seconds ago should shape what it suggests. And when a slot conflicts with elder care, it says so — in teal.
+> Now booking. Level knows dinner isn't seven a.m. It respects the priority I set twenty seconds ago. And when a slot conflicts with elder care, it says so — in teal, so the eye lands on it.
 
-**[SUPER]** *(callout)* `Fast-path: /v1/admin/intents · Router+inline extraction: 2 LLM calls → 1`
+*[SUPER]* `fast-path registry · priority-aware slot ranking · meal-window inference`
 
-**[RUBRIC]**
-- *Innovation*: asks clarifying questions, adapts to spoken priorities.
-- *Architecture*: fast-path registry, priority-aware slot ranking, meal-window inference.
-
-**[BACKUP LINE]** *(if booking is slow >6s)*: "This one calls the LLM because the user's phrasing is novel — and you'll see it in the trace waterfall in a minute."
+**[BACKUP LINE]** *(if booking is slow >6s)*: *"This one calls the LLM because the phrasing is novel — you'll see it in the trace waterfall in a minute."*
 
 ---
 
-## Beat 4 — The feedback loop (2:05 → 2:45)
+### Beat 4 — Feedback loop that actually learns (1:48 → 2:18)
 
-**[SCREEN]**
-1. On one of Level's booking suggestions, click **Not me**. Reply below: *"Removed — I won't propose that again."*
-2. Open the data sidebar wider. Highlight `memory_bank` — a new entry appears with `tag: avoid`.
-3. Type: *"actually alex isn't a coparent anymore"*.
-4. Reply lands: person edit confirmed. Sidebar's **People** list updates: Alex is removed / soft-deleted.
-5. Open the second Chrome window on `/admin/traces`. Highlight the last two rows:
-   - **Row A**: `EmailAgent` or `RouterAgent`, an audit_id like `abc123`.
-   - **Row B**: `FeedbackChip`, `parent_audit_id=abc123`, with the linked memory write.
+*[SCREEN] Click **Not me** on a Level suggestion. Reply lands: *"Removed — I won't propose that again."* Widen the data sidebar — a new `memory_bank` entry appears tagged `avoid`. Cut to `/admin/traces` in second window — two adjacent rows linked by `parent_audit_id`.*
 
-**[VO]**
-> Every AI-authored artifact in this app carries three chips — Keep, Adjust, Not me. When you click one, a *second* audit row is written that points back at the original. That's the feedback loop the judging rubric asks about — and it's traceable end-to-end.
+**VO:**
+> Every AI-authored thing in Level carries three chips — **Keep**, **Adjust**, **Not me**. Click one, and Level writes a second audit row that points back at the original. You can hand-verify the chain.
 >
-> The rejection I just clicked is now a memory tagged `avoid`. The next generator agent's prompt will include it as anti-example. This is not a mockup — it's the actual data flow.
+> The rejection I just clicked is now a memory tagged *avoid*. The next generator agent will read it as an anti-example. Not a mockup — the real data flow.
 
-**[SUPER]** *(callout)* `parent_audit_id chain · Memory Bank tag=avoid · 40-entry LRU`
-
-**[RUBRIC]**
-- *Innovation (Collaborative Partner bullet)*: constantly adapts to user corrections.
-- *Architecture*: audit rows carry parent_id + signed Agent Identity token.
+*[SUPER]* `parent_audit_id chain · Memory Bank tag=avoid`
 
 ---
 
-## Beat 5 — Email with human-in-the-loop (2:45 → 3:20)
+### Beat 5 — Email drafts with real safety (2:18 → 2:46)
 
-**[SCREEN]**
-1. Type: *"email Ms. Anna that Nova is sick tomorrow"*. (Nova is a real seeded kid in both demo scenarios — don't use a name that isn't in the roster or the agent will faithfully echo it back.)
-2. Reply lands: *"Drafting email — one moment..."* (active "drafting" indicator, not a silent spinner).
-3. Draft appears — full to/subject/body with the school context filled in.
-4. Edit one line inline in the draft ("recovering from the flu" → "recovering"). Click **Send**.
-5. Small toast: *"Preview only — Gmail send is disabled in demo mode."*
-6. Cut to `/admin/traces`. Show the `EmailAgent` row with `fallback_used=null`, `turns_taken=1`, `agent_identity_token=<hash>`, and next to it the confirmation-token row.
+*[SCREEN] Type: *"email Ms. Anna that Nova is sick tomorrow"*. Active *"Drafting email..."* indicator (not a silent spinner). Draft renders — full to/subject/body with school context. Edit one line. Click **Send**. Toast: *"Preview only — Gmail send is disabled in demo mode."***
 
-**[VO]**
-> The draft came from an EmailAgent — Pro tier, three refinement turns available, only used one. Every send goes through a confirmation token — idempotent, TTL'd, only dropped after Google confirms success. So a dying Cloud Run instance mid-send doesn't lose the draft, and clicking twice doesn't send twice.
->
-> In demo mode we short-circuit before Gmail so we don't actually send. Every other guardrail is real.
+**VO:**
+> This draft comes from an EmailAgent — Pro-tier, three refinement turns available, only used one. Every send goes through a confirmation token: idempotent, time-limited, only released once Google confirms success. A dying instance mid-send won't lose the draft. Clicking twice won't send twice. And nothing goes out until *I* click.
 
-**[SUPER]** *(callout)* `EmailAgent · max_turns=3 · confirmation_token TTL · human-in-the-loop`
-
-**[RUBRIC]**
-- *Innovation*: mutates external systems (Gmail) with user consent.
-- *Architecture*: idempotency, HITL, signed audit rows.
+*[SUPER]* `EmailAgent · confirmation_token TTL · human-in-the-loop`
 
 ---
 
-## Beat 6 — Voice: Hear my day (3:20 → 3:40)
+### Beat 6 — Voice + generative music (2:46 → 3:04)
 
-**[SCREEN]**
-1. Click the **Hear my day** button in the chat header.
-2. A soft chime plays (2–3 seconds).
-3. TTS voice reads the day summary out loud. Show the caption text below.
+*[SCREEN] Click **Hear my day** in the chat header. Soft chime plays 2–3 seconds. TTS reads the day summary. Caption text below.*
 
-**[VO]** (over the chime)
-> That chime is Lyria, Google's music model. It plays over the summary from a Pro-tier agent, spoken via the browser's TTS. The whole flow is under two seconds cold, and cached to milliseconds on the next click.
+**VO** *(start speaking the moment the chime fades):*
+> That chime is Lyria — Google's music model — synthesized fresh from a Vertex call. The voice that follows is a Gemini 3.5 Pro summary, cached by fingerprint so the second click comes back in milliseconds.
 
-**[SUPER]** *(callout)* `Lyria (Vertex Interactions API) → base64 chime → Audio() · SummaryAgent max_turns=1 · fingerprint cache`
+*[SUPER]* `Lyria (Vertex Interactions API) · SummaryAgent · fingerprint cache`
 
-**[RUBRIC]** *Bonus*: Lyria integration is real, not sprinkled.
-
-**[BACKUP LINE]** *(if chime fails)*: "The chime is a bonus — the summary is the point. Level cached this response earlier, so it's coming back in about 50 milliseconds."
+**[BACKUP LINE]** *(if chime fails)*: *"Chime is a bonus — Level degrades gracefully when a Vertex model isn't enabled, and the summary still plays."*
 
 ---
 
-## Beat 7 — Under the hood (3:40 → 4:10)
+### Beat 7 — Under the hood (3:04 → 3:30)
 
-**[SCREEN]**
-1. `/admin/traces` full-screen. Point at the trace waterfall — multiple agents grouped by `trace_id`, with parent→child edges rendered.
-2. Cut to `/v1/admin/agents` (JSON). Zoom on the array: 11 agents, each with `name`, `model`, `safety_class`, `cost_tier`, `version`, `schema`, `tools`.
-3. Cut to `/v1/admin/intents`. Show the fast-path handlers with example utterances.
-4. Cut briefly to `docs/architecture.png` (the Mermaid render). Point at the six planes.
+*[SCREEN] `/admin/traces` full-screen — waterfall of agents grouped by `trace_id`, parent→child edges rendered. Cut to `/v1/admin/agents` (JSON): 11 agents, each with `name`, `model`, `safety_class`, `cost_tier`, `tools`. Cut to `/v1/admin/intents` — fast-path handlers. Brief pan over `docs/architecture.png`.*
 
-**[VO]**
-> Every LLM the system talks to appears at `/v1/admin/agents`. Every regex handler appears at `/v1/admin/intents`. Every call is signed with an HMAC agent-identity token — you can hand-verify it at `/v1/admin/agents/verify`. Six guardrails run before any token hits Gemini: Model Armor, rate + cost gate, PII strip, anti-injection fence, source_span echo-back, and signed identity. A circuit breaker isolates a bad Google Calendar backend per user. A three-tier model ladder — Gemini 3.5 → 2.5 → Gemma — keeps chat alive during quota outages.
+**VO:**
+> Every model call in this app is signed with an HMAC identity token. Six guardrails run before any prompt hits Gemini — Model Armor, rate and cost gate, PII strip, injection fence, source-span echo-back, signed identity. A circuit breaker isolates a bad Google backend per user. And a three-tier model ladder — Gemini 3.5, then 2.5, then Gemma — keeps chat alive during quota outages.
 
-**[SUPER]** *(callout, small)* `docs/architecture.mmd · docs/STATE_AND_LIFECYCLE.md · signed AgentIdentity`
-
-**[RUBRIC]** *Architecture (30%)*: discoverable surface, layered guardrails, isolation.
+*[SUPER]* `signed AgentIdentity · circuit breaker · Gemma failover`
 
 ---
 
-## Beat 8 — Bonus models, earned (4:10 → 4:25)
+### Beat 8 — Bonus models earned + close (3:30 → 4:00)
 
-**[SCREEN]** Split-screen or fast cuts:
-- Veo weekly recap video (auto-plays for 3 seconds).
-- Lyria chime waveform.
-- Trace waterfall row with `fallback_used="gemma-3-4b-it"`.
-- ADK `ADKPlannerAgent` row.
+*[SCREEN] Fast cuts: Veo weekly recap plays for 3 seconds. Trace waterfall row shows `fallback_used="gemma-3-4b-it"`. ADKPlannerAgent row. Then full-frame close card:*
 
-**[VO]**
-> Four bonus points earned by working, not sprinkled: **ADK** on the email hot path, **Gemma** as a real failover in the trace waterfall, **Veo 3** for a weekly recap, **Lyria** for the chime you just heard.
-
-**[SUPER]** `ADK · Gemma · Veo 3 · Lyria — all in the trace waterfall`
-
-**[RUBRIC]** *Bonus contributions* (up to 0.6 pts on the rubric).
-
----
-
-## Beat 9 — Close (4:25 → 4:40)
-
-**[SCREEN]** Full-frame text card:
 ```
 Level
 github.com/liujosh433-droid/Level
-Live demo · one click, no signup
+Live demo — one click, no signup
 Built with Gemini 3.5 · ADK · Cloud Run · Firestore
 #AllThingsAgenticHackathon
 ```
 
-**[VO]**
-> Level. Repo's public, live demo is one click, and every claim in this video has a file path in the codebase to back it up. Thanks for watching.
+**VO:**
+> Four bonus models, earned by working — not sprinkled. **ADK** on the email hot path. **Gemma** as real quota failover. **Veo 3** for the weekly recap you're seeing right now. **Lyria** for the chime you heard. Every one shows up in the trace waterfall.
+>
+> Level. Repo's public. Live demo is one click. Thanks for watching.
 
 ---
 
-## Recovery lines (memorize these)
+## Sources (cited in the cold open — link these in the video description too)
+
+The cold open only quotes one number now, but here are the caregiver-scoped studies the framing is based on. Every one applies to any household manager, not just mothers.
+
+1. **A Place for Mom (2025).** *State of Caregiving Report.* National survey of 1,029 US family caregivers, Sept 2025. Cold-open quote: **75%** of family caregivers report feeling stressed. Related: **71%** feel overwhelmed, **63%** report burnout at least monthly, **80%** don't feel confident balancing caregiving with everything else. Average **22.8 hours/week** on caregiving.
+   https://img.prod.aplaceformom.com/main/uploads/lh/2025-Report-StateofCaregiving-VF-2.pdf
+2. **Psychology Today (April 2024).** *Reframing the Mental Load of Parenting.* Gender-neutral definition: *"the work of managing a household and family that no one sees — remembering appointments, planning family activities, arranging house maintenance, booking travel, meals, school and camp registration."*
+   https://www.psychologytoday.com/us/blog/parenting-translator/202404/reframing-the-mental-load-of-parenting
+3. **AAPA + Harris Poll (May 2023).** US adults spend the equivalent of a full 8-hour workday every month coordinating healthcare. **65%** call it "overwhelming and time-consuming."
+   https://www.globenewswire.com/news-release/2023/05/17/2670941/0/en/U-S-Adults-Spend-Eight-Hours-Monthly-Coordinating-Healthcare-Find-System-Overwhelming.html
+4. **AARP / National Alliance for Caregiving (2025).** *Caregiving in the US 2025.* Roughly **1 in 4** US adults is a family caregiver; **64%** experience high emotional stress.
+   https://doi.org/10.26419/ppi.00373.003
+
+Every number said in the recording is above. Do not paraphrase them into a stronger claim.
+
+---
+
+## Recovery lines (memorize)
 
 | If this fails mid-take | Say this |
 |---|---|
@@ -236,12 +182,12 @@ Built with Gemini 3.5 · ADK · Cloud Run · Firestore
 
 ---
 
-## B-roll shot list (pre-record these once, keep as fallback footage)
+## B-roll shot list (pre-record once, keep as fallback footage)
 
 - Landing page → demo-button click → `/today` populated. **10 seconds.**
 - Chat: *"prioritize elder care over sports"* + reply + sidebar update. **6 seconds.**
 - Chat: *"when's the best time to book team dinner this week?"* + slot list. **8 seconds.**
-- Feedback chip **Not me** click + memory_bank sidebar update. **5 seconds.**
+- Feedback chip **Not me** click + `memory_bank` sidebar update. **5 seconds.**
 - Email draft render + one edit + Send click + demo-mode toast. **12 seconds.**
 - Hear my day: chime + TTS. **6 seconds.**
 - `/admin/traces` waterfall with parent→child edges. **8 seconds.**
@@ -255,24 +201,25 @@ Keep these in a folder called `demo-broll/` on the recording machine. Every one 
 
 ## Voiceover pacing notes
 
-- Target **140–150 wpm**. The script above is ~600 words for 4:00; that's ~150 wpm. Rehearse to that pace.
-- Pause **one beat** after the framing lines in Beat 0. Let the calendar chaos land visually.
-- **Never read a URL out loud.** They live in supers.
-- **Never read a file path out loud.** Same reason.
-- Say "Level" no more than 5 times total. Overuse feels like an ad.
-- End sentences on downbeats — makes it sound authoritative, not chirpy.
+- Target **150 wpm**. The spoken VO above totals ~540 words = 3:35, leaving 25 seconds for the app to react on-screen.
+- **Land on the italicized `—` in the cold open.** The pause is what makes the "shoes in the car" line hit.
+- Read the source name in the super flat — like a footnote, not a boast.
+- **Never read a URL or file path out loud.** They live in supers.
+- Say the word "Level" no more than five times total. Overuse feels like an ad.
+- Punch the *verbs* — "noticed", "clustered", "caught", "flagged". They carry the innovation story more than the nouns do.
+- End sentences on downbeats. Makes it sound like a product, not a pitch.
 
 ---
 
 ## What we deliberately don't show
 
-We can't fit everything in 4 minutes. These are cut on purpose, not by accident. If a judge asks in the follow-up:
+Cut on purpose, not by accident. If a judge asks in the follow-up:
 
-- **Circuit breaker** — mentioned in Beat 7 VO; live-visible at `/v1/admin/calendar_circuit`.
+- **Circuit breaker** — mentioned in Beat 7 VO; live at `/v1/admin/calendar_circuit`.
 - **Model Armor** — mentioned in Beat 7 VO; unit-tested in `tests/security/`.
 - **PII scrub** — mentioned in Beat 7 VO; unit-tested.
 - **Rate limit** — mentioned in Beat 7 VO; state at `/v1/admin/rate_limit`.
-- **Nightly Cloud Run Job** — implicit in Beat 2's "while you slept" framing; source in `packages/jobs/`.
+- **Nightly Cloud Run Job** — mentioned in Beat 2 VO; source in `packages/jobs/`.
 - **Signed sessions + Firestore rules** — implicit in Beat 1's demo-login pill.
 
-Every one of these is either in the repo, in `SUBMISSION.md`, or in the medium writeup at `docs/writeup-medium.md`. The demo video's job is to make the judge *want* to open those links.
+Every one of these is in the repo, in `SUBMISSION.md`, or in `docs/writeup-medium.md`. The demo's job is to make the judge *want* to open those links.

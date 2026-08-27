@@ -33,6 +33,7 @@ import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from dateutil.rrule import rrulestr
@@ -50,6 +51,28 @@ _LOGGER = logging.getLogger(__name__)
 # demo agenda footprint mirrors real usage without blowing up storage.
 _DEFAULT_DAYS_BACK = 14
 _DEFAULT_DAYS_FORWARD = 28
+
+
+# Process-wide cache of parsed ICS Calendar objects, keyed by
+# (absolute path, file mtime). The ICS files ship inside the wheel and
+# never change during a process lifetime, so parsing them on every
+# demo login was pure waste (~100-300ms per file for the fixtures we
+# ship). This gates it to one parse per file per process; the mtime
+# key also invalidates the cache if a contributor regenerates the
+# fixtures in place.
+_calendar_cache: dict[tuple[str, float], Any] = {}
+
+
+def _load_calendar(ics_path: Path) -> Any:
+    """Return a parsed ``icalendar.Calendar`` for ``ics_path``, cached."""
+    key = (str(ics_path.resolve()), ics_path.stat().st_mtime)
+    cached = _calendar_cache.get(key)
+    if cached is not None:
+        return cached
+    with ics_path.open("rb") as fh:
+        cal = Calendar.from_ical(fh.read())
+    _calendar_cache[key] = cal
+    return cal
 
 
 @dataclass(frozen=True)
@@ -91,8 +114,7 @@ def load_events(
     window_start = reference - timedelta(days=days_back)
     window_end = reference + timedelta(days=days_forward)
 
-    with ics_path.open("rb") as fh:
-        cal = Calendar.from_ical(fh.read())
+    cal = _load_calendar(ics_path)
 
     occurrences: list[ParsedOccurrence] = []
     for vevent in cal.walk("VEVENT"):

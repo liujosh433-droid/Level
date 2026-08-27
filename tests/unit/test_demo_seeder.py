@@ -3,8 +3,12 @@
 Guarantees the OAuth-less landing experience judges will click:
 
 - ``seed_demo_user`` populates people, agenda, daily_agenda, usuals,
-  and the demo-profile marker.
-- Re-seeding is idempotent (same event/people counts, no doubling).
+  proactive_cards, and the demo-profile marker.
+- Every seed resets the demo user's session-mutable state first so
+  multiple judges hitting the same slot don't see each other's
+  chat turns, priorities, feedback verdicts, or edited people.
+- Re-seeding is idempotent in counts (no doubling); person_ids
+  intentionally rotate on reset because a demo user is throwaway.
 - ``POST /v1/auth/demo`` fences correctly across the three modes:
     * local: always allowed, unslotted user id
     * cloud + LEVEL_DEMO_IN_CLOUD=false (default): 404 - the
@@ -27,10 +31,13 @@ from fastapi.testclient import TestClient
 from level_core.config import get_settings
 from level_core.demo.scenarios import SCENARIOS, slot_for_ip, user_id_for_slot
 from level_core.demo.seeder import (
+    DEMO_USER_ID_PREFIX,
     PROFILE_DEMO_KEY,
     is_demo_user,
+    reset_demo_state,
     seed_demo_user,
 )
+from level_core.storage.factory import get_store
 
 
 @pytest.mark.asyncio
@@ -76,7 +83,17 @@ async def test_seed_solo_has_no_coparent(store) -> None:  # type: ignore[no-unty
 
 
 @pytest.mark.asyncio
-async def test_seed_is_idempotent(store) -> None:  # type: ignore[no-untyped-def]
+async def test_seed_is_idempotent_on_non_demo_store(store) -> None:  # type: ignore[no-untyped-def]
+    """Idempotency on a store whose user id doesn't match the demo prefix
+    (used by unit tests via the ``store`` fixture, which returns a
+    ``u_test_*`` id).
+
+    On a real demo slot the semantics differ - see
+    ``test_seed_wipes_prior_session_pollution_on_demo_store``. The
+    non-demo path is what covers "same contributor iterating locally
+    with a stable u_test id preserves person_ids on re-run", which
+    keeps their reproduction fixtures stable across seed calls.
+    """
     first = await seed_demo_user(store, scenario_id="family")
     events_before = await store.agenda.list()
     people_before = await store.people.list()
@@ -87,7 +104,224 @@ async def test_seed_is_idempotent(store) -> None:  # type: ignore[no-untyped-def
 
     assert first.events_count == second.events_count
     assert len(events_after) == len(events_before)
+    # Reset is a no-op for non-demo ids so person_ids are preserved
+    # by the reuse-by-name branch inside ``_seed_people``.
     assert {p.person_id for p in people_after} == {p.person_id for p in people_before}
+
+
+@pytest.mark.asyncio
+async def test_seed_wipes_prior_session_pollution_on_demo_store() -> None:
+    """The whole point of this feature: judge A's session state must NOT
+    leak into judge B's session on the same demo slot. This test lays
+    down pollution on every mutable surface, re-seeds, and asserts the
+    fresh session is pristine.
+
+    Uses a real ``u_demo_*`` user id (not the ``u_test_*`` fixture) so
+    the defensive prefix guard on ``reset_demo_state`` doesn't
+    short-circuit into the no-op branch.
+    """
+    from datetime import datetime
+
+    from level_core.schemas import Priority, Reminder
+    from level_core.schemas.activity import ActivityType
+    from level_core.schemas.chat import ChatMessage, ChatRole
+    from level_core.schemas.reminder import ReminderMatch
+
+    store = get_store(f"{DEMO_USER_ID_PREFIX}solo")
+
+    await seed_demo_user(store, scenario_id="solo")
+
+    # Simulate a real judge session: chat turns, a priority the judge
+    # set, a reminder, an edited person (soft-deleted co-parent-like),
+    # a memory-bank entry from a Not-me feedback chip, dismissed
+    # proactive cards, a pending booking.
+    await store.chat_turns.upsert(
+        ChatMessage(
+            turn_id="turn_leftover",
+            role=ChatRole.USER,
+            text="prioritize elder care over sports this week",
+        )
+    )
+    await store.priorities.upsert(
+        Priority(
+            priority_id="pri_leftover",
+            text="elder care over sports",
+            weight=4,
+            activity_types=[],
+        )
+    )
+    await store.reminders.upsert(
+        Reminder(
+            reminder_id="rem_leftover",
+            text="Bring the charger",
+            match=ReminderMatch(activity_type=ActivityType.WORK),
+        )
+    )
+    # Sneak an extra person in as if the judge had asked chat to add
+    # a new co-parent that isn't part of the scenario.
+    people_before = await store.people.list()
+    nova = next(p for p in people_before if p.display_name == "Nova")
+    # Now write profile pollution that mirrors what feedback + chat
+    # write during a session.
+    profile = dict(await store.profile.read() or {})
+    profile["memory_bank"] = {
+        "memories": [
+            {"text": "Never propose Saturday morning", "tag": "avoid"}
+        ]
+    }
+    profile["pending_booking"] = {"anything": "goes"}
+    profile["dismissed_missing_week"] = "2026-08-24"
+    await store.profile.write(profile)
+
+    # Re-seed as judge B would.
+    await seed_demo_user(store, scenario_id="solo")
+
+    # Every mutable surface should now be gone.
+    assert await store.chat_turns.list() == []
+    assert await store.priorities.list() == []
+    assert await store.reminders.list() == []
+    profile_after = await store.profile.read() or {}
+    assert "memory_bank" not in profile_after
+    assert "pending_booking" not in profile_after
+    assert "dismissed_missing_week" not in profile_after
+
+    # Person ids rotate (fresh UUIDs) because reset wiped people first,
+    # even though display names are the scenario's canonical roster.
+    people_after = await store.people.list()
+    names_before = {p.display_name for p in people_before}
+    names_after = {p.display_name for p in people_after}
+    assert names_before == names_after
+    assert not ({p.person_id for p in people_before} & {p.person_id for p in people_after}), (
+        "person_ids should rotate on session reset - a fresh judge shouldn't inherit prior ids"
+    )
+    # Nova specifically must have a new id (identity check via name).
+    nova_after = next(p for p in people_after if p.display_name == "Nova")
+    assert nova_after.person_id != nova.person_id
+
+    # Identity fields survive - they're rewritten by ``_write_profile``
+    # right after reset.
+    assert is_demo_user(profile_after)
+    assert profile_after[PROFILE_DEMO_KEY] == "solo"
+    assert profile_after["tz"]
+    assert profile_after["display_name"]
+
+    # And proactive cards land on the fresh seed - see next test for
+    # the shape check.
+    assert "proactive_cards" in profile_after
+
+    # Sanity: the seed timestamp advanced on the second call.
+    seeded_at_str = profile_after.get("demo_seeded_at")
+    assert seeded_at_str
+    assert datetime.fromisoformat(seeded_at_str) is not None
+
+
+@pytest.mark.asyncio
+async def test_seed_populates_proactive_cards_for_the_demo_week() -> None:
+    """``seed_demo_user`` runs ``regenerate_proactive_cards`` inline so
+    the "Level noticed while you slept" section on /today is
+    non-empty on click one - no waiting for the nightly job.
+
+    Uses the ``solo`` scenario which has TWO known missing usuals for
+    the demo week (Nova ballet Thu + Helen weekly grocery drop Sun).
+    """
+    store = get_store(f"{DEMO_USER_ID_PREFIX}solo")
+
+    await seed_demo_user(store, scenario_id="solo")
+
+    profile = await store.profile.read() or {}
+    proactive = profile.get("proactive_cards")
+    assert isinstance(proactive, dict), "proactive_cards should be a dict payload"
+    cards = proactive.get("cards") or []
+    assert len(cards) >= 1, (
+        "solo scenario should have at least one missing-usual card for the demo week"
+    )
+    # Shape check: exactly the fields the frontend renders.
+    card = cards[0]
+    for key in (
+        "card_id",
+        "kind",
+        "week_start",
+        "day",
+        "weekday",
+        "category",
+        "category_label",
+        "person_name",
+        "text",
+    ):
+        assert key in card, f"proactive card missing field: {key}"
+    assert card["kind"] == "missing_usual"
+
+
+@pytest.mark.asyncio
+async def test_reset_demo_state_refuses_non_demo_user_id(store) -> None:  # type: ignore[no-untyped-def]
+    """Defensive guard: if a real user's store were ever routed
+    through the reset path (should never happen, but the code needs
+    to fail safe if it does), we refuse and log rather than nuke
+    their data.
+
+    The ``store`` fixture returns a ``u_test_*`` id which does NOT
+    start with the demo prefix, so we can exercise the refusal branch
+    without needing to fabricate a fake production user.
+    """
+    from level_core.schemas import Priority
+
+    await store.priorities.upsert(
+        Priority(priority_id="pri_prod_looking", text="do not delete me", weight=3)
+    )
+
+    result = await reset_demo_state(store)
+
+    # Empty dict signals the refusal (no wipe attempted).
+    assert result == {}
+    # The pretend-production priority survives.
+    priorities = await store.priorities.list()
+    assert len(priorities) == 1
+    assert priorities[0].priority_id == "pri_prod_looking"
+
+
+@pytest.mark.asyncio
+async def test_reset_demo_state_skips_cold_slot() -> None:
+    """Cold-slot fast path: on a demo user whose slot has never been
+    written to, ``reset_demo_state`` must short-circuit on a single
+    profile read and NOT list every collection.
+
+    This is what makes the "first judge on this slot" seed fast on
+    cloud - the alternative (list every collection to confirm it's
+    empty) was N sequential Firestore round trips of pure wait.
+    """
+    store = get_store(f"{DEMO_USER_ID_PREFIX}solo")
+
+    result = await reset_demo_state(store)
+
+    assert result == {"reset": False, "reason": "cold_slot"}
+
+
+@pytest.mark.asyncio
+async def test_reset_demo_state_uses_native_reset_all_on_warm_slot() -> None:
+    """Warm-slot fast path: when the slot has content, ``reset_demo_state``
+    delegates to the backend-native ``store.reset_all()`` (one call
+    that wipes the whole user subtree) rather than the old N-collection
+    delete_many dance.
+    """
+    store = get_store(f"{DEMO_USER_ID_PREFIX}family")
+
+    await seed_demo_user(store, scenario_id="family")
+    # Confirm state landed so the reset has something to wipe.
+    assert await store.agenda.list()
+    assert await store.people.list()
+    assert await store.profile.read()
+
+    result = await reset_demo_state(store)
+
+    assert result == {"reset": True}
+    # Every mutable surface should now be empty.
+    assert await store.agenda.list() == []
+    assert await store.people.list() == []
+    assert await store.usuals.list() == []
+    assert await store.daily_agenda.list() == []
+    # Profile is fully wiped too - identity fields get re-populated
+    # only by a subsequent seed_demo_user call, never by reset alone.
+    assert not (await store.profile.read())
 
 
 @pytest.mark.asyncio

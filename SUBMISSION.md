@@ -26,6 +26,13 @@ primary demo because single-parent workload best showcases
 RoleAgent inference; **Or: Two-parent family** adds a co-parent
 (Alex) so you can see how Level splits pickup duty.
 
+**Every click of "Try demo" resets to a pristine state.** The
+seeder wipes any prior-session chat turns, priorities, reminders,
+feedback verdicts, or memory-bank entries before re-laying the
+scenario. So the second judge to hit the same demo slot sees the
+same clean state as the first — no leftover pollution to distract
+from what Level actually does.
+
 The hosted demo is bounded by design so it can't blow up under
 load: client IP hashes to a slot from a fixed pool of 3 users per
 scenario (6 total), per-IP burst is throttled, and per-user daily

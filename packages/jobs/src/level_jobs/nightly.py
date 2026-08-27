@@ -15,12 +15,13 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from level_core.calendar.enrich import enrich_agenda
-from level_core.calendar.sync import ensure_watch, refresh_agenda
-from level_core.calendar.usuals import (
-    compute_usuals_from_events,
-    current_week_bounds,
-    missing_usuals_this_week,
+from level_core.calendar.proactive import (
+    MAX_PROACTIVE_CARDS,
+    PROACTIVE_CARDS_KEY,
+    regenerate_proactive_cards,
 )
+from level_core.calendar.sync import ensure_watch, refresh_agenda
+from level_core.calendar.usuals import compute_usuals_from_events
 from level_core.config import get_settings
 from level_core.observability import get_logger
 from level_core.schemas import Usual
@@ -31,8 +32,11 @@ from level_core.tz import tz_for_store
 
 logger = get_logger("nightly")
 
-PROACTIVE_CARDS_KEY = "proactive_cards"
-MAX_PROACTIVE_CARDS = 5
+# Re-exported from level_core.calendar.proactive so any legacy import
+# of ``nightly.PROACTIVE_CARDS_KEY`` / ``nightly.MAX_PROACTIVE_CARDS``
+# continues to work. New callers should import from
+# ``level_core.calendar.proactive`` directly.
+__all__ = ["PROACTIVE_CARDS_KEY", "MAX_PROACTIVE_CARDS", "main"]
 
 
 async def _process_user(user_id: str) -> None:
@@ -62,7 +66,7 @@ async def _process_user(user_id: str) -> None:
         fresh_ids.add(Usual.compose_id(c.person_id, c.weekday, c.hour_band))
     await sync_usuals(store, fresh_ids)
 
-    await _generate_proactive_cards(store, tz=tz, events=events)
+    await regenerate_proactive_cards(store, tz=tz, events=events, people=people)
 
     turns = sorted(
         await store.chat_turns.list(), key=lambda t: t.created_at, reverse=True
@@ -79,101 +83,6 @@ async def _process_user(user_id: str) -> None:
             await store.ai_audit.delete(a.audit_id)
 
     await ensure_watch(store)
-
-
-async def _generate_proactive_cards(
-    store: UserStore, *, tz, events
-) -> None:
-    """Detect missing-usual gaps this week and stash them as suggestion cards.
-
-    The frontend's /today page renders these as "Beta's Thursday dropoff
-    isn't on your calendar — put it back?" nudges with an inline
-    confirm-yes flow. This is the rubric's "runs in the background,
-    handles the heavy lifting" behavior — the user wakes up to Level
-    having already noticed and prepared a fix.
-
-    We deliberately keep this deterministic (no LLM) so the nightly job
-    stays free. If a card gets dismissed by the user, chat.py's fast-path
-    still handles the confirm-yes; nothing here mutates the calendar.
-    """
-    today = datetime.now(tz).date()
-    week_start, _week_end = current_week_bounds(today)
-    usuals = await store.usuals.list()
-    people = await store.people.list()
-    events_by_id = {e.event_id: e for e in events}
-    missing = missing_usuals_this_week(
-        usuals=usuals,
-        week_events=[e for e in events if week_start <= e.time.start.astimezone(tz).date() < _week_end],
-        as_of_date=today,
-        events_by_id=events_by_id,
-        people=people,
-        tz=tz,
-    )
-    if not missing:
-        # Clear any stale cards from prior weeks so they don't linger.
-        profile = dict(await store.profile.read() or {})
-        if profile.get(PROACTIVE_CARDS_KEY):
-            profile.pop(PROACTIVE_CARDS_KEY, None)
-            await store.profile.write(profile)
-        return
-
-    people_by_id = {p.person_id: p for p in await store.people.list()}
-    cards: list[dict] = []
-    for g in missing[:MAX_PROACTIVE_CARDS]:
-        primary_person = people_by_id.get(g.person_id)
-        display_name = primary_person.display_name if primary_person else "someone"
-        day = (week_start + timedelta(days=int(g.weekday))).isoformat()
-        # Prefer the concrete title ("Grocery run", "Nova ballet") over
-        # the coarse category ("Personal", "Sports"). The category on
-        # its own is too abstract to be a useful nudge - "Josh's
-        # personal is missing this week" reads like a therapist joke.
-        # Falls back to the category label when the usual didn't carry
-        # a title (badly seeded data or LLM-less demo mode with no
-        # heuristic hit).
-        activity_label = (g.title_hint or g.category.label).strip()
-        if primary_person and primary_person.is_self:
-            # Own-usual phrasing: "Your grocery run is missing" reads
-            # better than "Josh's grocery run is missing" when it's
-            # the caregiver themselves.
-            body_text = (
-                f"Your {activity_label.lower()} is missing this week. "
-                "Want me to put it back?"
-            )
-        else:
-            body_text = (
-                f"{display_name}'s {activity_label.lower()} is missing this week. "
-                "Want me to put it back?"
-            )
-        cards.append(
-            {
-                "card_id": f"missing:{g.weekday}:{g.category.value}",
-                "kind": "missing_usual",
-                "week_start": week_start.isoformat(),
-                "day": day,
-                "weekday": int(g.weekday),
-                "category": g.category.value,
-                "category_label": g.category.label,
-                "title_hint": g.title_hint,
-                "person_id": g.person_id,
-                "person_name": display_name,
-                "text": body_text,
-                "created_at": datetime.utcnow().isoformat(),
-            }
-        )
-
-    profile = dict(await store.profile.read() or {})
-    profile[PROACTIVE_CARDS_KEY] = {
-        "week_start": week_start.isoformat(),
-        "generated_at": datetime.utcnow().isoformat(),
-        "cards": cards,
-    }
-    await store.profile.write(profile)
-    logger.info(
-        "nightly.proactive_cards",
-        user_id=store.user_id,
-        count=len(cards),
-        week_start=week_start.isoformat(),
-    )
 
 
 async def _list_users() -> list[str]:

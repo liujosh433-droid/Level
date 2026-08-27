@@ -39,6 +39,7 @@ from dateutil.rrule import rrulestr
 from icalendar import Calendar
 
 from level_core.calendar.enrich import heuristic_activity
+from level_core.schemas.activity import ActivityType
 from level_core.schemas.agenda import CachedEvent, EventTime
 from level_core.schemas.care import CarePerson
 
@@ -225,8 +226,23 @@ def _build_cached_event(
     calendar_id: str,
     people: list[CarePerson],
 ) -> CachedEvent:
-    activity = heuristic_activity(occ.summary)
     matched_person_ids, tokens = _match_people(occ.summary, people)
+    activity = heuristic_activity(occ.summary)
+    if activity is None:
+        # Second-pass demo-only classifier for messy titles the shared
+        # production heuristic deliberately doesn't cover because they'd
+        # false-positive on real calendars. Two rules, both requiring a
+        # matched person as context:
+        #
+        #  - "PT" as a whole word next to a person => MEDICAL_THERAPY.
+        #    ("Helen PT", "PT - Helen"). Bare "PT" on a real user's
+        #    calendar could mean product team, so the person-adjacency
+        #    guard is what keeps this from being a demo-flavored bug.
+        #
+        #  - Any orphan grocery-store brand ("TJ's", "Ralphs") could go
+        #    here too, but the shared heuristic now covers the common
+        #    ones - see enrich.py comment.
+        activity = _demo_secondary_classifier(occ.summary, matched_person_ids)
     event_id = f"demo:{occ.uid}:{occ.start.strftime('%Y%m%dT%H%M')}"
     return CachedEvent(
         event_id=event_id,
@@ -245,6 +261,25 @@ def _build_cached_event(
         matched_person_ids=matched_person_ids,
         origin="google",
     )
+
+
+# Whole-word "PT" (case-insensitive). Matches "Helen PT", "PT - Helen",
+# and "PT session", but not "MPT", "Sept", or bare "part-time".
+_PT_TOKEN = re.compile(r"\bpt\b", re.IGNORECASE)
+
+
+def _demo_secondary_classifier(
+    summary: str, matched_person_ids: list[str]
+) -> ActivityType | None:
+    """Demo-only classifier for messy variants that don't belong in the
+    shared production heuristic. Every rule here MUST require a matched
+    person as context so we don't overreach.
+    """
+    if not summary or not matched_person_ids:
+        return None
+    if _PT_TOKEN.search(summary):
+        return ActivityType.MEDICAL_THERAPY
+    return None
 
 
 _NAME_TOKEN = re.compile(r"[A-Za-z][A-Za-z'\-]+")

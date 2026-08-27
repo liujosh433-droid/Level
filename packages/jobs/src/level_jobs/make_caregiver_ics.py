@@ -22,8 +22,27 @@ are missing** - the nightly proactive-cards job picks them up and
 renders them on ``/today`` as ``"Level noticed while you slept"``
 nudges.
 
-Weekly rhythm is real RRULE series (so Google Calendar honours
-"delete this and following"). One-offs stay as single VEVENTs.
+Weekly rhythm is a deliberate mix: RRULE for the true recurring
+anchors (school dropoff, work, commute) and **individual VEVENTs
+with slight text/time variance** for a handful of events that a
+real caregiver would just re-create each week instead of turning
+into a repeating series. See ``_messy_weekly`` at the bottom of
+this module.
+
+Three "messy usuals" (Nova ballet, Helen PT, grocery run) are
+laid down as 4-5 separate VEVENTs each - not a single RRULE -
+with:
+
+- text variance ("Nova ballet" / "Ballet - Nova" / "Nova ballet
+  class")
+- time wobble within the same hour band (4:30 vs 4:45 PM)
+
+This proves the usuals engine clusters on
+``(person_id, weekday, hour_band, activity_type)`` and picks the
+majority-vote display name - not on exact string match of the
+event summary. The two "missing this week" stories still hold:
+Nova ballet is absent this Thursday, grocery run is absent this
+Friday.
 """
 
 from __future__ import annotations
@@ -50,8 +69,17 @@ END = date(2026, 9, 25)  # Friday
 TODAY = date(2026, 8, 26)  # Wednesday - anchors the "missing this week" story
 
 # Weekday shape of the demo week: Thu = 8/27, Fri = 8/28, Sat = 8/29, Sun = 8/30.
-MISSING_BALLET = date(2026, 8, 27)
-MISSING_GROCERY_RUN = date(2026, 8, 28)
+# Anchor: START (Mon 8/3) + 3 weeks = the demo week (Mon 8/24 - Sun 8/30).
+# So the Nth _messy_weekly variant hits weekday-of-N-th-week; N=3 lands
+# on the demo week. That's the "missing this week" slot for both ballet
+# and grocery (encoded as ``skip_offsets=(THIS_WEEK,)``).
+THIS_WEEK = 3
+
+# Missing-usuals story for the current demo week: Nova ballet and
+# the grocery run are absent this week for both scenarios (skipped
+# via ``skip_offsets`` inside the ``_messy_weekly`` blocks below).
+# The solo scenario adds a third: Helen's Sunday grocery drop, which
+# still uses RRULE + EXDATE because it's a "clean" recurring block.
 MISSING_HELEN_SUNDAY = date(2026, 8, 30)
 
 LABOR_DAY = date(2026, 9, 7)
@@ -151,6 +179,50 @@ def once(
         lines.append(f"LOCATION:{location}")
     lines.append("END:VEVENT")
     return _join(lines)
+
+
+def _messy_weekly(
+    *,
+    uid_prefix: str,
+    weekday_of_first: date,
+    variants: list[tuple[str, tuple[int, int], tuple[int, int]]],
+    location: str | None = None,
+    skip_offsets: tuple[int, ...] = (),
+) -> list[str]:
+    """Emit N one-off VEVENTs mimicking a recurring event a caregiver
+    never bothered to configure as recurring.
+
+    Each variant is ``(summary_text, (start_h, start_m), (end_h, end_m))``
+    and is applied to a successive week (0, 1, 2, ...) starting from
+    ``weekday_of_first``. ``skip_offsets`` lets us omit particular weeks
+    (used to keep the "missing this week" story intact - the demo relies
+    on Nova ballet and grocery run being absent this specific week).
+
+    The three-way variance (summary text, start hour+minute, end
+    hour+minute) is deliberate: it exercises the usuals clustering on
+    the (person_id, weekday, hour_band, activity_type) key while
+    proving the display-name majority vote and hour_band bucketing
+    both work on real-world-shaped data.
+
+    UIDs are per-occurrence and unique so a downstream Google Calendar
+    import doesn't collapse them into a series retroactively.
+    """
+    events: list[str] = []
+    for i, (summary, start, end) in enumerate(variants):
+        if i in skip_offsets:
+            continue
+        day = date.fromordinal(weekday_of_first.toordinal() + 7 * i)
+        events.append(
+            once(
+                uid=f"{uid_prefix}-w{i}@level.local",
+                day=day,
+                start=start,
+                end=end,
+                summary=summary,
+                location=location,
+            )
+        )
+    return events
 
 
 # ---------------------------------------------------------------------------
@@ -288,26 +360,50 @@ def build_family_events() -> list[str]:
             byday="SA",
             location="Harbor Field",
         ),
-        # Nova ballet is intentionally missing on Thu 2026-08-27 - the first
-        # of two "missing usuals" the demo relies on.
-        series(
-            uid="fam-nova-ballet@level.local",
-            first=first["TH"],
-            start=(16, 30),
-            end=(17, 30),
-            summary="Nova ballet",
-            byday="TH",
+        # Nova ballet is a "messy weekly": individual VEVENTs with text
+        # variance ("Nova ballet" / "Ballet - Nova" / "Nova ballet
+        # class"), no RRULE. Level still infers Thursday-afternoon
+        # ballet as Nova's usual because clustering keys on
+        # (person, weekday, hour_band, activity_type). Missing THIS
+        # Thursday (2026-08-27) is the first of the two demo missing-
+        # usuals stories - the nightly proactive-cards job surfaces it.
+        #
+        # Majority vote: 3× "Nova ballet" vs 1× each of the two
+        # variants means the picked display name settles on the clean
+        # form. Weeks 0/1/2 are in the past, so those three drive the
+        # majority. Weeks 4/5 are the same clean form because a real
+        # user reverts to their default wording once the "let's try
+        # this" experiment (variant text) passes.
+        *_messy_weekly(
+            uid_prefix="fam-nova-ballet",
+            weekday_of_first=first["TH"],
+            variants=[
+                ("Nova ballet", (16, 30), (17, 30)),        # week 0 - past, majority
+                ("Ballet - Nova", (16, 45), (17, 45)),      # week 1 - past, variant
+                ("Nova ballet", (16, 30), (17, 30)),        # week 2 - past, majority
+                ("Nova ballet class", (16, 30), (17, 30)),  # week 3 (SKIPPED - missing)
+                ("Nova ballet", (16, 30), (17, 30)),        # week 4 - future
+                ("Nova ballet", (16, 30), (17, 30)),        # week 5 - future
+            ],
             location="Studio B",
-            exdates=[MISSING_BALLET],
+            skip_offsets=(THIS_WEEK,),
         ),
         # -- Elder care (Helen) ---------------------------------------------
-        series(
-            uid="fam-helen-pt@level.local",
-            first=first["WE"],
-            start=(10, 0),
-            end=(11, 0),
-            summary="Helen physical therapy",
-            byday="WE",
+        # Helen PT is a "messy weekly": individual VEVENTs with slight
+        # text + time variance. Demo point: Level clusters these as a
+        # Wednesday-morning usual for Helen even though Josh never
+        # marked the event as recurring in Google Calendar and used
+        # different wording each week.
+        *_messy_weekly(
+            uid_prefix="fam-helen-pt",
+            weekday_of_first=first["WE"],
+            variants=[
+                ("Helen physical therapy", (10, 0), (11, 0)),  # week 0
+                ("Helen PT", (9, 45), (10, 45)),               # week 1
+                ("Helen physical therapy", (10, 0), (11, 0)),  # week 2 - majority text
+                ("PT - Helen", (10, 15), (11, 15)),            # week 3
+                ("Helen physical therapy", (10, 0), (11, 0)),  # this week - present in agenda
+            ],
             location="Bayside PT Clinic",
         ),
         series(
@@ -328,15 +424,25 @@ def build_family_events() -> list[str]:
             byday="TU,TH",
         ),
         # -- Household -------------------------------------------------------
-        # Grocery run is the second intentionally-missing usual (Fri 8/28).
-        series(
-            uid="fam-grocery-run@level.local",
-            first=first["FR"],
-            start=(16, 15),
-            end=(16, 50),
-            summary="Grocery run",
-            byday="FR",
-            exdates=[MISSING_GROCERY_RUN],
+        # Grocery run is a "messy weekly": Josh sometimes types the
+        # store name, sometimes just "Grocery run", never bothered to
+        # make it recurring. Level's second missing-usuals story for
+        # the demo week (absent this Friday 2026-08-28) - the nightly
+        # proactive-cards job surfaces it alongside Nova ballet.
+        # Majority-vote display picks "Grocery run" (2 of the 3 past
+        # events).
+        *_messy_weekly(
+            uid_prefix="fam-grocery-run",
+            weekday_of_first=first["FR"],
+            variants=[
+                ("Grocery run", (16, 15), (16, 50)),      # week 0 - past, majority
+                ("Trader Joe's", (16, 30), (17, 5)),      # week 1 - past, variant
+                ("Grocery run", (16, 15), (16, 50)),      # week 2 - past, majority
+                ("Grocery pickup", (16, 45), (17, 20)),   # week 3 (SKIPPED - missing)
+                ("Grocery run", (16, 15), (16, 50)),      # week 4 - future
+                ("Grocery run", (16, 15), (16, 50)),      # week 5 - future
+            ],
+            skip_offsets=(THIS_WEEK,),
         ),
         series(
             uid="fam-family-dinner@level.local",
@@ -504,25 +610,34 @@ def build_solo_events() -> list[str]:
             byday="SA",
             location="Harbor Field",
         ),
-        # Missing usual #1: Nova ballet on Thu 2026-08-27.
-        series(
-            uid="solo-nova-ballet@level.local",
-            first=first["TH"],
-            start=(16, 30),
-            end=(17, 30),
-            summary="Nova ballet",
-            byday="TH",
+        # Nova ballet - messy weekly. Same demo hook as the family
+        # scenario (see the equivalent block in build_family_events).
+        *_messy_weekly(
+            uid_prefix="solo-nova-ballet",
+            weekday_of_first=first["TH"],
+            variants=[
+                ("Nova ballet", (16, 30), (17, 30)),        # week 0 - past, majority
+                ("Ballet - Nova", (16, 45), (17, 45)),      # week 1 - past, variant
+                ("Nova ballet", (16, 30), (17, 30)),        # week 2 - past, majority
+                ("Nova ballet class", (16, 30), (17, 30)),  # week 3 (SKIPPED - missing)
+                ("Nova ballet", (16, 30), (17, 30)),        # week 4 - future
+                ("Nova ballet", (16, 30), (17, 30)),        # week 5 - future
+            ],
             location="Studio B",
-            exdates=[MISSING_BALLET],
+            skip_offsets=(THIS_WEEK,),
         ),
         # -- Elder care (Helen) - heavier cadence for the solo caregiver -----
-        series(
-            uid="solo-helen-pt@level.local",
-            first=first["WE"],
-            start=(10, 0),
-            end=(11, 0),
-            summary="Helen physical therapy",
-            byday="WE",
+        # Helen PT - messy weekly, present this week in agenda.
+        *_messy_weekly(
+            uid_prefix="solo-helen-pt",
+            weekday_of_first=first["WE"],
+            variants=[
+                ("Helen physical therapy", (10, 0), (11, 0)),  # week 0
+                ("Helen PT", (9, 45), (10, 45)),               # week 1
+                ("Helen physical therapy", (10, 0), (11, 0)),  # week 2 - majority
+                ("PT - Helen", (10, 15), (11, 15)),            # week 3
+                ("Helen physical therapy", (10, 0), (11, 0)),  # this week
+            ],
             location="Bayside PT Clinic",
         ),
         # Missing usual #2: Helen weekly grocery drop on Sun 2026-08-30.
@@ -545,13 +660,21 @@ def build_solo_events() -> list[str]:
             byday="MO,WE,FR",
         ),
         # -- Household -------------------------------------------------------
-        series(
-            uid="solo-grocery-run@level.local",
-            first=first["FR"],
-            start=(16, 15),
-            end=(16, 50),
-            summary="Grocery run",
-            byday="FR",
+        # Grocery run - messy weekly. Solo caregiver: no missing-week
+        # skip here because the demo already has TWO missing usuals
+        # (Nova ballet + Helen Sunday drop). Grocery run stays present
+        # this Friday to keep the demo agenda from feeling barren.
+        *_messy_weekly(
+            uid_prefix="solo-grocery-run",
+            weekday_of_first=first["FR"],
+            variants=[
+                ("Grocery run", (16, 15), (16, 50)),      # week 0 - past, majority
+                ("Trader Joe's", (16, 30), (17, 5)),      # week 1 - past, variant
+                ("Grocery run", (16, 15), (16, 50)),      # week 2 - past, majority
+                ("Grocery pickup", (16, 45), (17, 20)),   # week 3 - THIS week, variant
+                ("Grocery run", (16, 15), (16, 50)),      # week 4 - future
+                ("Grocery run", (16, 15), (16, 50)),      # week 5 - future
+            ],
         ),
         series(
             uid="solo-meal-prep@level.local",
@@ -691,12 +814,36 @@ def write_scenario(scenario: Scenario, docs_dir: Path) -> Path:
     filename, _, _ = _SCENARIO_META[scenario]
     out = docs_dir / filename
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(_assemble(scenario), encoding="utf-8")
+    body = _assemble(scenario)
+    out.write_text(body, encoding="utf-8")
+    # Mirror into the packaged copy that ships inside the level_core
+    # wheel (loaded at runtime via importlib.resources). Two locations
+    # by design: example-data/ is human-facing (docs, generator, git
+    # blame), level_core/demo/data/ is what Cloud Run's site-packages
+    # actually sees. tests/unit/test_demo_seeder.py guards against
+    # drift, so keeping them in sync HERE means no contributor ever
+    # has to remember the second copy.
+    packaged = _packaged_dir() / filename
+    packaged.parent.mkdir(parents=True, exist_ok=True)
+    packaged.write_text(body, encoding="utf-8")
     return out
 
 
 def _out_dir() -> Path:
     return Path(__file__).resolve().parents[4] / "example-data"
+
+
+def _packaged_dir() -> Path:
+    """In-wheel copy of the ICS fixtures - see write_scenario."""
+    return (
+        Path(__file__).resolve().parents[4]
+        / "packages"
+        / "core"
+        / "src"
+        / "level_core"
+        / "demo"
+        / "data"
+    )
 
 
 def main() -> list[Path]:

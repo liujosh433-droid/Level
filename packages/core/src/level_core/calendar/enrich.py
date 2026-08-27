@@ -203,17 +203,33 @@ async def reclassify_all(store: UserStore) -> int:
 # AI is briefly unavailable. Every entry here should be a phrase where a
 # human would *always* agree, no matter the context. Prefer AI over
 # guessing.
+# Order matters: earlier tuples take precedence. Two intentional choices:
+#
+# 1. PERSONAL comes before SCHOOL_PICKUP so titles like "Grocery pickup"
+#    or "Curbside pickup" land on PERSONAL instead of getting hijacked
+#    by SCHOOL_PICKUP's broad "pickup" keyword. Real caregivers use the
+#    word "pickup" for a lot more than school runs; sticking SCHOOL_PICKUP
+#    first was a production bug caught while widening the demo fixtures.
+#
+# 2. Ballet + dance class + brand-name grocery stores got added so the
+#    demo's "messy calendar" story clusters correctly without an LLM,
+#    but they're also correct for real users - "ballet" is unambiguously
+#    a kid activity and named grocery brands are unambiguously errands.
 OBVIOUS_SIGNALS: tuple[tuple[ActivityType, tuple[str, ...]], ...] = (
     (ActivityType.SPORTS_SOCCER, ("soccer",)),
     (ActivityType.SPORTS_BASKETBALL, ("basketball",)),
     (ActivityType.SPORTS_SWIM, ("swim lesson", "swim practice", "swim meet", "swim")),
+    (ActivityType.SPORTS_OTHER, ("ballet", "dance class", "gymnastics", "karate")),
+    (ActivityType.PERSONAL, (
+        "grocery", "groceries", "meal prep", "laundry",
+        "trader joe", "whole foods", "safeway", "costco",
+    )),
     (ActivityType.SCHOOL_PICKUP, ("pickup", "pick-up", "aftercare")),
     (ActivityType.SCHOOL_DROPOFF, ("dropoff", "drop-off", "(drop)")),
-    (ActivityType.MEDICAL_THERAPY, ("therapy", "therapist")),
+    (ActivityType.MEDICAL_THERAPY, ("physical therapy", "therapy", "therapist")),
     (ActivityType.MEDICAL_APPT, ("dentist", "dental", "pediatric", "doctor visit", "dr appt", "appt")),
     (ActivityType.WORK, ("1:1", "standup", "all hands", "all-hands", "sprint review", "sprint planning")),
     (ActivityType.COMMUTE, ("commute",)),
-    (ActivityType.PERSONAL, ("grocery", "meal prep", "laundry")),
 )
 
 

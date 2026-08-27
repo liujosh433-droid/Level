@@ -213,6 +213,33 @@ Every piece of state has an explicit lifecycle:
   `LEVEL_ENV=cloud`. The 404 (rather than 403) makes the demo
   endpoint indistinguishable from "endpoint doesn't exist" so a
   probe can't tell whether demo is turned off in production.
+- **Messy-calendar fixture design.** The ICS files in `example-data/`
+  aren't a "perfect" recurring schedule. Three usual events are
+  laid down as **individual VEVENTs with varying text and time**,
+  not as RRULE series — mimicking how real caregivers create
+  events. This is the "Level handles messy calendars" demo point:
+  - `Nova ballet` / `Ballet - Nova` / `Nova ballet class` — 3 past
+    Thursdays, 3 different titles, times wobble between 4:30 and
+    4:45 PM (all in the afternoon hour band). The usuals engine
+    clusters on `(nova_id, THU, afternoon, sports.other)` and the
+    majority-vote display collapses to `"Nova ballet"`.
+  - `Helen physical therapy` / `Helen PT` / `PT - Helen` — same
+    story for elder care. The bare "PT" case leans on a demo-only
+    second-pass classifier in `ics_loader.py` that upgrades "PT"
+    (whole-word) to `medical.therapy` **only when a person match
+    is present**, so real users' "Sync with PT" (product team) on
+    connected calendars never trips it.
+  - `Grocery run` / `Trader Joe's` / `Grocery pickup` — same for
+    household. This one also exposed a production heuristic bug
+    where "Grocery pickup" was being tagged as `school.pickup`
+    because `SCHOOL_PICKUP` sorted before `PERSONAL` in
+    `OBVIOUS_SIGNALS`. Fixed for all users, not just the demo.
+- The demo week (Aug 26–30 2026 in the ICS's anchor) also engineers
+  two events **absent from this week that were present in prior
+  weeks**: Nova ballet Thu 8/27 and grocery run Fri 8/28 (family
+  scenario). The nightly proactive-cards job surfaces both on
+  `/today` as `"Level noticed while you slept"` nudges — the demo
+  moment that proves the missing-usuals lifecycle end-to-end.
 
 ---
 

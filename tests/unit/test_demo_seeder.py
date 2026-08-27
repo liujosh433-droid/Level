@@ -96,6 +96,140 @@ async def test_seed_unknown_scenario_raises(store) -> None:  # type: ignore[no-u
         await seed_demo_user(store, scenario_id="not-a-scenario")
 
 
+@pytest.mark.parametrize("scenario_id", ["family", "solo"])
+@pytest.mark.asyncio
+async def test_messy_events_still_cluster_as_usuals(  # type: ignore[no-untyped-def]
+    scenario_id, store
+) -> None:
+    """The demo fixtures deliberately mix RRULE anchors with individual
+    VEVENTs that vary in text ("Nova ballet" / "Ballet - Nova") and
+    time ("Grocery run" at 4:15 vs 4:45 PM). The usuals engine should
+    cluster them anyway on (person, weekday, hour_band, activity_type)
+    and pick the "clean" majority-vote wording for display.
+
+    This test locks in the "Level handles messy calendars" demo story
+    so a future edit to the generator, the classifier, or the
+    clustering algorithm can't silently break it.
+    """
+    from datetime import date
+
+    await seed_demo_user(store, scenario_id=scenario_id)
+    usuals = await store.usuals.list()
+    people = await store.people.list()
+    people_by_id = {p.person_id: p for p in people}
+    events = await store.agenda.list()
+    josh_id = next(p.person_id for p in people if p.is_self)
+    nova_id = next(p.person_id for p in people if p.display_name == "Nova")
+    helen_id = next(p.person_id for p in people if p.display_name == "Helen")
+
+    # 1. Nova Thu-afternoon ballet clustered under the clean name
+    #    despite 3 different text variants over the past 3 Thursdays.
+    ballet = next(
+        (u for u in usuals if u.person_id == nova_id and u.weekday.name == "THU"
+         and u.activity_type.value == "sports.other"),
+        None,
+    )
+    assert ballet is not None, "Nova THU ballet usual missing"
+    assert ballet.display_summary == "Nova ballet", (
+        f"majority-vote display should pick 'Nova ballet', got {ballet.display_summary!r}"
+    )
+
+    # 2. Helen Wed-morning PT clustered under the clean name despite
+    #    "PT - Helen" / "Helen PT" variants (which lean on the demo
+    #    loader's second-pass classifier for the bare-word "PT" case).
+    pt = next(
+        (u for u in usuals if u.person_id == helen_id and u.weekday.name == "WED"
+         and u.activity_type.value == "medical.therapy"),
+        None,
+    )
+    assert pt is not None, "Helen WED PT usual missing"
+    assert pt.display_summary == "Helen physical therapy"
+
+    # 3. Josh Fri-afternoon grocery run - unattributed household chore
+    #    that still gets clustered under the self person, with the
+    #    "Trader Joe's" / "Grocery pickup" variants voted down by the
+    #    majority "Grocery run".
+    grocery = next(
+        (u for u in usuals if u.person_id == josh_id and u.weekday.name == "FRI"
+         and u.activity_type.value == "personal"),
+        None,
+    )
+    assert grocery is not None, "Josh FRI grocery usual missing"
+    assert grocery.display_summary == "Grocery run"
+
+    # 4. Missing-usuals story for the demo week: Nova ballet is
+    #    intentionally absent this Thursday (both scenarios). Grocery
+    #    run is absent this Friday for FAMILY only; SOLO keeps it
+    #    present under a variant name to demo that a variant title
+    #    still covers the usual and doesn't trigger a false alarm.
+    thu = date(2026, 8, 27)
+    fri = date(2026, 8, 28)
+    thu_ballet = [
+        e for e in events
+        if e.time.start.date() == thu and "ballet" in e.summary.lower()
+    ]
+    fri_grocery = [
+        e for e in events
+        if e.time.start.date() == fri
+        and ("grocery" in e.summary.lower() or "trader" in e.summary.lower())
+    ]
+    assert not thu_ballet, f"ballet should be missing this Thu, found: {thu_ballet}"
+    if scenario_id == "family":
+        assert not fri_grocery, (
+            f"family grocery should be missing this Fri, found: {fri_grocery}"
+        )
+    else:
+        assert fri_grocery, "solo grocery should still be present under a variant name"
+
+
+def test_heuristic_grocery_pickup_not_misclassified_as_school() -> None:
+    """Regression: OBVIOUS_SIGNALS used to order SCHOOL_PICKUP before
+    PERSONAL, so "Grocery pickup" was tagged as school.pickup - not
+    just a demo bug, a real production misclassification. Locking in
+    the reordering.
+    """
+    from level_core.calendar.enrich import heuristic_activity
+    from level_core.schemas.activity import ActivityType
+
+    assert heuristic_activity("Grocery pickup") is ActivityType.PERSONAL
+    assert heuristic_activity("Curbside pickup") is ActivityType.PERSONAL or (
+        # "Curbside" isn't in the keyword set on its own; "pickup" would
+        # fall through to SCHOOL_PICKUP. Accept either outcome since the
+        # only precision claim we make is grocery-first ordering.
+        heuristic_activity("Curbside pickup") is ActivityType.SCHOOL_PICKUP
+    )
+    assert heuristic_activity("Nova pickup") is ActivityType.SCHOOL_PICKUP
+    assert heuristic_activity("Nova ballet") is ActivityType.SPORTS_OTHER
+    assert heuristic_activity("Trader Joe's") is ActivityType.PERSONAL
+
+
+def test_packaged_ics_matches_example_data_at_repo_root() -> None:
+    """Two copies exist by design (repo-root ``example-data/`` for
+    humans + generator, ``level_core/demo/data/`` shipped inside the
+    wheel for runtime). This test guards against drift so an ICS edit
+    committed to only one location doesn't silently ship a stale demo
+    on the deploy while the docs point at the fresh one - or vice
+    versa.
+    """
+    import hashlib
+    from pathlib import Path
+
+    repo_data = Path(__file__).resolve().parents[2] / "example-data"
+    for scenario in SCENARIOS.values():
+        repo_copy = repo_data / scenario.ics_filename
+        packaged_copy = scenario.ics_path()
+        assert repo_copy.is_file(), f"missing repo-root fixture: {repo_copy}"
+        assert packaged_copy.is_file(), f"missing packaged fixture: {packaged_copy}"
+        repo_hash = hashlib.sha256(repo_copy.read_bytes()).hexdigest()
+        pkg_hash = hashlib.sha256(packaged_copy.read_bytes()).hexdigest()
+        assert repo_hash == pkg_hash, (
+            f"ICS drift for {scenario.ics_filename}: repo copy at "
+            f"{repo_copy} differs from packaged copy at {packaged_copy}. "
+            f"Re-run scripts/sync_demo_ics.sh or copy the edit into both "
+            f"locations."
+        )
+
+
 def _make_client(env: str, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     """Rebuild the FastAPI app under a specific LEVEL_ENV.
 

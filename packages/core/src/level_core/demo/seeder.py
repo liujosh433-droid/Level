@@ -74,12 +74,22 @@ async def seed_demo_user(
         raise ValueError(f"unknown demo scenario: {scenario_id!r}")
 
     people = await _seed_people(store, scenario)
+    # 28 days back gives four full weeks of history - enough for the
+    # usuals engine to establish a stable majority-vote display name
+    # even when the ICS fixture intentionally varies event wording
+    # (see the "_messy_weekly" blocks in
+    # packages/jobs/src/level_jobs/make_caregiver_ics.py). 14 days
+    # was the default; two weeks of history isn't enough for the
+    # "detects messy repeats" demo point to land cleanly because a
+    # 1-1 tie in the majority vote picks whichever variant the ICS
+    # emitted first, hiding the "clean" wording.
     events = load_events(
         scenario.ics_path(),
         people=people,
         tz=scenario.tz,
         anchor_date=scenario.anchor_date,
         now=now,
+        days_back=28,
     )
     await _replace_agenda(store, events, tz=scenario.tz)
     usuals_written = await _seed_usuals(store, events, people, tz=scenario.tz)
@@ -226,7 +236,7 @@ async def _write_profile(store: UserStore, scenario: ScenarioConfig) -> None:
             "email": scenario.email,
             "display_name": scenario.display_name,
             "tz": scenario.tz,
-            "calendar_window_days_back": 14,
+            "calendar_window_days_back": 28,
             "calendar_window_days_forward": 28,
             PROFILE_DEMO_KEY: scenario.id,
             PROFILE_DEMO_SEEDED_AT_KEY: datetime.utcnow().isoformat(),

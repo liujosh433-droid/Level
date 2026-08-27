@@ -359,16 +359,16 @@ async def _extract_priority(
         )
         reply = f"Saved '{prio.text}' as a priority (weight {prio.weight})."
         await _write_reply(store, reply)
-        return {
-            "reply": reply,
-            "path": "profile",
-            "intent": "priority",
-            "priority_id": prio.priority_id,
-            # Router's audit_id owns this extraction (inline path skipped
-            # PriorityAgent). Frontend attaches this to the FeedbackChip
-            # click so /admin/traces can render the causal edge.
-            "audit_id": router_audit_id,
-        }
+        # Router owned this extraction (inline path skipped PriorityAgent).
+        return _attach_audit(
+            {
+                "reply": reply,
+                "path": "profile",
+                "intent": "priority",
+                "priority_id": prio.priority_id,
+            },
+            router_audit_id,
+        )
 
     # Fallback: router wasn't confident enough to inline-extract. Run
     # PriorityAgent for a proper structured extraction with its own
@@ -385,14 +385,15 @@ async def _extract_priority(
         source_span=ep.source_span,
     )
     await _write_reply(store, f"Saved '{prio.text}' as a priority.")
-    return {
-        "reply": f"Saved '{prio.text}' as a priority (weight {prio.weight}).",
-        "path": "profile",
-        "intent": "priority",
-        "priority_id": prio.priority_id,
-        # Specialist path: PriorityAgent's audit_id owns this extraction.
-        "audit_id": result.audit_id,
-    }
+    return _attach_audit(
+        {
+            "reply": f"Saved '{prio.text}' as a priority (weight {prio.weight}).",
+            "path": "profile",
+            "intent": "priority",
+            "priority_id": prio.priority_id,
+        },
+        result.audit_id,
+    )
 
 
 # Priority statements come in two shapes:
@@ -875,15 +876,15 @@ async def _remember_person(
     else:
         reply = f"{person.display_name} is already on your list as your {label}."
     await _write_reply(store, reply)
-    response: dict[str, Any] = {
-        "reply": reply,
-        "path": "profile",
-        "intent": "person_update",
-        "person_id": person.person_id,
-    }
-    if audit_id:
-        response["audit_id"] = audit_id
-    return response
+    return _attach_audit(
+        {
+            "reply": reply,
+            "path": "profile",
+            "intent": "person_update",
+            "person_id": person.person_id,
+        },
+        audit_id,
+    )
 
 
 async def _extract_reminder(
@@ -1001,17 +1002,15 @@ async def _save_reminder(
     else:
         reply = f"Reminder saved: '{reminder.text}'. I'll flag it on {where} events."
     await _write_reply(store, reply)
-    response: dict[str, Any] = {
-        "reply": reply,
-        "path": "reminder",
-        "intent": "add_reminder",
-        "reminder_id": reminder.reminder_id,
-    }
-    # Only set when a real LLM call produced this reminder; the fast-
-    # path regex parse leaves audit_id empty so we omit it.
-    if audit_id:
-        response["audit_id"] = audit_id
-    return response
+    return _attach_audit(
+        {
+            "reply": reply,
+            "path": "reminder",
+            "intent": "add_reminder",
+            "reminder_id": reminder.reminder_id,
+        },
+        audit_id,
+    )
 
 
 async def _person_update(
@@ -1096,17 +1095,13 @@ async def _apply_person_edit(
         )
 
     def _resp(reply: str) -> dict[str, Any]:
-        """Person-update response shape with audit_id when a real LLM
-        call produced this edit. Fast-path parse_person_intro leaves
-        audit_id empty so the frontend omits it from feedback."""
-        out: dict[str, Any] = {
-            "reply": reply,
-            "path": "profile",
-            "intent": "person_update",
-        }
-        if audit_id:
-            out["audit_id"] = audit_id
-        return out
+        """Person-update response shape. Delegates to the shared
+        _attach_audit helper so this scope can't drift on the
+        audit_id contract."""
+        return _attach_audit(
+            {"reply": reply, "path": "profile", "intent": "person_update"},
+            audit_id,
+        )
 
     if edit.action == "add" and edit.new_relation is not None:
         return await _remember_person(
@@ -2173,19 +2168,18 @@ async def _finalize_cal_change(
         end=end_dt.isoformat(),
     )
     await _write_reply(store, reply)
-    response: dict[str, Any] = {
-        "reply": reply,
-        "path": "schedule",
-        "intent": intent,
-        "event_id": booked_id,
-        "html_link": html_link,
-    }
-    # BookAgent audit_id (or later confirm-yes chain that started from
-    # a book LLM call). Fast-path booking never touches an LLM so its
-    # audit_id stays empty and the frontend omits it from feedback.
-    if audit_id:
-        response["audit_id"] = audit_id
-    return response
+    # Fast-path booking never touches an LLM so its audit_id stays
+    # empty and the frontend omits it from feedback.
+    return _attach_audit(
+        {
+            "reply": reply,
+            "path": "schedule",
+            "intent": intent,
+            "event_id": booked_id,
+            "html_link": html_link,
+        },
+        audit_id,
+    )
 
 
 async def _refresh_after_book(store: UserStore) -> None:
@@ -2358,27 +2352,24 @@ async def _draft_for_candidate(
         "I won\u2019t send until you do."
     )
     await _write_reply(store, reply)
-    response: dict[str, Any] = {
-        "reply": reply,
-        "path": "email",
-        "intent": "send_email",
-        "email_draft": {
-            "to": str(contact.email),
-            "subject": drafted.subject,
-            "body": drafted.body,
-            "confirmation_token": drafted.confirmation_token,
-            "contact_name": contact.name,
-            "person_name": kid,
-            "kind": contact.kind.value,
+    # Empty audit_id when the template fallback fired (no LLM call).
+    return _attach_audit(
+        {
+            "reply": reply,
+            "path": "email",
+            "intent": "send_email",
+            "email_draft": {
+                "to": str(contact.email),
+                "subject": drafted.subject,
+                "body": drafted.body,
+                "confirmation_token": drafted.confirmation_token,
+                "contact_name": contact.name,
+                "person_name": kid,
+                "kind": contact.kind.value,
+            },
         },
-    }
-    # EmailAgent audit_id lets a keep/adjust/not-me chip on the draft
-    # post `audit_id` to /v1/feedback, so /admin/traces renders the
-    # causal edge (draft call -> FeedbackChip -> next email call).
-    # Empty when the template fallback fired (no LLM call to attribute).
-    if drafted.audit_id:
-        response["audit_id"] = drafted.audit_id
-    return response
+        drafted.audit_id,
+    )
 
 
 async def _read_pending_email_pick(store: UserStore) -> _PendingEmailPick | None:
@@ -3055,6 +3046,25 @@ async def _ack_no_agent(store: UserStore, text: str) -> dict[str, Any]:
     """
     await _write_reply(store, text)
     return {"reply": text, "path": "general", "intent": "ask"}
+
+
+def _attach_audit(response: dict[str, Any], audit_id: str | None) -> dict[str, Any]:
+    """Add `audit_id` to a chat response dict, but only when non-empty.
+
+    Every LLM-produced reply (priority, reminder, person edit, email
+    draft, booking) needs to carry the responsible agent's audit_id
+    back to the frontend so a feedback chip click can post it to
+    /v1/feedback. Fast-path replies (regex parses, template fallback,
+    ack_no_agent) legitimately have no audit_id and MUST NOT set the
+    key at all - a null/empty audit_id would make the FeedbackChip
+    audit row look like it links to nothing.
+
+    Centralizes that invariant so the ~5 dispatch sites can't drift
+    on the field name or the empty-guard rule.
+    """
+    if audit_id:
+        response["audit_id"] = audit_id
+    return response
 
 
 async def _write_reply(store: UserStore, text: str) -> None:

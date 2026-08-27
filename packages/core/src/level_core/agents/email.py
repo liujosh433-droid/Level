@@ -9,7 +9,7 @@ from __future__ import annotations
 from pydantic import BaseModel
 
 from level_core.agents.base import AgentResult, AgentSpec, call_agent
-from level_core.agents.memory_bank import recall as recall_memories, touch as touch_memories
+from level_core.agents.memory_bank import recall_split, touch as touch_memories
 from level_core.storage.base import UserStore
 
 
@@ -67,31 +67,25 @@ async def run(
         ]
     ).strip()
 
-    # Memory Bank: inject a few long-lived facts about the caregiver so
-    # drafts stay personal across sessions (e.g. "Nova is in 2nd grade",
-    # "Papa's doctor is at Kaiser Oakland"). Touched memories bubble to
-    # the top of the LRU on next recall.
-    #
-    # Memories tagged `avoid` came from an adjust/not-me chip click on
-    # a prior email draft (see feedback.py::_MEMORY_BANK_FEEDBACK_AGENTS).
-    # We split them out into a separate `avoid_examples` bucket so the
-    # system prompt can treat them as strong negative constraints rather
-    # than facts to echo. This replaces the old EmailAgent -> REMINDER
-    # negative alias which was a silent no-op.
-    memories = await recall_memories(store, limit=12)
-    positive_memories: list[dict[str, object]] = []
-    avoid_memories: list[dict[str, object]] = []
-    for m in memories:
-        tags = m.get("tags") or []
-        if "avoid" in tags:
-            avoid_memories.append({"text": m["text"], "tags": tags})
-        else:
-            positive_memories.append({"text": m["text"], "tags": tags})
+    # Memory Bank: inject long-lived facts + prior anti-examples. The
+    # split is done in memory_bank.recall_split() so email/summary
+    # agents can't drift on the avoid-tag contract. `memory_bank`
+    # facts are echoed when relevant; `avoid_examples` are strong
+    # negative constraints (see SYSTEM prompt).
+    positive_memories, avoid_memories = await recall_split(
+        store, positive_limit=8, avoid_limit=4
+    )
     context: dict[str, object] = {}
     if positive_memories:
-        context["memory_bank"] = positive_memories[:8]
+        context["memory_bank"] = [
+            {"text": m["text"], "tags": m.get("tags") or []}
+            for m in positive_memories
+        ]
     if avoid_memories:
-        context["avoid_examples"] = avoid_memories[:4]
+        context["avoid_examples"] = [
+            {"text": m["text"], "tags": m.get("tags") or []}
+            for m in avoid_memories
+        ]
 
     spec = AgentSpec(
         name="EmailAgent",
@@ -110,6 +104,11 @@ async def run(
     result = await call_agent(
         spec, user_input=user_input, store=store, context=context or None
     )
-    if result.value and memories:
-        await touch_memories(store, memory_ids=[m["id"] for m in memories])
+    # Touch every memory we surfaced so the LRU floats them to the top
+    # of the next recall. Includes avoid memories too - the caregiver
+    # cares about NOT seeing that tone repeated, so keeping it fresh
+    # in the anti-example bucket is the right signal.
+    all_ids = [m["id"] for m in (positive_memories + avoid_memories) if m.get("id")]
+    if result.value and all_ids:
+        await touch_memories(store, memory_ids=all_ids)
     return result

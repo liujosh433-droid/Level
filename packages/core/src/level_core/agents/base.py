@@ -127,8 +127,21 @@ def _estimate_cost(model_id: str, input_tokens: int, output_tokens: int) -> floa
     return (input_tokens / 1_000_000) * 0.30 + (output_tokens / 1_000_000) * 2.50
 
 
-def _hash_prompt(prompt: str) -> str:
+def hash_prompt(prompt: str) -> str:
+    """Stable 16-char SHA-256 fingerprint of a prompt string.
+
+    Used as the `prompt_hash` on every AiAuditEntry (LLM calls in
+    call_agent, FeedbackChip clicks in feedback.py). Public because
+    audit-writing callers outside this module need it too and we
+    want a single canonical implementation - the shape of prompt_hash
+    on /admin/traces is a stable contract.
+    """
     return hashlib.sha256(prompt.encode()).hexdigest()[:16]
+
+
+# Backward-compat alias for the private name used within this module.
+# Prefer `hash_prompt` in new code.
+_hash_prompt = hash_prompt
 
 
 def _fence_user_input(user_input: str) -> str:

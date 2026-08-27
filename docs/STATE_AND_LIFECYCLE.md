@@ -63,8 +63,8 @@ code NEVER branches on env.
 | daily_agenda   | agenda + priorities   | daily rollup            |
 | chat_turns     | user                   | -                       |
 | negatives      | user (via feedback)   | keep/adjust/not-me chip |
-| ai_audit       | -                     | every LLM call         |
-| profile["memory_bank"] | keep-feedback  | positive feedback loop |
+| ai_audit       | -                     | every LLM call + feedback click |
+| profile["memory_bank"] | keep + email/summary avoid  | positive & anti-example feedback loop |
 | profile["_gate_counters"] | derived      | ai_audit (hot counter) |
 | profile["proactive_cards"] | derived     | nightly job            |
 
@@ -123,10 +123,36 @@ Every piece of state has an explicit lifecycle:
 
 ### 2.5 `profile["memory_bank"]`
 
-- Written by `/v1/feedback` on `verdict=keep` for generator outputs.
+- Written by `/v1/feedback` on `verdict=keep` for generator outputs
+  (email, priority, reminder) AND on `verdict=adjust`/`not_me` for
+  the two generator agents that have no dedicated negatives bucket
+  (EmailAgent, SummaryAgent) - those store an anti-example with an
+  extra `avoid` tag.
 - Capped at **40 memories per user** (LRU by `last_used_at`).
-- Recalled by generator agents (email, summary) as few-shot.
+- Recalled by generator agents (email, summary) via
+  `memory_bank.recall_split()` which splits by the `avoid` tag:
+  - `memory_bank` context block = positive facts, echoed when
+    relevant.
+  - `avoid_examples` context block = anti-examples, treated by
+    system prompts as strong negative constraints.
+- The two lists are always disjoint. Enforced by `recall_split()`
+  (single source of truth) and locked by
+  `tests/unit/test_feedback_loop_closes.py::
+  test_avoid_and_positive_memories_coexist_in_next_call`.
 - `forget(memory_id)` on explicit user retraction; no time-based TTL.
+
+### 2.5.1 `ai_audit` for feedback clicks
+
+- Every `/v1/feedback` click writes a `FeedbackChip` AiAuditEntry
+  alongside the memory/negative write. `agent="FeedbackChip"`,
+  `model="human"`, `parent_audit_id` set to the audit_id of the LLM
+  call whose output the user is judging (threaded from the chat
+  response back through the frontend into the POST body).
+- `/admin/traces` reads these rows to render the causal chain:
+  original agent call → FeedbackChip click → next agent call whose
+  prompt included the resulting memory/negative.
+- Best-effort write: audit failures are logged but never block the
+  feedback write itself.
 
 ### 2.6 `profile["proactive_cards"]`
 
@@ -486,6 +512,7 @@ fan-out. Not in scope for the hackathon.
 | Name-vs-noun guard (RoleAgent)    | `packages/core/src/level_core/calendar/person_guard.py::evaluate_proposed_name` |
 | Trace waterfall                   | `packages/api/src/level_api/routes/admin.py::_group_by_trace` |
 | Streaming SSE                     | `packages/api/src/level_api/routes/chat.py::chat_stream` |
-| Feedback loop                     | `packages/api/src/level_api/routes/feedback.py` |
+| Feedback loop                     | `packages/api/src/level_api/routes/feedback.py` (write) + `packages/core/src/level_core/agents/memory_bank.py::recall_split` (read) |
+| Loop integration test             | `tests/unit/test_feedback_loop_closes.py` |
 | Veo weekly recap                  | `packages/api/src/level_api/routes/media.py::weekly_recap` |
 | Lyria chime                       | `packages/api/src/level_api/routes/media.py::daily_chime` |

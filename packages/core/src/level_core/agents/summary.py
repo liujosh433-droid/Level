@@ -5,7 +5,7 @@ from __future__ import annotations
 from pydantic import BaseModel
 
 from level_core.agents.base import AgentResult, AgentSpec, call_agent
-from level_core.agents.memory_bank import recall as recall_memories, touch as touch_memories
+from level_core.agents.memory_bank import recall_split, touch as touch_memories
 from level_core.storage.base import UserStore
 
 
@@ -51,28 +51,22 @@ async def run(
         ]
     )
 
-    # Memory Bank: recall a few long-lived facts about the caregiver so
-    # the daily summary sounds like Level remembers them (e.g. "you
-    # usually skip lunch on Wednesdays" or "Nova gets picked up early
-    # on library day").
-    #
-    # Memories tagged `avoid` came from adjust/not-me chip clicks on
-    # prior summaries. Split them into a separate `avoid_examples`
-    # bucket so the system prompt treats them as negative constraints.
-    memories = await recall_memories(store, limit=10)
-    positive_memories: list[dict[str, object]] = []
-    avoid_memories: list[dict[str, object]] = []
-    for m in memories:
-        tags = m.get("tags") or []
-        if "avoid" in tags:
-            avoid_memories.append({"text": m["text"], "tags": tags})
-        else:
-            positive_memories.append({"text": m["text"], "tags": tags})
+    # Memory Bank + anti-examples via the shared split helper. See
+    # memory_bank.recall_split() for why the split lives there.
+    positive_memories, avoid_memories = await recall_split(
+        store, positive_limit=6, avoid_limit=3
+    )
     context: dict[str, object] = {}
     if positive_memories:
-        context["memory_bank"] = positive_memories[:6]
+        context["memory_bank"] = [
+            {"text": m["text"], "tags": m.get("tags") or []}
+            for m in positive_memories
+        ]
     if avoid_memories:
-        context["avoid_examples"] = avoid_memories[:3]
+        context["avoid_examples"] = [
+            {"text": m["text"], "tags": m.get("tags") or []}
+            for m in avoid_memories
+        ]
 
     spec = AgentSpec(
         name="SummaryAgent",
@@ -90,6 +84,7 @@ async def run(
     result = await call_agent(
         spec, user_input=user_input, store=store, context=context or None
     )
-    if result.value and memories:
-        await touch_memories(store, memory_ids=[m["id"] for m in memories])
+    all_ids = [m["id"] for m in (positive_memories + avoid_memories) if m.get("id")]
+    if result.value and all_ids:
+        await touch_memories(store, memory_ids=all_ids)
     return result

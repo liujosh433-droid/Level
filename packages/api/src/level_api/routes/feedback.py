@@ -30,13 +30,13 @@ the demo video can trace end-to-end in /admin/traces.
 
 from __future__ import annotations
 
-import hashlib
 import uuid
 from typing import Literal
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
+from level_core.agents.base import hash_prompt
 from level_core.agents.memory_bank import remember as remember_memory
 from level_core.observability import get_logger
 from level_core.schemas import AiAuditEntry, NegativeAgent
@@ -119,11 +119,6 @@ _KEEP_MEMORY_FIELDS: frozenset[str] = frozenset(
 MEMORY_TEXT_CAP = 220
 
 
-def _hash_prompt(text: str) -> str:
-    """Same 12-char sha1 prefix base.py uses for prompt fingerprinting."""
-    return hashlib.sha1((text or "").encode("utf-8"), usedforsecurity=False).hexdigest()[:12]
-
-
 async def _write_feedback_audit(
     store: UserStore,
     *,
@@ -144,7 +139,7 @@ async def _write_feedback_audit(
         audit_id=audit_id,
         agent="FeedbackChip",
         model="human",  # not an LLM call - the user is the "model"
-        prompt_hash=_hash_prompt(body.value),
+        prompt_hash=hash_prompt(body.value or ""),
         response={
             "verdict": body.verdict,
             "target_agent": body.agent,

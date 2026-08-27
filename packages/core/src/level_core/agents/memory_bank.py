@@ -138,6 +138,42 @@ async def recall(
     return memories[:limit]
 
 
+async def recall_split(
+    store: UserStore,
+    *,
+    positive_limit: int = 8,
+    avoid_limit: int = 4,
+    tags: list[str] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return two disjoint memory lists: `(positive, avoid)`.
+
+    Memories tagged `avoid` come from `not_me`/`adjust` feedback clicks on
+    a generator agent's output (email/summary). They must NEVER be treated
+    as facts the caregiver wants echoed - they are anti-examples.
+    Splitting the two lists here (once, in the memory layer) instead of
+    at each caller keeps the contract in one place: any new generator
+    agent that wants both bands just calls this and can't accidentally
+    render an anti-example into a positive memory_bank block.
+
+    Reads slightly more memories than needed and slices after the split
+    so `positive_limit` and `avoid_limit` are always honored regardless
+    of how the LRU is currently balanced between the two kinds.
+    """
+    # Pull a little extra headroom (positive+avoid+4) so the caps below
+    # are respected even when the LRU happens to have far more of one
+    # kind than the other at the top.
+    memories = await recall(store, tags=tags, limit=positive_limit + avoid_limit + 4)
+    positive: list[dict[str, Any]] = []
+    avoid: list[dict[str, Any]] = []
+    for m in memories:
+        tag_set = m.get("tags") or []
+        if "avoid" in tag_set:
+            avoid.append(m)
+        else:
+            positive.append(m)
+    return positive[:positive_limit], avoid[:avoid_limit]
+
+
 async def touch(store: UserStore, *, memory_ids: list[str]) -> None:
     """Bump `last_used_at` on the given memories. Best-effort, no error."""
     if not memory_ids:

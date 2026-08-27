@@ -338,13 +338,41 @@ async def _extract_priority(
     }
 
 
+# Priority statements come in two shapes:
+#   (a) LEAD form: starts with a priority verb.
+#       "prioritize elder care", "never miss Sunday PT".
+#   (b) BODY form: verb phrase anywhere in the sentence.
+#       "elder care with mom takes precedent",
+#       "kids' pickup comes first no matter what",
+#       "family time matters more than work".
+# Both are common phrasings caregivers actually use. Missing (b) was
+# sending "elder care with mom takes precedent over other activities"
+# to the router + PriorityAgent (two LLM calls, ~30s under quota
+# pressure) when it belonged on the deterministic fast path.
 _PRIORITY_LEAD = re.compile(
     r"^\s*(?:please\s+)?(?:"
     r"prioritize|priority|"
     r"make\s+sure|"
     r"never\s+miss|"
-    r"always\s+(?:protect|put)|"
+    r"always\s+(?:protect|put|come\s+first)|"
     r"prefer"
+    r")\b",
+    re.IGNORECASE,
+)
+_PRIORITY_BODY = re.compile(
+    r"\b(?:"
+    r"takes?\s+preceden(?:t|ce)|"
+    r"come[sr]?\s+first|"
+    r"take[sr]?\s+priority|"
+    r"is\s+(?:the\s+)?(?:top|highest|first)\s+priority|"
+    r"matters?\s+(?:the\s+)?most|"
+    r"matters?\s+more\s+than|"
+    r"more\s+important\s+than|"
+    r"most\s+important|"
+    r"above\s+(?:all\s+)?(?:else|other)|"
+    r"trump[sr]?\b|"
+    r"non[- ]?negotiable|"
+    r"no\s+matter\s+what"
     r")\b",
     re.IGNORECASE,
 )
@@ -692,10 +720,18 @@ async def _try_fast_priority(
     to the router so we don't over-capture chit-chat.
     """
     text = message.strip()
-    if not text or not _PRIORITY_LEAD.search(text):
+    if not text:
         return None
     if _TIME_RANGE_RE.search(text):
         # "prioritize booking Tuesday 2-3pm" is a schedule, not a priority.
+        return None
+    # A calendar CRUD verb somewhere in the sentence usually wins over
+    # a priority interpretation: "cancel Friday drop-off, it's less
+    # important than pickup" is a cancel, not a priority. Fall through
+    # so the calendar fast path (or router) gets a shot.
+    if _MOVE_LEAD.search(text) or _CANCEL_LEAD.search(text):
+        return None
+    if not (_PRIORITY_LEAD.search(text) or _PRIORITY_BODY.search(text)):
         return None
 
     types: list[ActivityType] = []
@@ -705,7 +741,17 @@ async def _try_fast_priority(
             types.append(activity)
             seen.add(activity)
 
-    weight = 5 if re.search(r"\bnever miss\b", text, re.I) else 4
+    # Weight scale: 5 for absolute language, 4 for standard priority.
+    weight = (
+        5
+        if re.search(
+            r"\b(?:never\s+miss|no\s+matter\s+what|non[- ]?negotiable|"
+            r"above\s+(?:all\s+)?(?:else|other)|most\s+important)\b",
+            text,
+            re.I,
+        )
+        else 4
+    )
     prio = await add_priority(
         store,
         text=text,
@@ -2942,10 +2988,17 @@ register_fast_path(
         name="priority_statement",
         handler=_fp_priority,
         priority=20,
-        description="Save an explicit priority without a PriorityAgent call",
+        description=(
+            "Save an explicit priority without a PriorityAgent call. "
+            "Matches LEAD form ('prioritize X') and BODY form "
+            "('X takes precedent', 'X comes first', 'X matters most')."
+        ),
         examples=(
             "never miss Sunday physical therapy",
             "prioritize sports over meetings",
+            "elder care with mom takes precedent over other activities",
+            "kids\u2019 pickup comes first no matter what",
+            "family time matters more than work",
         ),
         mutates_state=True,
     )

@@ -50,7 +50,7 @@ dev:
 	@$(MAKE) -j 2 api web
 
 api:
-	LEVEL_ENV=local $(UV) run --package level-api uvicorn level_api.main:app --host 127.0.0.1 --port $(LEVEL_API_PORT) --reload
+	LEVEL_ENV=local LEVEL_API_PORT=$(LEVEL_API_PORT) $(UV) run --package level-api uvicorn level_api.main:app --host 127.0.0.1 --port $(LEVEL_API_PORT) --reload
 
 web:
 	cd apps/web && LEVEL_API_PROXY_TARGET=http://127.0.0.1:$(LEVEL_API_PORT) PORT=$(LEVEL_WEB_PORT) npm run dev

@@ -9,7 +9,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 Env = Literal["local", "cloud"]
@@ -98,7 +98,15 @@ class Settings(BaseSettings):
 
     google_oauth_client_id: str = ""
     google_oauth_client_secret: str = ""
-    google_oauth_redirect_uri: str = "http://localhost:8080/v1/auth/google/callback"
+    # Empty means "auto-derive from level_api_port at runtime" - see the
+    # model validator below. An explicit value (e.g. the deployed Cloud
+    # Run HTTPS URL) always wins.
+    google_oauth_redirect_uri: str = ""
+    # Local dev port for the FastAPI server. Kept here so the OAuth
+    # redirect URI can follow the port when a judge runs the app on a
+    # non-default port (e.g. LEVEL_API_PORT=8081 to sidestep Cursor's
+    # collision on 8080).
+    level_api_port: int = Field(default=8080, ge=1, le=65535)
     level_web_app_url: str = "http://localhost:3000"
     level_public_api_url: str = ""
 
@@ -118,6 +126,26 @@ class Settings(BaseSettings):
     @property
     def is_cloud(self) -> bool:
         return self.level_env == "cloud"
+
+    @model_validator(mode="after")
+    def _default_oauth_redirect_uri(self) -> Settings:
+        """Auto-derive the OAuth redirect URI from LEVEL_API_PORT when empty.
+
+        Deployed environments set this explicitly to the HTTPS Cloud Run
+        URL. Local dev leaves it empty, and we compute
+        ``http://localhost:{level_api_port}/v1/auth/google/callback`` so
+        the redirect follows the API port automatically when a judge
+        overrides LEVEL_API_PORT to sidestep a port collision (Cursor
+        grabs 8080 by default). The Google Cloud Console still needs
+        that URI pre-registered - we tell judges to add a small set of
+        common local ports at once (see SETUP.md) so this is a one-time
+        setup, not a per-port chore.
+        """
+        if not self.google_oauth_redirect_uri:
+            self.google_oauth_redirect_uri = (
+                f"http://localhost:{self.level_api_port}/v1/auth/google/callback"
+            )
+        return self
 
 
 _INSECURE_SESSION_SECRET = "change-me-to-a-long-random-string"

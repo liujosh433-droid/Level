@@ -115,6 +115,51 @@ The Next.js proxy and the OAuth redirect URI both follow
 
 ---
 
+## Hosted demo (in cloud)
+
+The judge-facing deployment on Cloud Run exposes the same demo
+button on its landing page — no cloning, no API key on the judge's
+side, ~10 seconds from URL to interactive `/today`. It's the same
+`POST /v1/auth/demo` handler as the local path; the only
+differences are:
+
+- **Enabled with a feature flag.** Off by default in cloud
+  (`LEVEL_DEMO_IN_CLOUD=false` — the endpoint 404s), on for the
+  hackathon deployment (`LEVEL_DEMO_IN_CLOUD=true`). The flag is a
+  security fence: without it, an attacker who guessed the URL could
+  spawn synthetic users against the deployed API + Vertex billing.
+- **Bounded user pool.** Judge's client IP is SHA-256 hashed to a
+  slot in `[0, LEVEL_DEMO_SLOTS_PER_SCENARIO)` (default 3). The
+  slot maps to a fixed user id (`u_demo_solo_0`, `u_demo_solo_1`,
+  `u_demo_solo_2`, and same for `family`). Total demo population is
+  capped at `slots * scenarios = 6 user records` no matter how much
+  traffic hits the endpoint. Same judge from the same IP lands on
+  the same user across clicks (session state persists).
+- **Per-IP rate limit.** Token bucket on `/v1/auth/demo` itself:
+  `LEVEL_DEMO_PER_IP_PER_HOUR` (default 10) capacity, refilled at
+  the same rate per second. A bot spamming demo logins from one IP
+  gets 429'd before it can burn through Firestore or LLM budget.
+- **Uses the deployment's Gemini quota.** Since the request lands
+  on our Cloud Run service, chat and "Hear my day" call the
+  configured Gemini backend (Vertex ADC in cloud) — the judge sees
+  real LLM output without providing any API key. Per-user daily
+  cost cap (`$2`) still applies to each demo slot, so worst case is
+  `$2 × 6 = $12/day` even under adversarial load.
+
+To flip cloud demo on for your own Cloud Run service, add to the
+service env:
+
+```bash
+LEVEL_DEMO_IN_CLOUD=true
+LEVEL_DEMO_SLOTS_PER_SCENARIO=3      # optional (default)
+LEVEL_DEMO_PER_IP_PER_HOUR=10        # optional (default)
+```
+
+Confirm by hitting `GET /v1/config/features` — `demo.available`
+should be `true` and `demo.scenarios` should list both personas.
+
+---
+
 ## Local with your real Google Calendar (optional)
 
 For end-to-end testing with your own calendar and Gmail, follow the

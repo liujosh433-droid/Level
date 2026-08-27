@@ -93,9 +93,12 @@ async def seed_demo_user(
         events=len(events),
         usuals=usuals_written,
     )
+    # user_id comes from the store (caller's chosen slot) so cloud
+    # demo mode - which pools multiple users under one scenario -
+    # gets the slot-specific id back, not the scenario default.
     return DemoSeedResult(
         scenario_id=scenario.id,
-        user_id=scenario.user_id,
+        user_id=store.user_id,
         email=scenario.email,
         display_name=scenario.display_name,
         tz=scenario.tz,
@@ -217,7 +220,9 @@ async def _write_profile(store: UserStore, scenario: ScenarioConfig) -> None:
     profile = dict(await store.profile.read() or {})
     profile.update(
         {
-            "user_id": scenario.user_id,
+            # store.user_id (not scenario.user_id) so slotted demo users
+            # in cloud mode record their actual slot id here.
+            "user_id": store.user_id,
             "email": scenario.email,
             "display_name": scenario.display_name,
             "tz": scenario.tz,

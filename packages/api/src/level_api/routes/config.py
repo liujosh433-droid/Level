@@ -19,14 +19,17 @@ router = APIRouter()
 @router.get("/features")
 async def features() -> dict[str, Any]:
     settings = get_settings()
-    demo_available = settings.is_local
+    # Demo is available in local always, and in cloud when the
+    # operator explicitly opts in via LEVEL_DEMO_IN_CLOUD=true. See
+    # ``Settings.level_demo_in_cloud`` for the safety story.
+    demo_available = settings.is_local or settings.level_demo_in_cloud
     return {
         "env": settings.level_env,
         "demo": {
             "available": demo_available,
             # Only advertise scenarios when demo is actually usable
             # so an inspector on the cloud API can't glean the demo
-            # catalog.
+            # catalog when it's turned off.
             "scenarios": list_scenarios() if demo_available else [],
         },
     }

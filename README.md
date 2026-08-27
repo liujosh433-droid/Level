@@ -66,6 +66,22 @@ The mermaid source is at [`docs/architecture.mmd`](docs/architecture.mmd).
   suggestion cards. Users see "Level noticed while you slept" on
   `/today`.
 
+## Try it live (10 seconds, nothing to install)
+
+Open the deployed URL and click **Try demo: Solo caregiver** on the
+landing page. `POST /v1/auth/demo` seeds a synthetic user from
+[`example-data/caregiver-month-solo.ics`](example-data/caregiver-month-solo.ics),
+sets a signed session cookie, and lands you on `/today` with a
+fully populated agenda, people list, and missing-usuals card. The
+hosted demo uses our prod Gemini quota, so chat and "Hear my day"
+return real LLM responses — no API key needed on your end.
+
+Safety: bounded user pool (SHA-256 hash of client IP → slot, 6
+total demo users), per-IP rate limit on the demo endpoint, and the
+existing per-user daily cost cap keep worst-case spend at `$12/day`
+even under adversarial load. Details in
+[SETUP.md — Hosted demo mode](SETUP.md#hosted-demo-in-cloud).
+
 ## 2-minute local start (no OAuth, no GCP, no billing)
 
 Prereqs: `node >= 20`, `python >= 3.12`, and [`uv`](https://docs.astral.sh/uv/)

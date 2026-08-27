@@ -6,7 +6,16 @@ import asyncio
 import hashlib
 from typing import Literal
 
-from fastapi import APIRouter, BackgroundTasks, Cookie, HTTPException, Query, Response
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Cookie,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    status,
+)
 from fastapi.responses import RedirectResponse
 from level_core.auth.google_oauth import build_auth_url, exchange_code
 from level_core.auth.sessions import (
@@ -20,7 +29,7 @@ from level_core.auth.tokens import save_tokens
 from level_core.calendar.enrich import enrich_agenda
 from level_core.calendar.sync import refresh_agenda
 from level_core.config import get_settings
-from level_core.demo.scenarios import SCENARIOS
+from level_core.demo.scenarios import SCENARIOS, slot_for_ip, user_id_for_slot
 from level_core.demo.seeder import seed_demo_user
 from level_core.observability import get_logger
 from level_core.schemas import UserSession
@@ -29,6 +38,7 @@ from level_core.storage.care_store import ensure_self_person
 from level_core.storage.factory import get_store
 from pydantic import BaseModel
 
+from level_api.rate_limit import TokenBucketLimiter
 from level_api.routes.today import refresh_and_enrich_safe
 
 router = APIRouter()
@@ -168,30 +178,131 @@ class DemoLoginBody(BaseModel):
     scenario: Literal["family", "solo"] = "solo"
 
 
+# Per-IP token bucket for the demo login endpoint. Sits in front of
+# the seeder so a bot rotating scenarios can't burn through Firestore
+# writes / LLM budget on the deployed API. Local dev is exempted
+# (see demo_login below) because the endpoint is only reachable on
+# localhost anyway.
+#
+# Lazily built so tests can rebuild the singleton via
+# ``reset_demo_ip_limiter()`` and the settings are read once at first
+# request instead of at import time (which would freeze the values
+# before test monkeypatches take effect).
+_demo_ip_limiter: TokenBucketLimiter | None = None
+
+
+def _get_demo_ip_limiter() -> TokenBucketLimiter:
+    global _demo_ip_limiter
+    if _demo_ip_limiter is None:
+        settings = get_settings()
+        per_hour = int(settings.level_demo_per_ip_per_hour)
+        _demo_ip_limiter = TokenBucketLimiter(
+            capacity=per_hour,
+            refill_per_second=per_hour / 3600.0,
+        )
+    return _demo_ip_limiter
+
+
+def reset_demo_ip_limiter() -> None:
+    """Test-only: rebuild the per-IP limiter singleton."""
+    global _demo_ip_limiter
+    _demo_ip_limiter = None
+
+
+def _client_ip(request: Request) -> str:
+    """Best-effort client IP.
+
+    On Cloud Run behind the Google frontend, ``X-Forwarded-For`` is
+    trusted (Google strips inbound copies). Locally it's usually
+    unset and we fall back to the socket peer, which is
+    ``127.0.0.1`` - fine for slotting because there's only one judge
+    on localhost anyway.
+    """
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        # First entry is the original client per RFC 7239.
+        return xff.split(",")[0].strip()
+    client = request.client
+    return client.host if client else "0.0.0.0"
+
+
 @router.post("/demo")
 async def demo_login(
-    body: DemoLoginBody, response: Response
+    body: DemoLoginBody, request: Request, response: Response
 ) -> dict[str, object]:
-    """OAuth-less local demo entry point.
+    """Zero-OAuth demo entry point.
 
-    Seeds a stable synthetic user from an ICS fixture in
-    ``example-data/`` and drops the same signed session cookie a real
-    OAuth callback would - no Google Cloud project, no OAuth client,
-    no Gmail scope required. Local dev only; refuses in cloud mode so
-    an attacker who guesses the URL against the deployed API can't
-    log themselves in as a synthetic user.
+    Seeds a synthetic user from an ICS fixture in ``example-data/``
+    and drops the same signed session cookie a real OAuth callback
+    would - no Google Cloud project, no OAuth client, no Gmail scope
+    required.
+
+    Two modes:
+
+    - **Local** (``LEVEL_ENV=local``): always enabled. Each scenario
+      maps to a single stable user id (``u_demo_<scenario>``), so a
+      contributor iterating on the app can close the tab and come
+      back to their state.
+
+    - **Cloud** (``LEVEL_ENV=cloud`` + ``LEVEL_DEMO_IN_CLOUD=true``):
+      enabled with guardrails. Judges can hit the deployed API
+      directly without setup. Client IP is hashed to a slot in
+      ``[0, level_demo_slots_per_scenario)``, giving each judge a
+      stable user across clicks while capping the total user pool at
+      ``slots * len(SCENARIOS)``. Per-IP token bucket
+      (``level_demo_per_ip_per_hour``) rejects burst abuse. Cloud
+      cookies are ``secure`` + ``samesite=lax`` for HTTPS-only.
+
+      When ``LEVEL_DEMO_IN_CLOUD=false`` (default), the endpoint 404s
+      so an attacker who guesses the URL against a deployed API
+      can't spawn synthetic users. 404 rather than 403 so a probe
+      can't distinguish "demo turned off" from "endpoint doesn't
+      exist" - keeps the cloud surface flat.
     """
     settings = get_settings()
-    if not settings.is_local:
-        # 404 (not 403) so a probe can't distinguish "demo turned off"
-        # from "endpoint doesn't exist" - keeps the cloud surface flat.
+    if not (settings.is_local or settings.level_demo_in_cloud):
         raise HTTPException(status_code=404, detail="not_found")
 
     scenario = SCENARIOS.get(body.scenario)
     if scenario is None:
         raise HTTPException(status_code=400, detail="unknown_scenario")
 
-    store = get_store(scenario.user_id)
+    ip = _client_ip(request)
+    # Rate limit is cloud-only. Local dev is single-user by design;
+    # limiting yourself on localhost is pure friction.
+    if not settings.is_local:
+        decision = _get_demo_ip_limiter().check(ip)
+        if not decision.allowed:
+            logger.warning(
+                "demo.rate_limited",
+                ip=ip,
+                scenario=scenario.id,
+                retry_after_s=round(decision.retry_after_s, 1),
+            )
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail={
+                    "error": "rate_limited",
+                    "retry_after_s": round(decision.retry_after_s, 1),
+                    "message": (
+                        "Too many demo logins from this address. "
+                        "Please wait a minute and try again."
+                    ),
+                },
+                headers={"Retry-After": str(int(decision.retry_after_s) + 1)},
+            )
+
+    # Slot assignment: local always slot 0 (single-tenant); cloud
+    # hashes IP -> slot for stable per-judge sessions across clicks.
+    if settings.is_local:
+        slot = 0
+    else:
+        slot = slot_for_ip(
+            ip, scenario.id, settings.level_demo_slots_per_scenario
+        )
+    user_id = user_id_for_slot(scenario.id, slot)
+
+    store = get_store(user_id)
     try:
         result = await seed_demo_user(store, scenario_id=scenario.id)
     except FileNotFoundError as exc:
@@ -200,26 +311,32 @@ async def demo_login(
             status_code=500, detail="demo_ics_missing"
         ) from exc
 
-    session = UserSession(user_id=scenario.user_id, email=scenario.email)
+    session = UserSession(user_id=user_id, email=scenario.email)
     response.set_cookie(
         key=SESSION_COOKIE_NAME,
         value=build_session_cookie(session),
         max_age=60 * 60 * 24 * 30,
         httponly=True,
-        secure=False,  # local only - HTTPS not required
+        # Cloud runs behind HTTPS on Cloud Run so require secure=true
+        # there; local is HTTP-only so we can't set secure or the
+        # browser drops the cookie.
+        secure=not settings.is_local,
         samesite="lax",
     )
     logger.info(
         "demo.login",
         scenario=scenario.id,
-        user_id=scenario.user_id,
+        user_id=user_id,
+        slot=slot,
+        env=settings.level_env,
         events=result.events_count,
         people=result.people_count,
     )
     return {
         "ok": True,
         "scenario": scenario.id,
-        "user_id": scenario.user_id,
+        "user_id": user_id,
+        "slot": slot,
         "email": scenario.email,
         "display_name": scenario.display_name,
         "events_count": result.events_count,

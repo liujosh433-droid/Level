@@ -148,3 +148,45 @@ def list_scenarios() -> list[dict[str, str]]:
         {"id": s.id, "label": s.label, "tagline": s.tagline}
         for s in SCENARIOS.values()
     ]
+
+
+def user_id_for_slot(scenario_id: str, slot: int) -> str:
+    """Compose a per-slot demo user id.
+
+    Cloud demo mode assigns each caller a slot in
+    ``[0, level_demo_slots_per_scenario)`` based on a stable hash of
+    their client IP + scenario. That slot maps to a fixed user id
+    like ``u_demo_solo_0`` so:
+
+    - the same judge (same IP) lands on the same user each click,
+      preserving their session state,
+    - the total user population is bounded to
+      ``slots * len(SCENARIOS)`` regardless of traffic, and
+    - existing per-user cost caps and gate limits apply naturally.
+
+    Local mode uses slot 0 always (single-tenant), which happens to
+    equal the historical ``u_demo_<scenario>`` id when slot==0 is
+    treated as "unslotted" - so we deliberately keep the unsuffixed
+    form for slot 0 to stay backward-compatible with any state a
+    contributor already has on disk.
+    """
+    if slot == 0:
+        return f"u_demo_{scenario_id}"
+    return f"u_demo_{scenario_id}_{slot}"
+
+
+def slot_for_ip(ip: str, scenario_id: str, slots_per_scenario: int) -> int:
+    """Deterministic slot assignment for a client IP.
+
+    Same IP + scenario => same slot => same demo user across clicks.
+    Uses SHA-256 rather than Python's built-in ``hash()`` because the
+    latter is salted per-process and would reshuffle judges' assigned
+    slots on every deploy.
+    """
+    import hashlib
+
+    if slots_per_scenario <= 1:
+        return 0
+    key = f"{ip}:{scenario_id}".encode()
+    digest = hashlib.sha256(key).digest()
+    return int.from_bytes(digest[:4], "big") % slots_per_scenario

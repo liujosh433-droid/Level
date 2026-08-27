@@ -119,6 +119,27 @@ class Settings(BaseSettings):
 
     ai_mode: Literal["live", "record", "replay"] = "live"
 
+    # Prod demo mode. When True, POST /v1/auth/demo works in cloud too,
+    # letting judges try the deployed API with zero setup (no clone,
+    # no local env, no OAuth). Defaults to False because a naive
+    # implementation would let bots spawn unbounded synthetic users
+    # against real Firestore + real Vertex billing.
+    #
+    # Safety when enabled:
+    #   * fixed pool of ``level_demo_slots_per_scenario`` user_ids per
+    #     scenario (total = slots * len(SCENARIOS)) - storage stays
+    #     bounded regardless of demo traffic.
+    #   * client IP is hashed to a slot so the same judge lands on the
+    #     same user across clicks (stable session UX) while bots
+    #     rotating IPs still can't grow the pool.
+    #   * per-IP token bucket on the demo endpoint itself
+    #     (``level_demo_per_ip_per_hour``) rejects burst abuse.
+    #   * per-user daily cost cap (``level_daily_cost_cap_usd``) already
+    #     caps LLM spend at ``$cap * pool_size`` in the pathological case.
+    level_demo_in_cloud: bool = False
+    level_demo_slots_per_scenario: int = Field(default=3, ge=1, le=50)
+    level_demo_per_ip_per_hour: int = Field(default=10, ge=1, le=1000)
+
     @property
     def is_local(self) -> bool:
         return self.level_env == "local"

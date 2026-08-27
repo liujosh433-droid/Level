@@ -258,8 +258,12 @@ export default function TodayPage() {
   if (needsConnect) {
     const demoAvailable = features?.demo?.available === true;
     const scenarios: DemoScenario[] = features?.demo?.scenarios ?? [];
-    const primary = scenarios.find((s) => s.id === "family");
-    const secondary = scenarios.find((s) => s.id === "solo");
+    // Solo caregiver is the primary demo: it's the more distinctive
+    // persona (single-parent workload) and the one the RoleAgent
+    // story shines on. Two-parent household stays as a secondary
+    // option for judges who want to see the co-parent path.
+    const primary = scenarios.find((s) => s.id === "solo");
+    const secondary = scenarios.find((s) => s.id === "family");
     return (
       <section className={styles.empty}>
         <h1>Connect Google to get started</h1>
@@ -279,11 +283,11 @@ export default function TodayPage() {
                 <button
                   type="button"
                   className={styles.demoButton}
-                  onClick={() => void startDemo("family")}
+                  onClick={() => void startDemo(primary.id)}
                   disabled={demoLoadingScenario !== null}
-                  aria-busy={demoLoadingScenario === "family"}
+                  aria-busy={demoLoadingScenario === primary.id}
                 >
-                  {demoLoadingScenario === "family"
+                  {demoLoadingScenario === primary.id
                     ? "Loading demo\u2026"
                     : `Try demo: ${primary.label}`}
                 </button>
@@ -292,11 +296,11 @@ export default function TodayPage() {
                 <button
                   type="button"
                   className={styles.demoLink}
-                  onClick={() => void startDemo("solo")}
+                  onClick={() => void startDemo(secondary.id)}
                   disabled={demoLoadingScenario !== null}
-                  aria-busy={demoLoadingScenario === "solo"}
+                  aria-busy={demoLoadingScenario === secondary.id}
                 >
-                  {demoLoadingScenario === "solo"
+                  {demoLoadingScenario === secondary.id
                     ? "Loading\u2026"
                     : `Or: ${secondary.label}`}
                 </button>

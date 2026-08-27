@@ -22,15 +22,17 @@ make install
 make dev
 ```
 
-Open http://127.0.0.1:3000 and click **Try demo: Two-parent family**.
+Open http://127.0.0.1:3000 and click **Try demo: Solo caregiver**.
 `POST /v1/auth/demo` seeds a synthetic user from
-[`example-data/caregiver-month.ics`](example-data/caregiver-month.ics),
+[`example-data/caregiver-month-solo.ics`](example-data/caregiver-month-solo.ics),
 sets the same signed session cookie a real OAuth callback would, and
-lands you on `/today` with 250+ pre-classified events, a curated cast
+lands you on `/today` with 200+ pre-classified events, a curated cast
 of people, and 6+ missing usuals for the current week already
-computed. A second scenario (**Or: Solo caregiver**) loads the same
-kids and elder under a single-parent household so you can see how
-the RoleAgent handles different family structures.
+computed. Solo caregiver is the primary demo because the
+single-parent workload is the more distinctive story and best
+showcases RoleAgent inference; **Or: Two-parent family** adds a
+co-parent (Alex) if you want to see how Level splits pickup duty
+across two adults.
 
 Demo-mode guardrails so you can click freely:
 

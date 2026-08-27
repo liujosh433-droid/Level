@@ -80,14 +80,16 @@ make dev
 # API on http://127.0.0.1:8080, web on http://127.0.0.1:3000
 ```
 
-Open `http://127.0.0.1:3000` and click **Try demo: Two-parent
-family**. Level seeds a synthetic user from
-[`example-data/caregiver-month.ics`](example-data/caregiver-month.ics),
+Open `http://127.0.0.1:3000` and click **Try demo: Solo caregiver**.
+Level seeds a synthetic user from
+[`example-data/caregiver-month-solo.ics`](example-data/caregiver-month-solo.ics),
 drops the same signed session cookie a real OAuth callback would, and
-takes you to `/today` with 250+ pre-classified events, a curated
+takes you to `/today` with 200+ pre-classified events, a curated
 cast of people, and 6+ missing usuals for the current week already
-computed. A second scenario (**Or: Solo caregiver**) loads the same
-kids and elder under a single-parent household.
+computed. Solo caregiver is the primary demo because the workload
+and RoleAgent-inference story are more distinctive; **Or: Two-parent
+family** is a second option that adds a co-parent (Alex) so you can
+see how Level splits pickup duty across two adults.
 
 - No Google Cloud project, no OAuth client, no calendar import.
 - `LEVEL_ENV=local` writes state to `.level/local_store/`.

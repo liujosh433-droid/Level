@@ -162,7 +162,10 @@ async def logout(response: Response) -> dict[str, bool]:
 
 
 class DemoLoginBody(BaseModel):
-    scenario: Literal["family", "solo"] = "family"
+    # Solo caregiver is the primary demo persona - single-parent
+    # workload is the more distinctive story and the one that best
+    # showcases RoleAgent inference (no co-parent to fall back on).
+    scenario: Literal["family", "solo"] = "solo"
 
 
 @router.post("/demo")

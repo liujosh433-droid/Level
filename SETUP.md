@@ -17,19 +17,22 @@ or `curl -LsSf https://astral.sh/uv/install.sh | sh`.
    `GOOGLE_*` value blank)
 2. `make install`
 3. `make dev`
-4. Open `http://127.0.0.1:3000` and click **Try demo: Two-parent
-   family** on the landing page
+4. Open `http://127.0.0.1:3000` and click **Try demo: Solo caregiver**
+   on the landing page
 
 That last click hits `POST /v1/auth/demo`, which loads
-`example-data/caregiver-month.ics` into a synthetic user, drops the
-same signed session cookie a real OAuth callback would, and returns
-to `/today` with 250+ pre-classified events, a curated cast of people,
-and 6+ missing-usuals for the current week already computed. No
-Google Cloud project, no OAuth client, no calendar import.
+`example-data/caregiver-month-solo.ics` into a synthetic user, drops
+the same signed session cookie a real OAuth callback would, and
+returns to `/today` with 200+ pre-classified events, a curated cast
+of people, and 6+ missing-usuals for the current week already
+computed. No Google Cloud project, no OAuth client, no calendar
+import.
 
-A second scenario (`Or: Solo caregiver`) loads the same kids and elder
-under a single-parent household so you can see how the RoleAgent
-handles a different family structure.
+Solo caregiver is the primary demo because the single-parent
+workload is the more distinctive story and the one that best
+showcases RoleAgent inference. **Or: Two-parent family** is a
+second option that adds a co-parent (Alex) so you can see how
+Level splits pickup duty across two adults.
 
 Demo mode is `LEVEL_ENV=local` only. The endpoint 404s in cloud so a
 probe can't spawn synthetic users against the deployed API.

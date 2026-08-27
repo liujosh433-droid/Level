@@ -7,11 +7,19 @@
 UV ?= $(if $(wildcard .tools/uv),.tools/uv,uv)
 PY_DIRS := packages tests
 
+# Local dev ports. Override when they collide (Cursor grabs 8080 by
+# default, so set LEVEL_API_PORT=8081 in that case). The Next.js proxy
+# reads LEVEL_API_PROXY_TARGET from the env; dev exports it from
+# LEVEL_API_PORT so a single override moves both halves in lockstep.
+LEVEL_API_PORT ?= 8080
+LEVEL_WEB_PORT ?= 3000
+
 help:
 	@echo "Level - caregiver partner (v2)"
 	@echo ""
 	@echo "  make install         install python + node deps"
-	@echo "  make dev             run api :8080 and web :3000 together"
+	@echo "  make dev             run api :$(LEVEL_API_PORT) and web :$(LEVEL_WEB_PORT) together"
+	@echo "                       (override with LEVEL_API_PORT / LEVEL_WEB_PORT)"
 	@echo "  make api             run FastAPI only"
 	@echo "  make web             run Next.js only"
 	@echo "  make test            unit + security + e2e (fast, LEVEL_ENV=local)"
@@ -38,14 +46,14 @@ install:
 	cd apps/web && npm install
 
 dev:
-	@echo "Starting api :8080 and web :3000 ..."
+	@echo "Starting api :$(LEVEL_API_PORT) and web :$(LEVEL_WEB_PORT) ..."
 	@$(MAKE) -j 2 api web
 
 api:
-	LEVEL_ENV=local $(UV) run --package level-api uvicorn level_api.main:app --host 127.0.0.1 --port 8080 --reload
+	LEVEL_ENV=local $(UV) run --package level-api uvicorn level_api.main:app --host 127.0.0.1 --port $(LEVEL_API_PORT) --reload
 
 web:
-	cd apps/web && npm run dev
+	cd apps/web && LEVEL_API_PROXY_TARGET=http://127.0.0.1:$(LEVEL_API_PORT) PORT=$(LEVEL_WEB_PORT) npm run dev
 
 test: test-unit test-security test-e2e
 

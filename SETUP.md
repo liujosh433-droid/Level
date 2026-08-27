@@ -19,6 +19,20 @@ Install `uv` with `brew install uv` or
 3. `make dev`
 4. Open `http://127.0.0.1:3000`, click **Connect Google**.
 
+**Port collision?** `make dev` binds `:8080` (API) and `:3000` (web).
+The Cursor IDE binds `:8080` for its own agent bridge, and many other
+dev tools grab that port too. If you see `Address already in use`,
+run the API on a different port and the web proxy will follow:
+
+```bash
+LEVEL_API_PORT=8081 make dev
+```
+
+If you're planning to sign in with Google OAuth after the port
+change, update `GOOGLE_OAUTH_REDIRECT_URI` in `.env` (and the
+matching entry in the Google Cloud Console → OAuth consent screen)
+to point at the new port.
+
 Want a richer calendar to demo against? Import one of the fixture
 calendars in [`example-data/`](example-data) into a scratch Google
 account and connect that account:

@@ -29,6 +29,7 @@ from level_core.email.resolve import (
     is_email_request,
     pick_candidate,
     resolve_email_targets,
+    unknown_person_names,
 )
 from level_core.schedule.book import book_event, delete_event, move_event
 from level_core.schedule.slots import (
@@ -2288,6 +2289,36 @@ async def _handle_email_request(
         await _clear_pending_email_pick(store)
         await _write_reply(store, resolved.reply)
         return {"reply": resolved.reply, "path": "email", "intent": "send_email"}
+    # Unknown-subject guard: caught the "email Ms. Anna that Jordan
+    # is sick" case where a caregiver names a person the roster
+    # doesn't know about. Without this, EmailAgent obediently drafts
+    # an email about a made-up kid because the LLM has no way to
+    # know Jordan isn't real. Fire ONLY on a status=match resolve
+    # (recipient is known + no ambiguity) so we don't stack this on
+    # top of the existing "who should I email?" flow. Skips the LLM
+    # call entirely - cheaper than a hallucinated draft. Reuses the
+    # people/contacts already fetched above via ctx_ memoization.
+    unknown = unknown_person_names(message, people, contacts)
+    if unknown:
+        known_kid_names = [
+            p.display_name for p in people if p.relation.value == "child"
+        ][:3]
+        unknown_names = ", ".join(unknown)
+        if known_kid_names:
+            suggestion = f" Did you mean {', '.join(known_kid_names)}?"
+        else:
+            suggestion = ""
+        reply = (
+            f"I don\u2019t know {unknown_names} in your care roster.{suggestion} "
+            "Add them under People, or rephrase and I\u2019ll draft this."
+        )
+        await _write_reply(store, reply)
+        return {
+            "reply": reply,
+            "path": "email",
+            "intent": "send_email",
+            "needs_confirm": True,
+        }
     await _clear_pending_email_pick(store)
     return await _draft_for_candidate(store, resolved.candidates[0], message)
 

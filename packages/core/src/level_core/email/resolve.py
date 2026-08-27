@@ -194,6 +194,137 @@ def resolve_email_targets(
     )
 
 
+# Titlecase name shape: leading capital, at least 2 chars total, allow
+# internal hyphens or apostrophes ("O'Brien", "Mary-Kate") but not
+# ALLCAPS acronyms ("PT", "NYC") - those confuse the guard on things
+# like "PT with Helen" being a person.
+_TITLECASE_NAME = re.compile(
+    r"\b[A-Z][a-z][A-Za-z'\-]*\b",
+)
+
+# Titlecase words that are *not* proper names but often show up
+# mid-sentence. Extending this list is preferable to loosening the
+# guard - the cost of a false positive here is a spurious
+# clarification bubble, which is exactly what the guard exists to
+# produce. Better to grow the stop-list than to draft an email
+# about a made-up person.
+_NON_PERSON_TITLECASE: frozenset[str] = frozenset(
+    word.lower()
+    for word in (
+        # Salutations (either as own word or the "Ms" of "Ms. Anna"
+        # after we strip the period).
+        "Ms", "Mr", "Mrs", "Dr", "Prof", "Sir", "Madam", "Miss",
+        # Chat-shaped words that could sit at a sentence start.
+        "Hi", "Hello", "Hey", "Yes", "No", "Ok", "Okay", "Sure",
+        "Thanks", "Thank", "Please", "Sorry", "Nope",
+        "The", "This", "That", "There", "Those", "These",
+        "It", "It's", "He", "She", "They", "We", "You", "I",
+        "And", "Or", "But", "So", "Also",
+        "When", "Where", "Why", "What", "Who", "How", "Which",
+        "Can", "Could", "Would", "Should", "Will", "Must",
+        # Time words.
+        "Today", "Tomorrow", "Yesterday", "Tonight", "Now", "Later",
+        "Soon", "Never", "Always", "Every", "Any",
+        "Monday", "Tuesday", "Wednesday", "Thursday", "Friday",
+        "Saturday", "Sunday",
+        "Mon", "Tue", "Tues", "Wed", "Thu", "Thur", "Thurs", "Fri",
+        "Sat", "Sun",
+        "January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November", "December",
+        "Jan", "Feb", "Mar", "Apr", "Jun", "Jul", "Aug", "Sep",
+        "Sept", "Oct", "Nov", "Dec",
+        "AM", "PM", "Am", "Pm",  # AM/PM titlecase variants
+        # Product / app.
+        "Level",
+        # Role-shaped nouns that a caregiver might Titlecase.
+        "School", "Work", "Home", "Office", "Church", "Practice",
+        "Class", "Gym", "Ballet", "Soccer", "Piano",
+    )
+)
+
+
+def unknown_person_names(
+    message: str,
+    people: list[CarePerson],
+    contacts: list[Contact],
+) -> list[str]:
+    """Return Titlecase name-shaped tokens in ``message`` that don't
+    match any known person or contact.
+
+    Purpose: catch the "email Ms. Anna that Jordan is sick" case
+    where the caregiver names a subject person the roster doesn't
+    know about. Without this, the EmailAgent obediently drafts an
+    email about a made-up kid because the LLM has no way to know
+    Jordan isn't real. With this, chat.py returns a clarification
+    bubble BEFORE the LLM call: "I don't know a Jordan - did you
+    mean Nova or Theo?".
+
+    Design choices:
+    - **Titlecase-only.** Lowercase words are ambiguous ("mom" could
+      be Helen's alias or a common noun); the caller's caseless
+      alias match in ``people_mentioned`` handles that path. We only
+      trip on capitalised name-shaped tokens the user clearly meant
+      as a proper noun.
+    - **Contact-name subtraction.** "Ms. Anna" (the teacher) is a
+      known contact; her first name shouldn't trigger. We split each
+      Contact.name on whitespace and add every word (>= 2 chars) to
+      the known set.
+    - **Alias-aware.** CarePerson aliases count as known
+      (``Dad`` -> Josh, ``Mom`` -> Helen).
+    - **Return preserves original casing** so the clarification
+      bubble echoes exactly what the user typed. Deduped
+      case-insensitively, first occurrence wins.
+
+    Returns an empty list when the message contains no unknown
+    proper nouns - which is the common case. Callers should skip
+    the guard entirely in that case.
+    """
+    if not message:
+        return []
+
+    known_lower: set[str] = set()
+    for p in people:
+        if (p.status or "") == "not_me":
+            # A rejected person shouldn't paper over a new mention
+            # of the same name (they told us not_me for a reason).
+            continue
+        if p.display_name:
+            known_lower.add(p.display_name.strip().lower())
+        for alias in p.aliases or ():
+            alias = alias.strip()
+            if len(alias) >= 2:
+                known_lower.add(alias.lower())
+    for c in contacts:
+        # Contacts are stored as full names ("Ms. Anna", "Dr. Chen").
+        # Split so the user's shortened form ("Anna", "Chen") also
+        # matches as known.
+        for word in re.split(r"\s+", c.name or ""):
+            cleaned = word.strip(".,").lower()
+            if len(cleaned) >= 2:
+                known_lower.add(cleaned)
+
+    seen_ci: set[str] = set()
+    unknown: list[str] = []
+    for m in _TITLECASE_NAME.finditer(message):
+        token = m.group(0)
+        # Strip trailing possessive ('s or straight ') so "Nova's" and
+        # "Mom's" resolve to the same known-set entry as "Nova"/"Mom".
+        # Do this on the LOOKUP key only - the surface form we echo
+        # back to the user should preserve original casing/possessive
+        # for the "did you mean" reply to feel natural.
+        low = token.lower()
+        low = re.sub(r"[\u2019']s$", "", low)
+        if low in _NON_PERSON_TITLECASE:
+            continue
+        if low in known_lower:
+            continue
+        if low in seen_ci:
+            continue
+        seen_ci.add(low)
+        unknown.append(token)
+    return unknown
+
+
 def pick_candidate(message: str, candidates: list[EmailCandidate]) -> EmailCandidate | None:
     text = (message or "").strip()
     if not text or not candidates:

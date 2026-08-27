@@ -19,6 +19,7 @@ from level_api.routes import (
     auth,
     calendar,
     chat,
+    config,
     contacts,
     email,
     feedback,
@@ -69,6 +70,7 @@ def create_app() -> FastAPI:
     app.include_router(healthz.router, prefix="/v1")
     app.include_router(auth.router, prefix="/v1/auth")
     app.include_router(calendar.router, prefix="/v1/calendar")
+    app.include_router(config.router, prefix="/v1/config")
     app.include_router(chat.router, prefix="/v1")
     app.include_router(contacts.router, prefix="/v1/contacts")
     app.include_router(email.router, prefix="/v1/email")

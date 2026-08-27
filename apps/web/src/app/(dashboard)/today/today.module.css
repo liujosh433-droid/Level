@@ -353,6 +353,84 @@
   gap: 0.75rem;
   align-items: flex-start;
   padding: 1.5rem 0;
+  max-width: 34rem;
+}
+
+.demoDivider {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 1rem 0 0.25rem;
+  color: var(--mist);
+  font-size: 0.9rem;
+  width: 100%;
+}
+
+.demoDivider::before,
+.demoDivider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+
+.demoRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  align-items: center;
+}
+
+.demoButton {
+  appearance: none;
+  border: 1px solid rgba(45, 159, 138, 0.35);
+  background: rgba(45, 159, 138, 0.09);
+  color: var(--ink);
+  padding: 0.55rem 0.95rem;
+  border-radius: var(--radius-md);
+  font-size: 0.95rem;
+  font-weight: 550;
+  cursor: pointer;
+  transition: background 120ms ease, transform 120ms ease;
+}
+
+.demoButton:hover:not(:disabled) {
+  background: rgba(45, 159, 138, 0.18);
+}
+
+.demoButton:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+.demoLink {
+  appearance: none;
+  border: none;
+  background: none;
+  color: var(--mist);
+  padding: 0.35rem 0.25rem;
+  font-size: 0.9rem;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.demoLink:disabled {
+  opacity: 0.55;
+  cursor: progress;
+}
+
+.demoTagline {
+  color: var(--mist);
+  font-size: 0.85rem;
+  margin: 0.15rem 0 0;
+  font-style: italic;
+}
+
+.demoError {
+  color: var(--danger, #c33);
+  font-size: 0.85rem;
+  margin: 0.25rem 0 0;
 }
 
 .onboardingCard {

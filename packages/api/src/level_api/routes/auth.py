@@ -1,9 +1,10 @@
-"""Google OAuth start + callback."""
+"""Google OAuth start + callback, plus local demo-mode bypass."""
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
+from typing import Literal
 
 from fastapi import APIRouter, BackgroundTasks, Cookie, HTTPException, Query, Response
 from fastapi.responses import RedirectResponse
@@ -19,11 +20,15 @@ from level_core.auth.tokens import save_tokens
 from level_core.calendar.enrich import enrich_agenda
 from level_core.calendar.sync import refresh_agenda
 from level_core.config import get_settings
+from level_core.demo.scenarios import SCENARIOS
+from level_core.demo.seeder import seed_demo_user
 from level_core.observability import get_logger
 from level_core.schemas import UserSession
 from level_core.storage.base import UserStore
 from level_core.storage.care_store import ensure_self_person
 from level_core.storage.factory import get_store
+from pydantic import BaseModel
+
 from level_api.routes.today import refresh_and_enrich_safe
 
 router = APIRouter()
@@ -154,6 +159,69 @@ async def logout(response: Response) -> dict[str, bool]:
     settings = get_settings()
     response.delete_cookie(SESSION_COOKIE_NAME, path="/")
     return {"ok": True, "env": settings.level_env == "cloud"}
+
+
+class DemoLoginBody(BaseModel):
+    scenario: Literal["family", "solo"] = "family"
+
+
+@router.post("/demo")
+async def demo_login(
+    body: DemoLoginBody, response: Response
+) -> dict[str, object]:
+    """OAuth-less local demo entry point.
+
+    Seeds a stable synthetic user from an ICS fixture in
+    ``example-data/`` and drops the same signed session cookie a real
+    OAuth callback would - no Google Cloud project, no OAuth client,
+    no Gmail scope required. Local dev only; refuses in cloud mode so
+    an attacker who guesses the URL against the deployed API can't
+    log themselves in as a synthetic user.
+    """
+    settings = get_settings()
+    if not settings.is_local:
+        # 404 (not 403) so a probe can't distinguish "demo turned off"
+        # from "endpoint doesn't exist" - keeps the cloud surface flat.
+        raise HTTPException(status_code=404, detail="not_found")
+
+    scenario = SCENARIOS.get(body.scenario)
+    if scenario is None:
+        raise HTTPException(status_code=400, detail="unknown_scenario")
+
+    store = get_store(scenario.user_id)
+    try:
+        result = await seed_demo_user(store, scenario_id=scenario.id)
+    except FileNotFoundError as exc:
+        logger.error("demo.ics_missing", scenario=scenario.id, error=str(exc))
+        raise HTTPException(
+            status_code=500, detail="demo_ics_missing"
+        ) from exc
+
+    session = UserSession(user_id=scenario.user_id, email=scenario.email)
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=build_session_cookie(session),
+        max_age=60 * 60 * 24 * 30,
+        httponly=True,
+        secure=False,  # local only - HTTPS not required
+        samesite="lax",
+    )
+    logger.info(
+        "demo.login",
+        scenario=scenario.id,
+        user_id=scenario.user_id,
+        events=result.events_count,
+        people=result.people_count,
+    )
+    return {
+        "ok": True,
+        "scenario": scenario.id,
+        "user_id": scenario.user_id,
+        "email": scenario.email,
+        "display_name": scenario.display_name,
+        "events_count": result.events_count,
+        "people_count": result.people_count,
+    }
 
 
 def _stable_user_id(email: str) -> str:

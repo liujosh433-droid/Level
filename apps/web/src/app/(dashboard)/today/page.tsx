@@ -10,6 +10,8 @@ import { browserTimeZone, formatDateOnly } from "@/lib/dates";
 import { buildPersonColorMap } from "@/lib/personColor";
 import type {
   CalendarSyncInfo,
+  DemoScenario,
+  FeaturesResponse,
   MissingUsualWeek,
   ProactiveCard,
   TodayResponse,
@@ -125,6 +127,11 @@ export default function TodayPage() {
 
   const [loadError, setLoadError] = useState<string | null>(null);
   const [dismissedCardIds, setDismissedCardIds] = useState<Set<string>>(() => new Set());
+  const [features, setFeatures] = useState<FeaturesResponse | null>(null);
+  const [demoLoadingScenario, setDemoLoadingScenario] = useState<
+    "family" | "solo" | null
+  >(null);
+  const [demoError, setDemoError] = useState<string | null>(null);
   const emptyPolls = useRef(0);
 
   const load = useCallback(async () => {
@@ -161,6 +168,34 @@ export default function TodayPage() {
   useEffect(() => {
     void load().finally(() => setInitialLoading(false));
   }, [load]);
+
+  useEffect(() => {
+    void api
+      .get<FeaturesResponse>("/v1/config/features")
+      .then(setFeatures)
+      .catch(() => setFeatures(null));
+  }, []);
+
+  const startDemo = useCallback(
+    async (scenarioId: "family" | "solo") => {
+      setDemoError(null);
+      setDemoLoadingScenario(scenarioId);
+      try {
+        await api.post("/v1/auth/demo", { scenario: scenarioId });
+        // Full reload so every page state (chat, sidebar, whoami event
+        // listeners) restarts against the seeded demo user.
+        window.location.reload();
+      } catch (err) {
+        setDemoLoadingScenario(null);
+        setDemoError(
+          err instanceof ApiError
+            ? err.detail
+            : "Couldn't start demo mode. Try again?",
+        );
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     function onWho(event: Event) {
@@ -221,6 +256,10 @@ export default function TodayPage() {
     );
   }
   if (needsConnect) {
+    const demoAvailable = features?.demo?.available === true;
+    const scenarios: DemoScenario[] = features?.demo?.scenarios ?? [];
+    const primary = scenarios.find((s) => s.id === "family");
+    const secondary = scenarios.find((s) => s.id === "solo");
     return (
       <section className={styles.empty}>
         <h1>Connect Google to get started</h1>
@@ -230,6 +269,49 @@ export default function TodayPage() {
         <a className="button-primary" href="/v1/auth/google/start">
           Connect Google
         </a>
+        {demoAvailable ? (
+          <>
+            <p className={styles.demoDivider}>
+              <span>or skip OAuth &mdash; try a demo</span>
+            </p>
+            <div className={styles.demoRow}>
+              {primary ? (
+                <button
+                  type="button"
+                  className={styles.demoButton}
+                  onClick={() => void startDemo("family")}
+                  disabled={demoLoadingScenario !== null}
+                  aria-busy={demoLoadingScenario === "family"}
+                >
+                  {demoLoadingScenario === "family"
+                    ? "Loading demo\u2026"
+                    : `Try demo: ${primary.label}`}
+                </button>
+              ) : null}
+              {secondary ? (
+                <button
+                  type="button"
+                  className={styles.demoLink}
+                  onClick={() => void startDemo("solo")}
+                  disabled={demoLoadingScenario !== null}
+                  aria-busy={demoLoadingScenario === "solo"}
+                >
+                  {demoLoadingScenario === "solo"
+                    ? "Loading\u2026"
+                    : `Or: ${secondary.label}`}
+                </button>
+              ) : null}
+            </div>
+            {primary ? (
+              <p className={styles.demoTagline}>{primary.tagline}</p>
+            ) : null}
+            {demoError ? (
+              <p className={styles.demoError} role="alert">
+                {demoError}
+              </p>
+            ) : null}
+          </>
+        ) : null}
       </section>
     );
   }

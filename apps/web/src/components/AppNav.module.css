@@ -45,6 +45,24 @@
   color: var(--nav-signal);
 }
 
+.demoPill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #b6f3df;
+  background: rgba(61, 184, 160, 0.22);
+  border: 1px solid rgba(61, 184, 160, 0.55);
+  cursor: help;
+  margin-right: auto;
+  margin-left: 0.6rem;
+}
+
 .headerEnd {
   display: flex;
   align-items: center;

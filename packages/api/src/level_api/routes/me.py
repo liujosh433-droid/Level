@@ -7,6 +7,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Response
 from level_core.auth.sessions import SESSION_COOKIE_NAME
 from level_core.auth.tokens import clear_tokens
+from level_core.demo.seeder import is_demo_user
 from level_core.schemas import CareRelation
 from level_core.storage.base import UserStore
 from level_core.storage.care_store import propose_person, set_person_status
@@ -49,11 +50,19 @@ async def _whoami_payload(store: UserStore) -> dict[str, Any]:
             name = ""
     if not name:
         name = str(profile.get("display_name") or "").strip()
+    demo = is_demo_user(profile)
     return {
         "user_id": store.user_id,
         "email": profile.get("email"),
         "display_name": name or None,
-        "google_connected": tokens_present,
+        # ``google_connected`` gates the frontend's "Connect Google"
+        # wall. For a demo user we return True even though the tokens
+        # KV is empty - the seeded agenda + people are what actually
+        # make the UI usable, and the wall would otherwise trap a
+        # judge who bypassed OAuth on purpose.
+        "google_connected": tokens_present or demo,
+        "demo": demo,
+        "demo_scenario": profile.get("demo_scenario") if demo else None,
         "tz": profile.get("tz"),
     }
 

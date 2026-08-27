@@ -12,34 +12,46 @@ the app does not need to be live at judging time — the demo video and
 this repo are the primary proof of execution. The deployed URL above
 is available for reference and is shown live in the video.
 
-The whole project also runs **locally without any Google Cloud
-credentials or OAuth setup** — recommended path for a judge who
-wants to poke around independently:
+**Recommended path (no Google account, no OAuth setup, 60 seconds):**
 
 ```bash
 git clone https://github.com/liujosh433-droid/Level.git
 cd Level
-cp .env.example .env
-# LEVEL_ENV=local is the default; no GCP credentials required.
+cp .env.example .env         # defaults are fine, no edits needed
 make install
 make dev
-# API on http://127.0.0.1:8080, web on http://127.0.0.1:3000
 ```
 
-Then either:
+Open http://127.0.0.1:3000 and click **Try demo: Two-parent family**.
+`POST /v1/auth/demo` seeds a synthetic user from
+[`example-data/caregiver-month.ics`](example-data/caregiver-month.ics),
+sets the same signed session cookie a real OAuth callback would, and
+lands you on `/today` with 250+ pre-classified events, a curated cast
+of people, and 6+ missing usuals for the current week already
+computed. A second scenario (**Or: Solo caregiver**) loads the same
+kids and elder under a single-parent household so you can see how
+the RoleAgent handles different family structures.
 
-- Connect any Google account (test-user access to the OAuth app is
-  available on request via the hackathon manager — I'll add your
-  email in a few minutes), **or**
-- Import [`example-data/caregiver-month.ics`](example-data/caregiver-month.ics)
-  (family with a co-parent) or
-  [`example-data/caregiver-month-solo.ics`](example-data/caregiver-month-solo.ics)
-  (solo caregiver) into any Google Calendar and connect that account.
-  Both fixtures ship with two engineered "missing usuals" so the
-  proactive-cards flow surfaces content immediately on `/today`.
+Demo-mode guardrails so you can click freely:
+
+- **Email drafting** runs through the LLM if `GOOGLE_API_KEY` /
+  Vertex is configured; falls back to a deterministic template
+  otherwise.
+- **Email sending** short-circuits to a preview response. Level
+  logs the send, clears the pending draft, but never hits Gmail.
+- **Calendar edits** (book / move / delete) reply with a friendly
+  "connect Google to actually book" message; seeded agenda is
+  read-only.
+- Demo mode is disabled entirely when `LEVEL_ENV=cloud` so a probe
+  can't spawn synthetic users against the deployed API.
+
+**Optional: test with your own Google Calendar + Gmail.** Follow
+[SETUP.md](SETUP.md) to create your own OAuth client, put the client
+ID/secret in `.env`, and click **Connect Google** on the same
+landing page instead of the demo button.
 
 Tests (`make test`) run offline against `LEVEL_ENV=local` and cover
-the guardrail stack + feedback loop end-to-end.
+the guardrail stack, feedback loop, and demo seeder end-to-end.
 
 ## What it is
 

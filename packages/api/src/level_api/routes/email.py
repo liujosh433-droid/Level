@@ -35,6 +35,7 @@ from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException
+from level_core.demo.seeder import is_demo_user
 from level_core.email.drafter import draft_email
 from level_core.email.gmail_client import send_email
 from level_core.observability import get_logger
@@ -148,6 +149,31 @@ async def send(
             has_profile=isinstance(profile_draft, dict),
         )
         raise HTTPException(status_code=400, detail="unknown_confirmation_token")
+
+    # Demo-mode short-circuit. A judge running locally without a real
+    # Gmail token should still be able to click "Send" and see the
+    # happy-path UX; we log the send + clear the pending draft, but
+    # never hit Google. Skipping this would 502 with
+    # ``gmail_send_failed`` (see the exception path below), which
+    # reads as a bug during a demo even though it's technically
+    # correct: no tokens means no send.
+    if is_demo_user(profile):
+        logger.info(
+            "email.send.demo_preview",
+            user=store.user_id,
+            to=body.to[:64],
+        )
+        _pending_drafts.pop(body.confirmation_token, None)
+        if profile_valid:
+            profile.pop(PENDING_EMAIL_DRAFT_KEY, None)
+            await store.profile.write(profile)
+        _sent_idempotency[x_idempotency_key] = now
+        return {
+            "message_id": f"demo-{x_idempotency_key[:12]}",
+            "thread_id": f"demo-{x_idempotency_key[:12]}",
+            "demo": True,
+            "notice": "Demo mode: draft was NOT actually emailed.",
+        }
 
     # Send FIRST. Only drop the token from both stores on Gmail success.
     # A Gmail failure leaves the token valid so the caregiver's retry

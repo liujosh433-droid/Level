@@ -184,6 +184,36 @@ Every piece of state has an explicit lifecycle:
   clears the session cookie without touching the tokens so
   reconnect is one click.
 
+### 2.9 Demo mode (local-only)
+
+- `POST /v1/auth/demo` seeds a synthetic user from an ICS fixture in
+  `example-data/` (family or solo scenario) and drops the same signed
+  session cookie a real OAuth callback would. No `tokens` KV is ever
+  written. Idempotent: re-clicking the demo button on the same
+  scenario returns the same `u_demo_family`/`u_demo_solo` uid, same
+  people row IDs, and rewrites the agenda to re-anchor "today" inside
+  the ICS's demo week.
+- Marker: `profile["demo_scenario"]` (`"family"` or `"solo"`).
+  `is_demo_user(profile)` is the single-line check used everywhere
+  downstream code needs to fork behavior.
+- Data written: `profile`, `people` (5 or 4 rows with `status="kept"`),
+  `agenda` (250+ expanded events with `event_id` prefixed `demo:`),
+  `daily_agenda`, `usuals` (37+ rows, deterministic). NO tokens, NO
+  ai_audit, NO chat_turns. Guardrail agents work normally against a
+  demo user because they don't discriminate by uid.
+- Behavior forks live in exactly three spots:
+  - `/v1/me` returns `demo=True` and `google_connected=True` even
+    though tokens are empty, so the "Connect Google" frontend gate
+    doesn't trap the judge.
+  - `/v1/email/send` short-circuits to a preview response so the
+    demo can walk through the whole email UX without hitting Gmail.
+  - `/v1/config/features` advertises the demo catalog only when
+    `LEVEL_ENV=local`.
+- Security fence: `POST /v1/auth/demo` returns **404** when
+  `LEVEL_ENV=cloud`. The 404 (rather than 403) makes the demo
+  endpoint indistinguishable from "endpoint doesn't exist" so a
+  probe can't tell whether demo is turned off in production.
+
 ---
 
 ## 3. Security

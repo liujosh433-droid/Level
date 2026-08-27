@@ -2,7 +2,10 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useEffect, useState } from "react";
 import AccountMenu from "./AccountMenu";
+import { api } from "@/lib/api";
+import type { WhoAmI } from "@/lib/types";
 import styles from "./AppNav.module.css";
 
 const TABS = [
@@ -20,6 +23,23 @@ function pathMatches(path: string | null, href: string): boolean {
 
 export default function AppNav() {
   const pathname = usePathname();
+  const [demoScenario, setDemoScenario] = useState<string | null>(null);
+
+  useEffect(() => {
+    // Fetch once at mount; subsequent /v1/me updates arrive via the
+    // level:whoami custom event that AccountMenu already dispatches.
+    void api
+      .get<WhoAmI>("/v1/me")
+      .then((me) => setDemoScenario(me.demo ? me.demo_scenario ?? "family" : null))
+      .catch(() => setDemoScenario(null));
+    function onWho(event: Event) {
+      const me = (event as CustomEvent<WhoAmI>).detail;
+      if (me) setDemoScenario(me.demo ? me.demo_scenario ?? "family" : null);
+    }
+    window.addEventListener("level:whoami", onWho);
+    return () => window.removeEventListener("level:whoami", onWho);
+  }, []);
+
   return (
     <>
       <header className={styles.header}>
@@ -27,6 +47,15 @@ export default function AppNav() {
           <Link href="/today" className={styles.brand}>
             Level
           </Link>
+          {demoScenario ? (
+            <span
+              className={styles.demoPill}
+              title="Signed in as a synthetic demo user. Email sends are previewed; calendar edits are read-only."
+              aria-label={`Demo mode: ${demoScenario === "solo" ? "solo caregiver" : "two-parent family"}`}
+            >
+              Demo mode
+            </span>
+          ) : null}
           <div className={styles.headerEnd}>
             <nav className={styles.desktopNav} aria-label="Main">
               {TABS.map((tab) => {

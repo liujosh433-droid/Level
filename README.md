@@ -66,7 +66,7 @@ The mermaid source is at [`docs/architecture.mmd`](docs/architecture.mmd).
   suggestion cards. Users see "Level noticed while you slept" on
   `/today`.
 
-## 60-second local start
+## 60-second local start (no Google account required)
 
 Prereqs: `node >= 20`, `python >= 3.12`, and [`uv`](https://docs.astral.sh/uv/)
 (one-line install: `brew install uv` or
@@ -74,21 +74,36 @@ Prereqs: `node >= 20`, `python >= 3.12`, and [`uv`](https://docs.astral.sh/uv/)
 
 ```bash
 cp .env.example .env
-# Fill in GOOGLE_OAUTH_CLIENT_ID + GOOGLE_OAUTH_CLIENT_SECRET
-# (see SETUP.md for OAuth consent-screen instructions).
-
+# Defaults are fine - GOOGLE_OAUTH_* can stay blank for demo mode.
 make install
 make dev
 # API on http://127.0.0.1:8080, web on http://127.0.0.1:3000
 ```
 
-Open `http://127.0.0.1:3000`, click **Connect Google**, and Level will
-start syncing your calendar. `LEVEL_ENV=local` writes state to
-`.level/local_store/` — no GCP-side state needed.
+Open `http://127.0.0.1:3000` and click **Try demo: Two-parent
+family**. Level seeds a synthetic user from
+[`example-data/caregiver-month.ics`](example-data/caregiver-month.ics),
+drops the same signed session cookie a real OAuth callback would, and
+takes you to `/today` with 250+ pre-classified events, a curated
+cast of people, and 6+ missing usuals for the current week already
+computed. A second scenario (**Or: Solo caregiver**) loads the same
+kids and elder under a single-parent household.
 
-Want a rich calendar without hand-populating one? Import one of the
-fixture calendars in [`example-data/`](example-data) into a scratch
-Google account, then connect that account:
+- No Google Cloud project, no OAuth client, no calendar import.
+- `LEVEL_ENV=local` writes state to `.level/local_store/`.
+- Email drafting still runs (LLM optional); **email sending
+  short-circuits to a preview** so you never accidentally email
+  anyone during a demo.
+- Demo mode is disabled entirely when `LEVEL_ENV=cloud` so a probe
+  can't spawn synthetic users against the deployed API.
+
+Want to test with your own real Google Calendar and Gmail? Follow
+[SETUP.md](SETUP.md) to create your own OAuth client, then click
+**Connect Google** on the same landing page instead of the demo
+button.
+
+Two ICS fixtures are provided (both used by demo mode; both also
+importable into a scratch Google account for OAuth testing):
 
 - [`example-data/caregiver-month.ics`](example-data/caregiver-month.ics)
   — two-parent family (Josh + Alex + Nova + Theo + Helen). Two usuals

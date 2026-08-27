@@ -3,7 +3,23 @@ export type WhoAmI = {
   email: string | null;
   display_name?: string | null;
   google_connected: boolean;
+  demo?: boolean;
+  demo_scenario?: "family" | "solo" | null;
   tz: string | null;
+};
+
+export type DemoScenario = {
+  id: "family" | "solo";
+  label: string;
+  tagline: string;
+};
+
+export type FeaturesResponse = {
+  env: "local" | "cloud";
+  demo: {
+    available: boolean;
+    scenarios: DemoScenario[];
+  };
 };
 
 export type CarePerson = {

@@ -55,7 +55,10 @@ async def get_daily_summary(store: UserStore) -> str:
     ]
 
     usuals = await store.usuals.list()
-    missing = missing_usuals_today(usuals=usuals, todays_events=todays, tz=tz)
+    people = await store.people.list()
+    missing = missing_usuals_today(
+        usuals=usuals, todays_events=todays, people=people, tz=tz
+    )
     missing_lines = [f"{m.usual.display_summary} ({m.expected_hour_band.value})" for m in missing]
 
     reminder_lines: list[str] = []

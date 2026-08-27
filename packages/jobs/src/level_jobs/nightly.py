@@ -99,12 +99,14 @@ async def _generate_proactive_cards(
     today = datetime.now(tz).date()
     week_start, _week_end = current_week_bounds(today)
     usuals = await store.usuals.list()
+    people = await store.people.list()
     events_by_id = {e.event_id: e for e in events}
     missing = missing_usuals_this_week(
         usuals=usuals,
         week_events=[e for e in events if week_start <= e.time.start.astimezone(tz).date() < _week_end],
         as_of_date=today,
         events_by_id=events_by_id,
+        people=people,
         tz=tz,
     )
     if not missing:
@@ -121,6 +123,27 @@ async def _generate_proactive_cards(
         primary_person = people_by_id.get(g.person_id)
         display_name = primary_person.display_name if primary_person else "someone"
         day = (week_start + timedelta(days=int(g.weekday))).isoformat()
+        # Prefer the concrete title ("Grocery run", "Nova ballet") over
+        # the coarse category ("Personal", "Sports"). The category on
+        # its own is too abstract to be a useful nudge - "Josh's
+        # personal is missing this week" reads like a therapist joke.
+        # Falls back to the category label when the usual didn't carry
+        # a title (badly seeded data or LLM-less demo mode with no
+        # heuristic hit).
+        activity_label = (g.title_hint or g.category.label).strip()
+        if primary_person and primary_person.is_self:
+            # Own-usual phrasing: "Your grocery run is missing" reads
+            # better than "Josh's grocery run is missing" when it's
+            # the caregiver themselves.
+            body_text = (
+                f"Your {activity_label.lower()} is missing this week. "
+                "Want me to put it back?"
+            )
+        else:
+            body_text = (
+                f"{display_name}'s {activity_label.lower()} is missing this week. "
+                "Want me to put it back?"
+            )
         cards.append(
             {
                 "card_id": f"missing:{g.weekday}:{g.category.value}",
@@ -130,12 +153,10 @@ async def _generate_proactive_cards(
                 "weekday": int(g.weekday),
                 "category": g.category.value,
                 "category_label": g.category.label,
+                "title_hint": g.title_hint,
                 "person_id": g.person_id,
                 "person_name": display_name,
-                "text": (
-                    f"{display_name}'s {g.category.label.lower()} is missing this week. "
-                    "Want me to put it back?"
-                ),
+                "text": body_text,
                 "created_at": datetime.utcnow().isoformat(),
             }
         )

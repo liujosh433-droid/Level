@@ -105,6 +105,66 @@ def test_work_blocks_need_a_self_person() -> None:
     assert candidates[0].display_summary == "Work"
 
 
+def test_work_today_covers_the_self_work_usual() -> None:
+    """Regression: 'Josh work 9am-4:45pm' on today should cover the Josh
+    work usual, not flag it as missing.
+
+    The bug: compute_usuals_from_events uses resolve_person_ids (which
+    falls back to is_self when no named person matches), so a bare
+    'Work' event clusters into a self-owned usual. But
+    missing_usuals_today used to read e.matched_person_ids RAW - and
+    the demo ICS loader / LLM enricher both deliberately skip self on
+    the match pass (otherwise every event would tag as Me). Result:
+    Josh's own work usual was flagged as missing every day even though
+    Work was right there on today's calendar. Passing `people` uses
+    the same resolver at check time, restoring symmetry.
+    """
+    self_p = CarePerson(
+        person_id="p_self",
+        display_name="Josh",
+        relation=CareRelation.SELF,
+        care_role_id=CareRoleId.SELF,
+        is_self=True,
+    )
+    today = datetime.now(UTC)
+    today_wd = Weekday(today.weekday())
+
+    usual = Usual(
+        usual_id=Usual.compose_id("p_self", today_wd, HourBand.MORNING),
+        person_id="p_self",
+        weekday=today_wd,
+        hour_band=HourBand.MORNING,
+        activity_type=ActivityType.WORK,
+        display_summary="Work",
+        status=UsualStatus.KEPT,
+    )
+    todays_work = CachedEvent(
+        event_id="e_work_today",
+        calendar_id="primary",
+        summary="Work",
+        activity_type=ActivityType.WORK,
+        time=EventTime(
+            start=today.replace(hour=9, minute=0, second=0, microsecond=0),
+            end=today.replace(hour=16, minute=45, second=0, microsecond=0),
+            tz="UTC",
+        ),
+        # Empty on purpose: the ICS loader / enricher never stamp self
+        # on a title without a name.
+        matched_person_ids=[],
+    )
+
+    # Without `people`: the old broken behaviour. Kept to lock in the
+    # backward-compat fallback that older callers still exercise.
+    stale = missing_usuals_today(usuals=[usual], todays_events=[todays_work])
+    assert len(stale) == 1
+
+    # With `people`: the fixed behaviour. Work today covers the usual.
+    fixed = missing_usuals_today(
+        usuals=[usual], todays_events=[todays_work], people=[self_p]
+    )
+    assert fixed == []
+
+
 def test_isolated_event_is_not_a_candidate() -> None:
     person = _person("p1", "Alpha")
     events = [
@@ -157,6 +217,47 @@ def test_missing_this_week_warns_before_the_day() -> None:
         usuals=[usual], week_events=[friday_drop], as_of_date=thursday
     )
     assert covered == []
+
+
+def test_missing_this_week_carries_concrete_title_hint() -> None:
+    """The nudge label ("Grocery run") should come from the source
+    usuals, not the coarse category ("Personal").
+
+    Rationale: Category.PERSONAL is too abstract on its own — "Josh's
+    personal is missing this week" reads like a therapist joke. The
+    title_hint is the majority-vote display_summary from the source
+    usuals; the UI falls back to category_label when it's absent.
+    """
+    thursday = datetime(2026, 8, 20).date()
+    grocery = Usual(
+        usual_id=Usual.compose_id("p_self", Weekday.FRI, HourBand.AFTERNOON),
+        person_id="p_self",
+        weekday=Weekday.FRI,
+        hour_band=HourBand.AFTERNOON,
+        activity_type=ActivityType.PERSONAL,
+        display_summary="Grocery run",
+        status=UsualStatus.KEPT,
+    )
+    missing = missing_usuals_this_week(usuals=[grocery], week_events=[], as_of_date=thursday)
+    assert len(missing) == 1
+    assert missing[0].category == Category.PERSONAL
+    assert missing[0].title_hint == "Grocery run"
+
+
+def test_title_hint_is_dropped_when_it_equals_the_category() -> None:
+    """"Work" == Category.WORK.label — the hint would be redundant."""
+    thursday = datetime(2026, 8, 20).date()
+    work = Usual(
+        usual_id=Usual.compose_id("p_self", Weekday.FRI, HourBand.MORNING),
+        person_id="p_self",
+        weekday=Weekday.FRI,
+        hour_band=HourBand.MORNING,
+        activity_type=ActivityType.WORK,
+        display_summary="Work",
+        status=UsualStatus.KEPT,
+    )
+    missing = missing_usuals_this_week(usuals=[work], week_events=[], as_of_date=thursday)
+    assert missing[0].title_hint is None
 
 
 def test_missing_this_week_skips_days_that_already_passed() -> None:

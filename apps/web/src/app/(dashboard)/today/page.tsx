@@ -413,7 +413,26 @@ export default function TodayPage() {
                   <li key={card.card_id} className={styles.proactiveCard}>
                     <div>
                       <p className={styles.proactiveText}>{card.text}</p>
-                      <p className={styles.meta}>{card.category_label} &middot; {card.day}</p>
+                      <p className={styles.meta}>
+                        {/*
+                          Lead with the concrete title from the
+                          source usuals ("Grocery run") and treat the
+                          coarse category as secondary context. Falls
+                          back to just the category when the underlying
+                          usual didn't carry a title.
+                        */}
+                        {card.title_hint ? (
+                          <>
+                            {card.title_hint}
+                            {" \u00b7 "}
+                            <span className={styles.metaMuted}>{card.category_label}</span>
+                          </>
+                        ) : (
+                          card.category_label
+                        )}
+                        {" \u00b7 "}
+                        {card.day}
+                      </p>
                     </div>
                     <div className={styles.proactiveActions}>
                       <button
@@ -500,7 +519,23 @@ export default function TodayPage() {
                                 </span>
                               );
                             })}
-                            <span className={styles.missingCategory}>{m.category_label}</span>
+                            {/*
+                              Concrete title from source usuals when
+                              present ("Grocery run" instead of just
+                              "Personal"). The category is still shown
+                              as a small secondary chip so caregivers
+                              can group at a glance.
+                            */}
+                            {m.title_hint ? (
+                              <>
+                                <span className={styles.missingTitle}>{m.title_hint}</span>
+                                <span className={styles.missingCategory}>
+                                  {m.category_label}
+                                </span>
+                              </>
+                            ) : (
+                              <span className={styles.missingCategory}>{m.category_label}</span>
+                            )}
                             <button
                               type="button"
                               className={styles.resolve}

@@ -125,8 +125,26 @@ def missing_usuals_today(
     *,
     usuals: list[Usual],
     todays_events: list[CachedEvent],
+    people: list[CarePerson] | None = None,
     tz: ZoneInfo | None = None,
 ) -> list[MissingUsual]:
+    """Return the kept/proposed usuals whose slot is empty on today's agenda.
+
+    ``people`` is optional for backward compatibility with older callers
+    and tests, but strongly recommended: without it, coverage is
+    computed from ``e.matched_person_ids`` alone, which is *not*
+    symmetric with how ``compute_usuals_from_events`` groups events.
+
+    Concretely, a "Work" event with no named person gets clustered
+    into a Josh-owned usual by ``resolve_person_ids`` (which falls
+    back to the ``is_self`` person), but the raw ``matched_person_ids``
+    field is empty (the demo ICS loader and the LLM enricher both
+    skip self on purpose to avoid tagging every event as Me). Result:
+    Josh's own Work usual is flagged as missing every day even though
+    Work is right there on today's calendar. Passing ``people`` makes
+    the check use the same resolver used at cluster time, so coverage
+    and production match.
+    """
     tz = tz or resolve_tz()
     today = datetime.now(tz).date()
     today_wd = Weekday(today.weekday())
@@ -137,7 +155,16 @@ def missing_usuals_today(
         if local.date() != today:
             continue
         band = hour_to_band(local.hour)
-        for pid in e.matched_person_ids:
+        # Mirror the cluster-time resolver so a self-only event covers
+        # the self person's usual for the same band. When `people` is
+        # absent (older callers), fall back to the raw cache so we
+        # don't over-shoot in unrelated scenarios.
+        pids = (
+            resolve_person_ids(e, people)
+            if people is not None
+            else list(e.matched_person_ids)
+        )
+        for pid in pids:
             covered.add((pid, band))
 
     out: list[MissingUsual] = []
@@ -159,6 +186,14 @@ class MissingCategoryGroup:
     Coarser than `MissingUsual` on purpose: a Nova soccer game covers a Nova
     swim-lesson usual because both fall under Category.SPORTS. Shared events
     list every unmatched person (Nova and Theo on one dropoff row).
+
+    ``title_hint`` is the majority-vote ``display_summary`` from the source
+    usuals - "Grocery run", "Nova ballet", "Helen physical therapy". This
+    exists because Category.PERSONAL by itself is too vague to be useful in
+    a nudge ("Josh's personal is missing this week" reads like a therapist
+    joke); the concrete title tells the caregiver exactly what to look at.
+    Optional because a badly seeded usual could have an empty summary; the
+    UI falls back to the category label in that case.
     """
 
     weekday: Weekday
@@ -167,6 +202,7 @@ class MissingCategoryGroup:
     category: Category
     representative_usual_ids: tuple[str, ...]
     typical_hour_bands: tuple[HourBand, ...]
+    title_hint: str | None = None
 
 
 def _as_local_date(value: date | datetime | None, tz: ZoneInfo) -> date:
@@ -211,6 +247,7 @@ def missing_usuals_this_week(
     week_events: list[CachedEvent],
     as_of_date=None,
     events_by_id: dict[str, CachedEvent] | None = None,
+    people: list[CarePerson] | None = None,
     tz: ZoneInfo | None = None,
 ) -> list[MissingCategoryGroup]:
     """Coarse missing-usuals view for the rest of this Mon-Sun week.
@@ -221,6 +258,9 @@ def missing_usuals_this_week(
     matches (weekday, person, category). Shared source events contribute
     every named person, so a deleted "Nova + Theo dropoff" warns for both.
     Only today and later days this week are flagged.
+
+    ``people`` mirrors ``missing_usuals_today`` — see that function's
+    docstring. Same self-fallback symmetry bug applies here.
     """
     tz = tz or resolve_tz()
     today = _as_local_date(as_of_date, tz)
@@ -234,7 +274,12 @@ def missing_usuals_this_week(
             continue
         wd = Weekday(local.weekday())
         cat = activity_category(e.activity_type)
-        for pid in e.matched_person_ids:
+        pids = (
+            resolve_person_ids(e, people)
+            if people is not None
+            else list(e.matched_person_ids)
+        )
+        for pid in pids:
             covered.add((wd, pid, cat))
 
     buckets: dict[tuple[Weekday, Category], list[Usual]] = {}
@@ -272,10 +317,39 @@ def missing_usuals_this_week(
                 category=cat,
                 representative_usual_ids=tuple(u.usual_id for u in group),
                 typical_hour_bands=tuple(sorted({u.hour_band for u in group})),
+                title_hint=_pick_title_hint(group, cat),
             )
         )
     out.sort(key=lambda g: (int(g.weekday), g.category.value))
     return out
+
+
+def _pick_title_hint(group: list[Usual], category: Category) -> str | None:
+    """Majority-vote the concrete title from the underlying usuals.
+
+    Multiple usuals in the same (weekday, category) bucket can carry
+    different display summaries - "Nova ballet" and "Ballet - Nova"
+    cluster into two usuals if the historical events landed in
+    different hour_bands. Pick the summary that appears most often;
+    tiebreak on shortest string (looks cleaner in the UI).
+
+    Return None if:
+     - every usual has an empty summary (badly seeded data), OR
+     - the winning summary is equal to the category label (nothing
+       to add - the UI already shows the category, so we'd render
+       "Work · Work · Fri" without this guard).
+    """
+    counts: dict[str, int] = defaultdict(int)
+    for u in group:
+        summary = (u.display_summary or "").strip()
+        if summary:
+            counts[summary] += 1
+    if not counts:
+        return None
+    winner = max(counts.items(), key=lambda kv: (kv[1], -len(kv[0])))[0]
+    if winner.lower() == category.label.lower():
+        return None
+    return winner
 
 
 def rollup_for_role_agent(

@@ -113,12 +113,15 @@ async def get_today(
     tomorrows = [e for e in events if _event_local_date(e, tz) == tomorrow]
 
     usuals = await store.usuals.list()
-    missing = missing_usuals_today(usuals=usuals, todays_events=todays, tz=tz)
+    people_list = await store.people.list()
+    missing = missing_usuals_today(
+        usuals=usuals, todays_events=todays, people=people_list, tz=tz
+    )
 
     reminders_by_id = {
         r.reminder_id: r for r in await store.reminders.list() if r.status == "active"
     }
-    people_by_id = {p.person_id: p for p in await store.people.list()}
+    people_by_id = {p.person_id: p for p in people_list}
     events_by_id = {e.event_id: e for e in events}
 
     def _view(e: Any) -> dict[str, Any]:
@@ -155,6 +158,7 @@ async def get_today(
         week_events=week,
         as_of_date=today,
         events_by_id=events_by_id,
+        people=people_list,
         tz=tz,
     )
 
@@ -376,6 +380,11 @@ def _decorate_missing_group(
         "date": day_this_week.isoformat(),
         "category": group.category.value,
         "category_label": group.category.label,
+        # Concrete title pulled from source usuals ("Grocery run",
+        # "Nova ballet"). Falls back to the category label in the UI
+        # if empty. See usuals._pick_title_hint for the majority-vote
+        # rule + dedup vs category label.
+        "title_hint": group.title_hint,
         "person_id": primary["person_id"],
         "person_name": primary["display_name"],
         "person_relation": primary["relation"],

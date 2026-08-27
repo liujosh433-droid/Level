@@ -305,6 +305,23 @@
   font-weight: 550;
 }
 
+/*
+ * Concrete title from the underlying usuals ("Grocery run" instead
+ * of just "Personal"). Prominent so the caregiver's eye jumps to
+ * what the thing IS before falling back to the coarse category
+ * chip to its right.
+ */
+.missingTitle {
+  color: var(--ink);
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+
+.metaMuted {
+  color: var(--foam);
+  font-weight: 400;
+}
+
 .resolve {
   margin-left: auto;
   min-height: 1.85rem;

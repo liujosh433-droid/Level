@@ -104,6 +104,12 @@ export type MissingUsualWeek = {
   date: string;
   category: string;
   category_label: string;
+  /**
+   * Concrete title inferred from source usuals ("Grocery run",
+   * "Nova ballet"). Absent when the underlying usuals didn't carry
+   * a title - render `category_label` in that case.
+   */
+  title_hint?: string | null;
   person_id: string;
   person_name: string | null;
   person_relation: string | null;
@@ -128,6 +134,8 @@ export type ProactiveCard = {
   weekday: number;
   category: string;
   category_label: string;
+  /** See MissingUsualWeek.title_hint. */
+  title_hint?: string | null;
   person_id: string;
   person_name: string;
   text: string;

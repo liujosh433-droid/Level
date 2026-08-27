@@ -15,6 +15,7 @@ from level_core.calendar.enrich import enrich_agenda
 from level_core.calendar.sync import refresh_agenda
 from level_core.calendar.usuals import compute_usuals_from_events, rollup_for_role_agent
 from level_core.config import get_settings
+from level_core.demo.seeder import is_demo_user
 from level_core.observability import get_logger
 from level_core.tz import tz_for_store
 from level_core.schemas import (
@@ -167,8 +168,55 @@ async def refresh_profile(store: UserStore = Depends(get_user_store)) -> dict[st
       3. Otherwise run the full enrich + role_run + usuals pipeline.
          `role_run` is skipped when the fingerprint hasn't moved since
          its last successful run (saves the ~2-5s LLM call).
+
+    Zero-work short-circuit for demo / no-Google users. Neither path
+    has anything real to re-read:
+
+      - **Demo users** run against a static ICS fixture; the seeded
+        state doesn't change between clicks.
+      - **Unconnected users** have no Google tokens; ``refresh_agenda``
+        will raise ``no_google_tokens`` on the first line, the
+        ``except`` below catches it, and then the code used to fall
+        through to Step 3 which runs ``enrich_agenda`` + ``role_run``
+        anyway. ``role_run`` unconditionally calls Vertex (~3-10s) and
+        was the source of the 20s+ hang + occasional 500s the user
+        reported clicking "Re-read calendar" in demo mode.
+
+    Both cases short-circuit here in <100ms with a friendly
+    "up_to_date" response.
     """
     await ensure_self_person(store)
+
+    profile_data = await store.profile.read() or {}
+    tokens = await store.tokens.read() or {}
+    has_google_tokens = bool(tokens.get("access_token"))
+    demo_mode = is_demo_user(profile_data)
+
+    if demo_mode or not has_google_tokens:
+        # Return the current-state summary so the UI has counts to
+        # render, but don't spend a single LLM call. Demo state is
+        # static (ICS seeded once at demo login); unconnected users
+        # have nothing to sync against.
+        events = await store.agenda.list()
+        usuals = await store.usuals.list()
+        logger.info(
+            "profile.refresh.short_circuit",
+            user=store.user_id,
+            reason="demo" if demo_mode else "no_google_tokens",
+            events=len(events),
+            usuals=len(usuals),
+        )
+        return {
+            "people_added": 0,
+            "usuals_added": 0,
+            "usuals_removed": 0,
+            "up_to_date": True,
+            "events_scanned": len(events),
+            "usuals_total": len(usuals),
+            # Signal to the frontend so it can render the right note
+            # without probing for tokens itself.
+            "reason": "demo" if demo_mode else "no_google_tokens",
+        }
 
     # Step 1: pull fresh data from Google. The button labeled "Re-read
     # your calendar" was previously misleading - it only re-analyzed the

@@ -162,9 +162,19 @@ export default function ProfilePage() {
         usuals_removed: number;
         up_to_date?: boolean;
         refresh_error?: string | null;
+        // Signals a short-circuit reason from the API so we can show a
+        // friendlier note than a generic "you're up to date".
+        reason?: "demo" | "no_google_tokens" | null;
       }>("/v1/profile/refresh", {});
       await load();
-      if (result.refresh_error) {
+      if (result.reason === "demo") {
+        // Demo mode has no Google connection to re-read against; the
+        // ICS-seeded state is static, so this button is effectively
+        // a no-op. Say so plainly rather than pretending we ran a sync.
+        setStatus("Demo data is seeded and static \u2014 nothing to re-read.");
+      } else if (result.reason === "no_google_tokens") {
+        setStatus("Connect Google on Sources to enable calendar re-reads.");
+      } else if (result.refresh_error) {
         setStatus(`Couldn't reach Google: ${result.refresh_error}`);
       } else if (result.up_to_date) {
         setStatus("You're up to date.");

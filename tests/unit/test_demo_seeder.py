@@ -456,6 +456,41 @@ def test_hear_my_day_falls_back_when_no_llm_configured(monkeypatch) -> None:  # 
     assert "quiet" not in summary.lower() or "things today" in summary.lower()
 
 
+def test_profile_refresh_short_circuits_for_demo_user(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Regression: clicking "Re-read calendar" on a demo user used to
+    fall through to enrich_agenda + role_run + compute_usuals even
+    when refresh_agenda immediately raised no_google_tokens. role_run
+    unconditionally hits Vertex, so under quota or Vertex latency the
+    endpoint took 20+s and eventually 500'd.
+
+    The short-circuit returns "up_to_date": True with a reason string
+    the frontend uses to render "Demo data is seeded and static -
+    nothing to re-read." Sub-100ms, zero LLM calls, no 500.
+    """
+    # Kill LLM creds so if anything accidentally tries to call Vertex
+    # we'd get a hard error instead of a slow success. This proves
+    # the short-circuit really doesn't invoke role_run.
+    monkeypatch.setenv("GOOGLE_API_KEY", "")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "")
+    client = _make_client("local", monkeypatch)
+
+    login = client.post("/v1/auth/demo", json={"scenario": "solo"})
+    assert login.status_code == 200
+
+    r = client.post("/v1/profile/refresh")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["up_to_date"] is True
+    assert body["reason"] == "demo"
+    assert body["people_added"] == 0
+    assert body["usuals_added"] == 0
+    # Seeded solo scenario has 100+ events and a curated cast; make
+    # sure the response still surfaces the current-state counts so
+    # the sidebar has something to render.
+    assert body["events_scanned"] > 0
+    assert body["usuals_total"] > 0
+
+
 def test_email_send_short_circuits_for_demo_user(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """A demo user pressing Send should get a preview response, not
     a 502. The pending draft token must still get cleared."""

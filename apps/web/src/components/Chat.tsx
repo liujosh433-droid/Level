@@ -33,6 +33,10 @@ type Message = {
   path?: string;
   intent?: string;
   needsClarify?: boolean;
+  // Priority texts this reply surfaced. Rendered in teal within the
+  // bubble so caregivers can see at a glance which stated priorities
+  // Level thinks are relevant to what they just asked.
+  priorityHits?: string[];
   streaming?: boolean;
   feedback?: {
     agent: string;
@@ -117,6 +121,44 @@ function hintsForMessage(text: string, fallback: string[]): string[] {
   if (looksLikeEmailRequest(text)) return EMAIL_DRAFTING_HINTS;
   if (looksLikeBookingRequest(text)) return BOOKING_HINTS;
   return fallback;
+}
+
+// Regex-quote a string so it can be dropped into `new RegExp(...)`
+// without accidentally activating metacharacters. Priority text is
+// user-controlled ("elder care with mom takes precedent (over work)")
+// so parens/brackets/etc. are realistic.
+function escapeForRegex(input: string): string {
+  return input.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// Render a reply where any of the given priority strings should be
+// highlighted in teal. We match case-insensitively but preserve the
+// original casing that appears in the reply. Priorities can appear
+// inside curly quotes (\u201c...\u201d) so we strip those before match.
+function renderReplyWithHighlights(
+  text: string,
+  highlights: readonly string[] | undefined,
+): ReactNode {
+  if (!highlights || highlights.length === 0) return text;
+  // Sort by length descending so longer priorities match before their
+  // substrings (e.g. "elder care with mom" before "elder care").
+  const patterns = [...highlights]
+    .filter((h) => h && h.trim().length > 0)
+    .sort((a, b) => b.length - a.length)
+    .map(escapeForRegex);
+  if (patterns.length === 0) return text;
+  const combined = new RegExp(`(${patterns.join("|")})`, "gi");
+  const chunks = text.split(combined);
+  return chunks.map((chunk, i) => {
+    if (i % 2 === 1) {
+      return (
+        <span key={`p-${i}`} className={styles.priorityHit}>
+          {chunk}
+        </span>
+      );
+    }
+    return chunk;
+  });
 }
 
 const MicIcon = ({ className }: { className?: string }) => (
@@ -225,6 +267,9 @@ type ChatResult = {
   reminder_id?: string;
   person_id?: string;
   event_id?: string;
+  // Set when the server surfaced remembered priorities in this reply
+  // (e.g. booking-conflict confirm bubble). Rendered in teal.
+  priority_hits?: string[];
 };
 
 function EmailDraftCard({
@@ -572,6 +617,7 @@ export default function Chat({
                 path: result.path,
                 intent: result.intent,
                 needsClarify: Boolean(result.needs_clarification),
+                priorityHits: result.priority_hits?.length ? result.priority_hits : undefined,
                 feedback,
               }
             : m,
@@ -804,7 +850,7 @@ export default function Chat({
                 } ${m.emailDraft ? styles.bubbleWide : ""}`}
               >
                 <p>
-                  {m.text}
+                  {renderReplyWithHighlights(m.text, m.priorityHits)}
                   {m.streaming ? <span className={styles.streamCaret} aria-hidden="true" /> : null}
                 </p>
                 {m.needsClarify ? (

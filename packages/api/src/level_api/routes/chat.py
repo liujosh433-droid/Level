@@ -2508,10 +2508,21 @@ async def _propose_cal_change(
         else:
             bullets = "\n".join(f"\u2022 {c}" for c in shown)
             parts.append(f"That overlaps:\n{bullets}")
-    if priority_notes:
-        shown = priority_notes[:2]
-        quoted = "\n".join(f"\u201c{n}\u201d" for n in shown)
-        parts.append(f"You also said:\n{quoted}")
+    priority_hits_shown = priority_notes[:2]
+    if priority_hits_shown:
+        # Smoother phrasing than the older "You also said:" block, and
+        # the priority text is echoed inline so the frontend can pick
+        # it out and color it (see ChatResult.priority_hits below).
+        if len(priority_hits_shown) == 1:
+            parts.append(
+                "This would conflict with a priority you set: "
+                f"\u201c{priority_hits_shown[0]}\u201d."
+            )
+        else:
+            joined = " and ".join(f"\u201c{n}\u201d" for n in priority_hits_shown)
+            parts.append(
+                f"This would conflict with priorities you set: {joined}."
+            )
     parts.append(ask)
     reply = "\n\n".join(parts)
 
@@ -2530,6 +2541,10 @@ async def _propose_cal_change(
         "intent": "confirm_cal",
         "needs_confirm": True,
         "pending": pending.model_dump(),
+        # Top-level `priority_hits` so the frontend can visually
+        # distinguish the exact priority text (teal chip / highlight)
+        # instead of forcing users to re-read the whole reply.
+        "priority_hits": priority_hits_shown,
     }
 
 

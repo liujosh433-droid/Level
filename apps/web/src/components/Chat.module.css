@@ -445,6 +445,27 @@
   text-transform: uppercase;
 }
 
+/*
+ * Inline highlight for priority text surfaced in a reply. When the
+ * server flags "this would conflict with a priority you set: X" the
+ * frontend re-parses the reply and wraps X in this span so the
+ * caregiver's eye lands on the priority immediately without having
+ * to reread the whole bubble.
+ *
+ * We use the existing teal signal token so this ties into the same
+ * accent palette as clarify chips + feedback acks (visual coherence
+ * over spinning up a fresh color).
+ */
+.priorityHit {
+  color: var(--signal-deep);
+  font-weight: 600;
+  background: color-mix(in srgb, var(--signal-soft) 55%, transparent);
+  border-radius: 4px;
+  padding: 0.05rem 0.28rem;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
 @keyframes caretBlink {
   from { opacity: 1; }
   to { opacity: 0; }

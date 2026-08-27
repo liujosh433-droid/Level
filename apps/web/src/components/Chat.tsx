@@ -736,8 +736,18 @@ export default function Chat({
     </button>
   );
 
-  const anyStreaming = messages.some((m) => m.streaming);
-  const showTypingIndicator = busy && !anyStreaming;
+  // A streaming placeholder that hasn't received tokens yet should
+  // render AS the typing bubble (dots + intent hint), not as an
+  // empty gray bubble with a caret. That was the "silent empty
+  // bubble" pre-fix: we always pushed a pending msg on send, its
+  // streaming=true made `anyStreaming` true, and the standalone
+  // typing indicator suppressed itself in favor of the empty msg.
+  const isEmptyStreaming = (m: Message): boolean =>
+    m.role === "assistant" && Boolean(m.streaming) && !m.text.trim();
+  const anyStreamingWithText = messages.some(
+    (m) => m.streaming && m.text.trim().length > 0,
+  );
+  const showTrailingTypingIndicator = busy && !messages.some(isEmptyStreaming) && !anyStreamingWithText;
 
   return (
     <section className={styles.panel} aria-label={title}>
@@ -761,51 +771,77 @@ export default function Chat({
             </p>
           ) : null}
 
-          {messages.map((m) => (
-            <div
-              key={m.id}
-              className={`${styles.bubble} ${
-                m.role === "user" ? styles.bubbleUser : styles.bubbleLevel
-              } ${m.emailDraft ? styles.bubbleWide : ""}`}
-            >
-              <p>
-                {m.text}
-                {m.streaming ? <span className={styles.streamCaret} aria-hidden="true" /> : null}
-              </p>
-              {m.needsClarify ? (
-                <span className={styles.clarifyChip}>Level is asking</span>
-              ) : null}
-              {m.emailDraft ? (
-                <EmailDraftCard
-                  draft={m.emailDraft}
-                  sent={Boolean(m.emailSent)}
-                  onSent={() => {
-                    const to = m.emailDraft?.contact_name ?? "them";
-                    const addr = m.emailDraft?.to;
-                    setMessages((prev) => [
-                      ...prev.map((row) =>
-                        row.id === m.id ? { ...row, emailSent: true } : row,
-                      ),
-                      {
-                        id: nextId("a"),
-                        role: "assistant",
-                        text: addr ? `Sent to ${to} (${addr}).` : `Sent to ${to}.`,
-                      },
-                    ]);
-                    onAfterReply?.();
-                  }}
-                />
-              ) : null}
-              {m.role === "assistant" && m.feedback && !m.streaming ? (
-                <FeedbackChips
-                  target={m.feedback}
-                  onSubmit={(verdict) => submitFeedback(m.id, verdict)}
-                />
-              ) : null}
-            </div>
-          ))}
+          {messages.map((m) => {
+            // Empty streaming placeholder: render as typing bubble
+            // with the current intent hint. This is the only place
+            // that renders while we're still waiting on first tokens
+            // - previously it was a blank bubble, which read as a
+            // stall.
+            if (isEmptyStreaming(m)) {
+              const hint = statusLine ?? "Working on it\u2026";
+              return (
+                <div
+                  key={m.id}
+                  className={`${styles.bubble} ${styles.bubbleLevel} ${styles.bubbleTyping}`}
+                  aria-label={hint.replace(/\u2026$/, "")}
+                  aria-live="polite"
+                  role="status"
+                >
+                  <span className={styles.waitingDots} aria-hidden="true">
+                    <i />
+                    <i />
+                    <i />
+                  </span>
+                  <p className={styles.waitingText}>{hint}</p>
+                </div>
+              );
+            }
+            return (
+              <div
+                key={m.id}
+                className={`${styles.bubble} ${
+                  m.role === "user" ? styles.bubbleUser : styles.bubbleLevel
+                } ${m.emailDraft ? styles.bubbleWide : ""}`}
+              >
+                <p>
+                  {m.text}
+                  {m.streaming ? <span className={styles.streamCaret} aria-hidden="true" /> : null}
+                </p>
+                {m.needsClarify ? (
+                  <span className={styles.clarifyChip}>Level is asking</span>
+                ) : null}
+                {m.emailDraft ? (
+                  <EmailDraftCard
+                    draft={m.emailDraft}
+                    sent={Boolean(m.emailSent)}
+                    onSent={() => {
+                      const to = m.emailDraft?.contact_name ?? "them";
+                      const addr = m.emailDraft?.to;
+                      setMessages((prev) => [
+                        ...prev.map((row) =>
+                          row.id === m.id ? { ...row, emailSent: true } : row,
+                        ),
+                        {
+                          id: nextId("a"),
+                          role: "assistant",
+                          text: addr ? `Sent to ${to} (${addr}).` : `Sent to ${to}.`,
+                        },
+                      ]);
+                      onAfterReply?.();
+                    }}
+                  />
+                ) : null}
+                {m.role === "assistant" && m.feedback && !m.streaming ? (
+                  <FeedbackChips
+                    target={m.feedback}
+                    onSubmit={(verdict) => submitFeedback(m.id, verdict)}
+                  />
+                ) : null}
+              </div>
+            );
+          })}
 
-          {showTypingIndicator && statusLine ? (
+          {showTrailingTypingIndicator && statusLine ? (
             <div
               className={`${styles.bubble} ${styles.bubbleLevel} ${styles.bubbleTyping}`}
               aria-label={statusLine.replace(/\u2026$/, "")}

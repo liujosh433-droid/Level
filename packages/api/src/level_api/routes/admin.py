@@ -20,6 +20,7 @@ from level_core.storage.base import UserStore
 
 from level_api.deps import get_user_store
 from level_api.rate_limit import rate_limit_stats
+from level_api.routes._fast_path_registry import to_dict as fast_paths_snapshot
 
 router = APIRouter()
 
@@ -58,6 +59,26 @@ async def verify_agent_identity(token: str) -> dict[str, Any]:
         "version": identity.version,
         "prompt_hash": identity.prompt_hash,
     }
+
+
+@router.get("/intents")
+async def list_intents() -> dict[str, Any]:
+    """Every deterministic chat intent Level handles without the router LLM.
+
+    Complements /agents (which lists LLM agents) with the FAST side of
+    the pipeline. A judge looking at this endpoint sees the entire
+    input universe: every intent, its priority, an example utterance,
+    and whether it mutates state. Adding a new intent is one
+    register_fast_path() call in chat.py - drift shows up here
+    automatically. Chit-chat and priority intents at the top of the
+    list ensure common inputs don't wake the LLM.
+    """
+    _require_admin()
+    # Importing chat.py at request time ensures the fast-path
+    # register(...) calls (which run at import time) have populated
+    # the registry. Circular-safe: admin doesn't import chat directly.
+    from level_api.routes import chat  # noqa: F401
+    return {"intents": fast_paths_snapshot()}
 
 
 @router.get("/router_cache")

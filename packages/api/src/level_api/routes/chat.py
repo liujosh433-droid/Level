@@ -80,6 +80,11 @@ from level_api.routes._chat_context import (
     ctx_tz,
     ctx_usuals,
 )
+from level_api.routes._fast_path_registry import (
+    FastPath,
+    all_paths as all_fast_paths,
+    register as register_fast_path,
+)
 from level_api.routes.email import register_pending_draft
 
 router = APIRouter()
@@ -216,67 +221,24 @@ async def _handle_message(
 async def _dispatch_message(
     store: UserStore, message: str, history: list[dict[str, str]]
 ) -> dict[str, Any]:
-    # Confirm-flow gate: if the user has a pending booking (from a previous
-    # turn where we flagged conflicts / priorities) and this turn is a
-    # simple yes/no, act on it before doing anything else.
-    pending_response = await _handle_pending_confirmation(store, message)
-    if pending_response is not None:
-        return pending_response
-
-    pending_email = await _handle_pending_email_pick(store, message)
-    if pending_email is not None:
-        return pending_email
-
-    # Fast path: pure chit-chat ("hi", "how are u", "what can you do")
-    # gets a warm regex-driven reply in <10ms with no LLM. Before this,
-    # "how are u" took ~30s and returned a canned "Noted..." line
-    # because the router had to classify then fall through to the
-    # generic branch. Keep patterns tight so real intents fall through.
-    fast_chit = await _try_fast_chit_chat(store, message)
-    if fast_chit is not None:
-        return fast_chit
-
-    # Fast path: empathy statements ("I'm tired", "rough week"). Warm
-    # reply, no LLM. Router doesn't have a great handler for these
-    # anyway — it just falls through to the general branch.
-    fast_empathy = await _try_fast_empathy(store, message)
-    if fast_empathy is not None:
-        return fast_empathy
-
-    # Fast path: read-only agenda questions ("what's on today", "am I
-    # free tomorrow", "show my schedule"). Data already lives in
-    # store.agenda — no LLM, no Google roundtrip. Sub-second answers
-    # for one of the most common chat inputs.
-    fast_agenda = await _try_fast_agenda_lookup(store, message)
-    if fast_agenda is not None:
-        return fast_agenda
-
-    # Fast path: explicit priority statements ("prioritize X over Y") skip
-    # the router + PriorityAgent so they still work when Gemini quota is
-    # exhausted — and they're ~instant either way.
-    fast_prio = await _try_fast_priority(store, message)
-    if fast_prio is not None:
-        return fast_prio
-
-    fast_person = await _try_fast_person(store, message)
-    if fast_person is not None:
-        return fast_person
-
-    # Fast path: "remind me to bring a charger" skips ReminderAgent.
-    fast_rem = await _try_fast_reminder(store, message, history)
-    if fast_rem is not None:
-        return fast_rem
-
-    # Fast path: "email Nova's teacher…" resolves contacts without Gemini.
-    fast_email = await _try_fast_email(store, message, history)
-    if fast_email is not None:
-        return fast_email
-
-    # Fast path: create / move / delete when the user named a day + time.
-    # Incomplete calendar asks get a clarify reply instead of an LLM call.
-    fast_cal = await _try_fast_calendar(store, message)
-    if fast_cal is not None:
-        return fast_cal
+    # Fast-path pipeline. Order comes from the fast-path registry
+    # (see _fast_path_registry.py + the register_fast_path(...) calls
+    # below in this file). Every intent Level handles without an LLM
+    # is discoverable via /v1/admin/intents. Adding a new intent is
+    # one register() call + one handler function.
+    for fp in all_fast_paths():
+        # Handlers take (store, message, history). We keep the
+        # 3-arg convention even when a specific handler doesn't
+        # need history so the registry entry stays uniform.
+        result = await fp.handler(store, message, history)
+        if result is not None:
+            logger.info(
+                "chat.fast_path_hit",
+                user=store.user_id,
+                intent=fp.name,
+                priority=fp.priority,
+            )
+            return result
 
     decision = await router_run(store=store, user_message=message, history=history)
     if not decision.value:
@@ -2853,3 +2815,185 @@ async def _write_reply(store: UserStore, text: str) -> None:
         created_at=datetime.utcnow(),
     )
     await store.chat_turns.upsert(reply)
+
+
+# ---------------------------------------------------------------------------
+# Fast-path registry. Every deterministic intent Level handles WITHOUT
+# calling the router LLM is declared here in one place.
+#
+# The dispatcher (_dispatch_message) iterates this list in priority order.
+# Adding a new intent = one register_fast_path() call + a handler
+# function. /v1/admin/intents surfaces the same data so the input
+# universe is discoverable at runtime.
+# ---------------------------------------------------------------------------
+
+
+async def _fp_pending_confirmation(
+    store: UserStore, message: str, history: list[dict[str, str]]
+) -> dict[str, Any] | None:
+    return await _handle_pending_confirmation(store, message)
+
+
+async def _fp_pending_email_pick(
+    store: UserStore, message: str, history: list[dict[str, str]]
+) -> dict[str, Any] | None:
+    return await _handle_pending_email_pick(store, message)
+
+
+async def _fp_chit_chat(
+    store: UserStore, message: str, history: list[dict[str, str]]
+) -> dict[str, Any] | None:
+    return await _try_fast_chit_chat(store, message)
+
+
+async def _fp_empathy(
+    store: UserStore, message: str, history: list[dict[str, str]]
+) -> dict[str, Any] | None:
+    return await _try_fast_empathy(store, message)
+
+
+async def _fp_agenda_lookup(
+    store: UserStore, message: str, history: list[dict[str, str]]
+) -> dict[str, Any] | None:
+    return await _try_fast_agenda_lookup(store, message)
+
+
+async def _fp_priority(
+    store: UserStore, message: str, history: list[dict[str, str]]
+) -> dict[str, Any] | None:
+    return await _try_fast_priority(store, message)
+
+
+async def _fp_person(
+    store: UserStore, message: str, history: list[dict[str, str]]
+) -> dict[str, Any] | None:
+    return await _try_fast_person(store, message)
+
+
+async def _fp_calendar(
+    store: UserStore, message: str, history: list[dict[str, str]]
+) -> dict[str, Any] | None:
+    return await _try_fast_calendar(store, message)
+
+
+register_fast_path(
+    FastPath(
+        name="pending_confirmation",
+        handler=_fp_pending_confirmation,
+        priority=0,
+        description=(
+            "Yes/no reply to a booking we flagged in the previous turn"
+        ),
+        examples=("yes", "no", "confirm", "book it"),
+    )
+)
+register_fast_path(
+    FastPath(
+        name="pending_email_pick",
+        handler=_fp_pending_email_pick,
+        priority=1,
+        description=(
+            "User picks a contact from the disambiguation list we posted"
+        ),
+        examples=("Nova\u2019s teacher", "the first one", "1"),
+    )
+)
+register_fast_path(
+    FastPath(
+        name="chit_chat",
+        handler=_fp_chit_chat,
+        priority=10,
+        description="Greetings and self-questions (regex-driven, <10ms)",
+        examples=(
+            "hi",
+            "how are u",
+            "how are you?",
+            "who are you",
+            "what can you do",
+            "thanks",
+        ),
+    )
+)
+register_fast_path(
+    FastPath(
+        name="empathy",
+        handler=_fp_empathy,
+        priority=11,
+        description="Warm acknowledgement for tired/overwhelmed/rough-week statements",
+        examples=("I\u2019m tired", "rough week", "overwhelmed", "stressed out"),
+    )
+)
+register_fast_path(
+    FastPath(
+        name="agenda_lookup",
+        handler=_fp_agenda_lookup,
+        priority=12,
+        description="Read-only questions about today/week/'am I free' - formats cached agenda",
+        examples=(
+            "what\u2019s on today",
+            "am I free tomorrow",
+            "show my schedule",
+            "what\u2019s next",
+        ),
+    )
+)
+register_fast_path(
+    FastPath(
+        name="priority_statement",
+        handler=_fp_priority,
+        priority=20,
+        description="Save an explicit priority without a PriorityAgent call",
+        examples=(
+            "never miss Sunday physical therapy",
+            "prioritize sports over meetings",
+        ),
+        mutates_state=True,
+    )
+)
+register_fast_path(
+    FastPath(
+        name="person_intro",
+        handler=_fp_person,
+        priority=21,
+        description="Add or correct a person without a PersonEditAgent call",
+        examples=("Alex is my co-parent", "add Maya as my kid"),
+        mutates_state=True,
+    )
+)
+register_fast_path(
+    FastPath(
+        name="reminder_add",
+        handler=_try_fast_reminder,
+        priority=22,
+        description="Save a 'when X happens, remember Y' reminder without ReminderAgent",
+        examples=("remind me to bring the charger", "don\u2019t let me forget the field-trip form"),
+        mutates_state=True,
+    )
+)
+register_fast_path(
+    FastPath(
+        name="email_request",
+        handler=_try_fast_email,
+        priority=23,
+        description="Resolve email recipient + draft without EmailAgent for known contacts",
+        examples=("email Nova\u2019s teacher about the field trip",),
+        mutates_state=False,
+    )
+)
+register_fast_path(
+    FastPath(
+        name="calendar_crud",
+        handler=_fp_calendar,
+        priority=24,
+        description=(
+            "Create / move / delete / find-time when the user named a day + time"
+        ),
+        examples=(
+            "book Tuesday 2-3pm dentist",
+            "move Thursday 3pm to Friday",
+            "cancel Friday drop-off",
+            "find lunch this week",
+        ),
+        mutates_state=True,
+    )
+)

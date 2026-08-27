@@ -47,13 +47,26 @@ Behavioral guardrails in demo mode:
   a friendly "connect Google to actually book" message; the seeded
   agenda is read-only.
 
-**Variable port?** `make dev` binds `:8080` (API) and `:3000` (web). If
-you don't have `:8080` available — Cursor grabs it by default, and
-plenty of other dev tools do too — flip a single env var:
+**Variable port?** `make dev` binds `:8080` (API) and `:3000` (web).
+Both are common dev-tool ports — the **Cursor IDE holds both by
+default** for its own agent-bridge, and other dev servers routinely
+grab them too. If you're on Cursor (or any of them collide), flip
+whichever port(s) you need:
 
 ```bash
+# Cursor is on 8080 only:
 LEVEL_API_PORT=8081 make dev
+
+# Cursor is on both 8080 AND 3000 (common):
+LEVEL_API_PORT=8081 LEVEL_WEB_PORT=3100 make dev
 ```
+
+Silent-failure warning for the web port: Next.js's "Ready in Xms"
+message can print even when Cursor is squatting on `127.0.0.1:3000`
+— Next successfully binds the IPv6 wildcard, but the browser
+connects via the IPv4 loopback that Cursor has, gets `ERR_CONNECTION_RESET`,
+and you're left staring at a "Ready" server that isn't. The fix is
+always to move the web port off 3000.
 
 The Next.js proxy and the OAuth redirect URI both follow
 `LEVEL_API_PORT` automatically — no `.env` edits, no code changes.

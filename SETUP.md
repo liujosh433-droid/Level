@@ -17,9 +17,21 @@ Prereqs: `node >= 20`, `python >= 3.12`. `uv` is bundled at `.tools/uv`.
 3. `make dev`
 4. Open `http://127.0.0.1:3000`, click **Connect Google**.
 
-Don't want to connect a real calendar? `make demo-seed` loads an Alpha/Beta
-family with 4 weeks of fake events, usuals, priorities, and a reminder.
-Then visit `/today` to see the seeded UI.
+Want a richer calendar to demo against? Import one of the fixture
+calendars in [`example-data/`](example-data) into a scratch Google
+account and connect that account:
+
+- `example-data/caregiver-month.ics` — two-parent family with a
+  co-parent. Two usuals are missing in the current demo week so the
+  proactive-cards job has something to surface immediately.
+- `example-data/caregiver-month-solo.ics` — single caregiver, same
+  kids and same elder-care parent, no co-parent.
+
+To (re)generate either file:
+
+```bash
+uv run --package level-jobs python -m level_jobs.make_caregiver_ics --scenario both
+```
 
 ---
 

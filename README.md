@@ -83,13 +83,19 @@ make dev
 
 Open `http://127.0.0.1:3000`, click **Connect Google**, and Level will
 start syncing your calendar. `LEVEL_ENV=local` writes state to
-`.level/local_store/` — no GCP needed for demo.
+`.level/local_store/` — no GCP-side state needed.
 
-Want to poke around without connecting a real calendar?
+Want a rich calendar without hand-populating one? Import one of the
+fixture calendars in [`example-data/`](example-data) into a scratch
+Google account, then connect that account:
 
-```bash
-make demo-seed   # Alpha/Beta family with 4 weeks of fake events + usuals
-```
+- [`example-data/caregiver-month.ics`](example-data/caregiver-month.ics)
+  — two-parent family (Josh + Alex + Nova + Theo + Helen). Two usuals
+  are engineered to be missing in the current demo week so the
+  proactive-cards job has something to surface.
+- [`example-data/caregiver-month-solo.ics`](example-data/caregiver-month-solo.ics)
+  — single caregiver, same kids and same elder-care parent, no
+  co-parent anywhere.
 
 ## Environment knobs
 

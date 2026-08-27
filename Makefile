@@ -1,6 +1,6 @@
 .PHONY: help install dev api web test test-unit test-security test-e2e test-e2e-web \
         lint format tf-init tf-plan tf-apply deploy-api deploy-jobs \
-        demo-seed demo-reset diagram clean
+        diagram clean
 
 UV ?= .tools/uv
 PY_DIRS := packages tests
@@ -17,8 +17,6 @@ help:
 	@echo "  make lint            ruff + mypy"
 	@echo "  make format          ruff format"
 	@echo "  make diagram         render docs/architecture.png from .mmd"
-	@echo "  make demo-seed       populate .level with Alpha/Beta demo data"
-	@echo "  make demo-reset      wipe demo user + ai_audit for fresh recording"
 	@echo "  make tf-init/plan/apply    terraform in infra/terraform"
 	@echo "  make deploy-api      build + deploy FastAPI to Cloud Run"
 	@echo "  make deploy-jobs     build + deploy nightly Cloud Run Job"
@@ -62,13 +60,6 @@ format:
 diagram:
 	@which mmdc >/dev/null || npm i -g @mermaid-js/mermaid-cli
 	mmdc -i docs/architecture.mmd -o docs/architecture.png -b transparent
-
-demo-seed:
-	LEVEL_ENV=local $(UV) run --package level-jobs python -m level_jobs.demo_seed
-
-demo-reset:
-	rm -rf .level/local_store/demo-user
-	@echo "Demo user wiped."
 
 tf-init:
 	cd infra/terraform && terraform init

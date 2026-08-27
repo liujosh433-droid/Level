@@ -170,8 +170,10 @@ enforces (in order):
   renders inline on GitHub; export to PNG with
   `npx @mermaid-js/mermaid-cli -i docs/architecture.mmd -o docs/architecture.png`.
 - **Reproducible setup**: [SETUP.md](SETUP.md) has both local and
-  cloud paths; `make demo-seed` gives judges a populated UI without a
-  real calendar.
+  cloud paths; two ready-to-import calendars in
+  [`example-data/`](example-data) (two-parent family + solo
+  caregiver) give judges a fully-populated agenda in one click
+  instead of hand-crafting events.
 - **Live proof of action**:
   [/admin/traces](apps/web/src/app/(dashboard)/admin/traces/page.tsx)
   is a live agent trace **waterfall grouped by trace_id**, refreshing

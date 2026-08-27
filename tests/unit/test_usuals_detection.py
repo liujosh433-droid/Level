@@ -136,6 +136,10 @@ def test_work_today_covers_the_self_work_usual() -> None:
         hour_band=HourBand.MORNING,
         activity_type=ActivityType.WORK,
         display_summary="Work",
+        # Weekly pattern — clears the _is_regular_weekly gate that
+        # keeps sub-weekly (biweekly, monthly) usuals out of the
+        # missing lists.
+        confidence=1.0,
         status=UsualStatus.KEPT,
     )
     todays_work = CachedEvent(
@@ -183,6 +187,7 @@ def test_missing_usual_when_no_matching_event_today() -> None:
         hour_band=HourBand.AFTERNOON,
         activity_type=ActivityType.SCHOOL_PICKUP,
         display_summary="Alpha pickup",
+        confidence=1.0,
         status=UsualStatus.KEPT,
     )
     missing = missing_usuals_today(usuals=[usual], todays_events=[])
@@ -200,6 +205,7 @@ def test_missing_this_week_warns_before_the_day() -> None:
         hour_band=HourBand.EARLY_MORNING,
         activity_type=ActivityType.SCHOOL_DROPOFF,
         display_summary="Nova + Theo dropoff",
+        confidence=1.0,
         status=UsualStatus.KEPT,
     )
     missing = missing_usuals_this_week(usuals=[usual], week_events=[], as_of_date=thursday)
@@ -219,6 +225,51 @@ def test_missing_this_week_warns_before_the_day() -> None:
     assert covered == []
 
 
+def test_biweekly_usual_does_not_flag_missing_on_off_week() -> None:
+    """A Saturday-morning house-reset that only fires every other Sat
+    should NOT show up as "missing" on its scheduled off-week.
+
+    Regression: solo-house-reset in the demo ICS is interval=2. From
+    2 past occurrences over a 4-week observation window it forms a
+    (self, SAT, MORNING, PERSONAL) usual with confidence ~0.5, which
+    is indistinguishable from a weekly usual with heavy skipping.
+    On the biweekly's off-week the frontend was showing "Josh
+    Saturday 9-10am missing" - noise, not signal. The
+    _is_regular_weekly gate keeps sub-weekly patterns out of the
+    missing lists while leaving the usual itself in storage (still
+    visible on the profile page).
+    """
+    thursday = datetime(2026, 8, 20).date()
+    biweekly = Usual(
+        usual_id=Usual.compose_id("p_self", Weekday.SAT, HourBand.MORNING),
+        person_id="p_self",
+        weekday=Weekday.SAT,
+        hour_band=HourBand.MORNING,
+        activity_type=ActivityType.PERSONAL,
+        display_summary="House reset / laundry",
+        # 2 past occurrences over 4 observed weeks. UsualCandidate
+        # would set 0.5 here; the persisted usual carries the same.
+        confidence=0.5,
+        status=UsualStatus.KEPT,
+    )
+    weekly = Usual(
+        usual_id=Usual.compose_id("p_nova", Weekday.SAT, HourBand.MORNING),
+        person_id="p_nova",
+        weekday=Weekday.SAT,
+        hour_band=HourBand.MORNING,
+        activity_type=ActivityType.SPORTS_OTHER,
+        display_summary="Nova ballet",
+        confidence=0.75,  # 3/4 past occurrences - one skip
+        status=UsualStatus.KEPT,
+    )
+    missing = missing_usuals_this_week(
+        usuals=[biweekly, weekly], week_events=[], as_of_date=thursday
+    )
+    # Only the weekly usual survives. The biweekly is silenced on
+    # its off-week regardless of coverage.
+    assert [m.category for m in missing] == [Category.SPORTS]
+
+
 def test_missing_this_week_carries_concrete_title_hint() -> None:
     """The nudge label ("Grocery run") should come from the source
     usuals, not the coarse category ("Personal").
@@ -236,6 +287,7 @@ def test_missing_this_week_carries_concrete_title_hint() -> None:
         hour_band=HourBand.AFTERNOON,
         activity_type=ActivityType.PERSONAL,
         display_summary="Grocery run",
+        confidence=1.0,
         status=UsualStatus.KEPT,
     )
     missing = missing_usuals_this_week(usuals=[grocery], week_events=[], as_of_date=thursday)
@@ -254,6 +306,7 @@ def test_title_hint_is_dropped_when_it_equals_the_category() -> None:
         hour_band=HourBand.MORNING,
         activity_type=ActivityType.WORK,
         display_summary="Work",
+        confidence=1.0,
         status=UsualStatus.KEPT,
     )
     missing = missing_usuals_this_week(usuals=[work], week_events=[], as_of_date=thursday)
@@ -270,6 +323,7 @@ def test_missing_this_week_skips_days_that_already_passed() -> None:
         hour_band=HourBand.EARLY_MORNING,
         activity_type=ActivityType.SCHOOL_DROPOFF,
         display_summary="Nova + Theo dropoff",
+        confidence=1.0,
         status=UsualStatus.KEPT,
     )
     friday = Usual(
@@ -279,6 +333,7 @@ def test_missing_this_week_skips_days_that_already_passed() -> None:
         hour_band=HourBand.EARLY_MORNING,
         activity_type=ActivityType.SCHOOL_DROPOFF,
         display_summary="Nova + Theo dropoff",
+        confidence=1.0,
         status=UsualStatus.KEPT,
     )
     missing = missing_usuals_this_week(
@@ -297,6 +352,7 @@ def test_missing_this_week_ignores_events_outside_this_week() -> None:
         hour_band=HourBand.EARLY_MORNING,
         activity_type=ActivityType.SCHOOL_DROPOFF,
         display_summary="Nova + Theo dropoff",
+        confidence=1.0,
         status=UsualStatus.KEPT,
     )
     next_friday = _event(
@@ -361,6 +417,7 @@ def test_missing_shared_dropoff_lists_both_kids() -> None:
         activity_type=ActivityType.SCHOOL_DROPOFF,
         display_summary="Nova + Theo dropoff",
         source_event_uids=[source.event_id],
+        confidence=1.0,
         status=UsualStatus.KEPT,
     )
     missing = missing_usuals_this_week(

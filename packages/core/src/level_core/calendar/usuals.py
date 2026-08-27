@@ -173,10 +173,41 @@ def missing_usuals_today(
             continue
         if u.weekday != today_wd:
             continue
+        if not _is_regular_weekly(u):
+            continue
         if (u.person_id, u.hour_band) in covered:
             continue
         out.append(MissingUsual(usual=u, expected_hour_band=u.hour_band))
     return out
+
+
+# Confidence floor for "flag as missing when absent".
+#
+# UsualCandidate.confidence = min(1.0, occurrences / max(3, weeks_observed))
+# so over a typical 4-week observation window:
+#
+#   pattern                       occurrences   confidence
+#   ---------------------------   -----------   ----------
+#   weekly, no skips (4/4)              4          1.00
+#   weekly, one skip  (3/4)             3          0.75
+#   weekly, just started (2/3)          2          0.67
+#   biweekly           (2/4)            2          0.50
+#   sparse / monthly   (1..2/4)       1-2       <= 0.50
+#
+# 0.65 cleanly separates weekly-ish (>= 0.67) from biweekly-ish
+# (<= 0.50). The bug this closes: `solo-house-reset` (every-other-
+# Saturday, 9-10am) formed a Josh Saturday morning usual from just
+# 2 past occurrences and got flagged missing on its scheduled OFF
+# week - a demo-day annoyance and also a real-user footgun for any
+# biweekly commitment. Sub-weekly usuals still exist in storage (the
+# profile page still shows them under "here are your usuals"); they
+# just don't drive nudges.
+_MISSING_CONFIDENCE_FLOOR = 0.65
+
+
+def _is_regular_weekly(u: Usual) -> bool:
+    """Only nag when we're reasonably sure the usual actually is weekly."""
+    return u.confidence >= _MISSING_CONFIDENCE_FLOOR
 
 
 @dataclass
@@ -288,6 +319,11 @@ def missing_usuals_this_week(
         if u.status not in ("kept", "proposed"):
             continue
         if int(u.weekday) < today_wd:
+            continue
+        # See _is_regular_weekly. Biweekly / monthly usuals still
+        # exist in storage but shouldn't trigger nudges on their
+        # scheduled off-weeks.
+        if not _is_regular_weekly(u):
             continue
         cat = activity_category(u.activity_type)
         if cat == Category.OTHER:

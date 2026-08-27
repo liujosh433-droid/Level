@@ -146,17 +146,52 @@ differences are:
   cost cap (`$2`) still applies to each demo slot, so worst case is
   `$2 × 6 = $12/day` even under adversarial load.
 
-To flip cloud demo on for your own Cloud Run service, add to the
-service env:
+### Enabling cloud demo on your own deployment
+
+**Important:** Cloud Run reads environment variables from the
+service configuration, not from any `.env` file baked into the
+image. Editing `.env` and redeploying will not flip the flag.
+Choose whichever path matches how you deploy:
+
+**One-shot with `gcloud` (fastest):**
 
 ```bash
-LEVEL_DEMO_IN_CLOUD=true
-LEVEL_DEMO_SLOTS_PER_SCENARIO=3      # optional (default)
-LEVEL_DEMO_PER_IP_PER_HOUR=10        # optional (default)
+gcloud run services update level-api \
+  --region=us-central1 \
+  --update-env-vars=LEVEL_DEMO_IN_CLOUD=true
 ```
 
-Confirm by hitting `GET /v1/config/features` — `demo.available`
-should be `true` and `demo.scenarios` should list both personas.
+Cloud Run restarts the container with the new env — no image
+rebuild needed. Add `LEVEL_DEMO_SLOTS_PER_SCENARIO` and
+`LEVEL_DEMO_PER_IP_PER_HOUR` in the same call if you want to
+override the defaults.
+
+**Persistent via Terraform:**
+
+Set `demo_in_cloud = true` in `infra/terraform/terraform.tfvars`
+and run `make tf-apply`. The variable is already wired into
+[`infra/terraform/cloud_run.tf`](infra/terraform/cloud_run.tf)
+along with the two optional pool + rate-limit knobs
+(`demo_slots_per_scenario`, `demo_per_ip_per_hour`). This is the
+recommended path because it survives future `terraform apply`
+runs — a `gcloud`-only change would be reverted the next time
+Terraform reconciles the service.
+
+**Persistent via Console:**
+
+Cloud Run → your service → **Edit & Deploy New Revision** →
+**Variables & Secrets** → add `LEVEL_DEMO_IN_CLOUD=true`.
+
+**Verify:**
+
+```bash
+curl https://<your-cloud-run-url>/v1/config/features
+# Look for: "demo": {"available": true, "scenarios": [...]}
+```
+
+If you already had the site open, hard-refresh (Cmd/Ctrl-Shift-R)
+to bust the cached `/v1/config/features` response — otherwise the
+frontend still thinks demo is off.
 
 ---
 

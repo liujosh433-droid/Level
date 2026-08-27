@@ -5,3 +5,12 @@ public_api_url             = "https://api.level.example.com"
 session_secret             = "generate-a-long-random-string"
 google_oauth_client_id     = "your-oauth-client-id.apps.googleusercontent.com"
 google_oauth_client_secret = "your-oauth-client-secret"
+
+# Enable the hosted "Try demo" button so judges can hit the deployed URL
+# and land in a synthetic user's world with no OAuth or key on their side.
+# See SETUP.md #hosted-demo-in-cloud for the safety envelope (bounded user
+# pool, per-IP rate limit, per-user cost cap). Set to false in production
+# deployments serving real users.
+demo_in_cloud              = true
+# demo_slots_per_scenario   = 3   # total demo users = value * 2 scenarios
+# demo_per_ip_per_hour      = 10

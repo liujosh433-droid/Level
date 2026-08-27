@@ -62,6 +62,23 @@ resource "google_cloud_run_v2_service" "api" {
         }
       }
 
+      # Hosted demo mode. When demo_in_cloud=true, judges hit
+      # /v1/auth/demo directly on the deployed URL and land in a
+      # synthetic user's world - see SETUP.md #hosted-demo-in-cloud
+      # for the pool + rate-limit + cost-cap safety envelope.
+      env {
+        name  = "LEVEL_DEMO_IN_CLOUD"
+        value = var.demo_in_cloud ? "true" : "false"
+      }
+      env {
+        name  = "LEVEL_DEMO_SLOTS_PER_SCENARIO"
+        value = tostring(var.demo_slots_per_scenario)
+      }
+      env {
+        name  = "LEVEL_DEMO_PER_IP_PER_HOUR"
+        value = tostring(var.demo_per_ip_per_hour)
+      }
+
       resources {
         limits = {
           cpu    = "1"

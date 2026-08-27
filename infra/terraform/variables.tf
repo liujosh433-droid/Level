@@ -36,3 +36,28 @@ variable "google_oauth_client_secret" {
   type        = string
   sensitive   = true
 }
+
+variable "demo_in_cloud" {
+  description = <<-EOT
+    Enable OAuth-less demo mode on the deployed API so judges can click Try
+    demo on the hosted landing page. Off by default (the /v1/auth/demo
+    endpoint 404s so a probe can't spawn synthetic users). When true, the
+    endpoint is gated by a fixed slot pool (see demo_slots_per_scenario) and
+    a per-IP rate limit (see demo_per_ip_per_hour). See SETUP.md #hosted-
+    demo-in-cloud for the full safety story.
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "demo_slots_per_scenario" {
+  description = "Size of the demo user pool per scenario. Total demo users = value * 2 scenarios."
+  type        = number
+  default     = 3
+}
+
+variable "demo_per_ip_per_hour" {
+  description = "Per-IP token bucket capacity + refill (per hour) on /v1/auth/demo."
+  type        = number
+  default     = 10
+}

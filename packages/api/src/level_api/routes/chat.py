@@ -711,8 +711,8 @@ async def _try_fast_chit_chat(
 
     if _CHIT_GREETING.match(text):
         reply = (
-            "Hi. I\u2019m here whenever you want to look at the week, "
-            "book a time, or draft an email."
+            "Hi! I\u2019m here whenever you want me to help you set "
+            "reminders, find a best booking time, or send an email."
         )
     elif _CHIT_HOW_ARE_YOU.match(text):
         reply = (

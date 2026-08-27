@@ -147,6 +147,10 @@
   font-size: 1.05rem;
   font-weight: 650;
   letter-spacing: -0.02em;
+  /* Override the global h2 rule (color: var(--foam) which is #163038
+     in light mode). On the sidebar's dark background the default h2
+     color was nearly invisible - foam-white reads cleanly here. */
+  color: #f2f7f8;
 }
 
 .head p {

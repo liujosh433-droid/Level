@@ -266,3 +266,56 @@ def _reminder_matches(reminder: Reminder, event: CachedEvent) -> bool:
     if reminder.match.person_id and reminder.match.person_id not in event.matched_person_ids:
         return False
     return True
+
+
+async def rematch_reminders(store: UserStore) -> int:
+    """Fast reminder-only rematch sweep. Returns the number of events whose
+    ``matched_reminder_ids`` changed.
+
+    Cheaper cousin of ``enrich_agenda``: skips classification (an LLM
+    call) and person-matching (already stable since the last add-person
+    turn), and does ONLY the deterministic join between active
+    reminders and the current cached agenda.
+
+    Fixes the "reminders take a few refreshes to attach" bug:
+    ``chat.py::add_reminder`` used to fire ``_background_enrich`` as
+    ``asyncio.create_task`` and return the reply immediately, hoping
+    the background task would finish before the frontend's
+    ``onAfterReply`` refetch landed. On Cloud Run that hope is thin -
+    background asyncio tasks aren't guaranteed CPU after the response
+    is sent - so the /today refetch would land BEFORE the attachment
+    was written, forcing the user to refresh two or three more times
+    to see the reminder tag appear on events.
+
+    This helper runs inline in ~10-50ms for a 250-event agenda + a
+    handful of reminders. Barely visible in the reply latency, and
+    the very next ``/today`` load carries the correct attachments.
+
+    Kept separate from ``enrich_agenda`` (rather than adding a
+    ``skip_classify`` flag) because the call graphs are cleaner: this
+    is the "reminder just changed, everything else is fine" fast path;
+    the full enrich is for "the calendar or people list changed."
+    """
+    events = await store.agenda.list()
+    reminders = [r for r in await store.reminders.list() if r.status == "active"]
+
+    updates: list[CachedEvent] = []
+    for event in events:
+        matched: list[str] = []
+        for r in reminders:
+            if _reminder_matches(r, event):
+                matched.append(r.reminder_id)
+        matched.sort()
+        if matched != event.matched_reminder_ids:
+            updates.append(event.model_copy(update={"matched_reminder_ids": matched}))
+    if updates:
+        await store.agenda.upsert_many(updates)
+
+    logger.info(
+        "calendar.rematch_reminders.done",
+        user=store.user_id,
+        events_scanned=len(events),
+        active_reminders=len(reminders),
+        events_updated=len(updates),
+    )
+    return len(updates)

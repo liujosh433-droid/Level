@@ -19,7 +19,7 @@ from level_core.agents.model_armor import BLOCK_REPLY as ARMOR_BLOCK_REPLY
 from level_core.agents.person_edit import run as person_edit_run
 from level_core.agents.priority import run as priority_run
 from level_core.agents.reminder import run as reminder_run
-from level_core.calendar.enrich import enrich_agenda
+from level_core.calendar.enrich import enrich_agenda, rematch_reminders
 from level_core.calendar.sync import refresh_agenda
 from level_core.config import get_settings
 from level_core.observability import get_logger
@@ -991,8 +991,27 @@ async def _save_reminder(
         lead_minutes=lead_minutes,
         source_span=source_span,
     )
-    # Reminder-match runs in the background; matched_reminder_ids on
-    # /today updates on the next load rather than blocking this reply.
+    # Fast-path: attach the reminder to already-classified events
+    # inline so the frontend's post-reply /today refetch already
+    # carries the tag. ~10-50ms for 250 events + a handful of
+    # reminders - barely visible in the reply latency, but the
+    # difference between "reminder shows up on click 1" and "user
+    # refreshes 2-3 times waiting for the background task to
+    # finish" (see docstring in ``rematch_reminders`` for the full
+    # Cloud-Run reasoning).
+    try:
+        await rematch_reminders(store)
+    except Exception as err:  # noqa: BLE001 - never break the chat reply on this
+        logger.warning(
+            "chat.rematch_reminders_failed",
+            user=store.user_id,
+            err=str(err)[:200],
+        )
+    # Also fire the full background enrich in case there are still
+    # unclassified events in the agenda (rare in demo mode where
+    # everything is pre-classified, but common right after a fresh
+    # OAuth pull on a real account). Once those get an
+    # activity_type, the next enrich pass attaches the reminder.
     _background_enrich(store, source="add_reminder")
     where = activity_type.category.label.lower()
     if activity_type == ActivityType.OTHER:

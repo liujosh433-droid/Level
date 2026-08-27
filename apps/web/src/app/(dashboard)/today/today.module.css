@@ -310,15 +310,26 @@
  * of just "Personal"). Prominent so the caregiver's eye jumps to
  * what the thing IS before falling back to the coarse category
  * chip to its right.
+ *
+ * Uses --foam (the design system's *text* color; --ink is
+ * background) at a slightly stronger weight than the surrounding
+ * .missingRow so the eye lands here first. Category label stays
+ * on --foam at weight 550 as a smaller secondary chip.
  */
 .missingTitle {
-  color: var(--ink);
-  font-weight: 600;
-  font-size: 0.95rem;
+  color: var(--foam);
+  font-weight: 650;
+  font-size: 0.98rem;
 }
 
+/*
+ * De-emphasised chunk of the proactive-card meta line so the
+ * concrete title ("Grocery run") reads as primary and the category
+ * ("Personal") reads as secondary context. --mist is the design
+ * system's muted-text token.
+ */
 .metaMuted {
-  color: var(--foam);
+  color: var(--mist);
   font-weight: 400;
 }
 

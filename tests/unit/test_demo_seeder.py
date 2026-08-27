@@ -151,6 +151,26 @@ def test_demo_login_local_sets_cookie_and_flips_whoami(monkeypatch) -> None:  # 
     assert who["google_connected"] is True
 
 
+def test_hear_my_day_falls_back_when_no_llm_configured(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Demo mode without GOOGLE_API_KEY / GOOGLE_CLOUD_PROJECT must still
+    return a real, useful summary from /v1/today/summary - not a 500
+    and not the stale "Today looks quiet." string."""
+    monkeypatch.setenv("GOOGLE_API_KEY", "")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "")
+    client = _make_client("local", monkeypatch)
+
+    login = client.post("/v1/auth/demo", json={"scenario": "solo"})
+    assert login.status_code == 200
+
+    r = client.get("/v1/today/summary")
+    assert r.status_code == 200
+    summary = r.json()["summary"]
+    assert isinstance(summary, str) and summary.strip(), "summary must not be empty"
+    # Deterministic fallback must reference the seeded events - if it
+    # returns "Today looks quiet." the fallback isn't reading the seed.
+    assert "quiet" not in summary.lower() or "things today" in summary.lower()
+
+
 def test_email_send_short_circuits_for_demo_user(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """A demo user pressing Send should get a preview response, not
     a 502. The pending draft token must still get cleared."""

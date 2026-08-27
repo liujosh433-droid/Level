@@ -787,14 +787,21 @@ export default function Chat({
 
   async function speakDay() {
     if (onSpeakDay) return onSpeakDay();
+    // Kick off both fetches in parallel. Previously we serially
+    // awaited the chime (~1-4s) BEFORE starting the summary fetch
+    // (~3-10s cold LLM), so worst-case the user waited ~14s of
+    // silence. Now the summary starts loading immediately while
+    // the chime plays. The backend also prewarms the summary on
+    // /today load, so this fetch usually hits the cache.
+    const summaryPromise = api
+      .get<{ summary: string }>("/v1/today/summary")
+      .catch<{ summary: string } | null>(() => null);
+    const chimePromise = api
+      .get<{ ready: boolean; audio_url?: string | null }>("/v1/media/chime?mood=calm")
+      .catch(() => ({ ready: false as boolean, audio_url: null }));
+
     try {
-      // Play a Lyria chime (best-effort) BEFORE the TTS starts so the
-      // "Hear my day" moment has a warm intro. If Lyria isn't ready
-      // (media disabled locally, or first call still generating),
-      // we skip silently and go straight to the summary.
-      const chime = await api
-        .get<{ ready: boolean; audio_url?: string | null }>("/v1/media/chime?mood=calm")
-        .catch(() => ({ ready: false as boolean, audio_url: null }));
+      const chime = await chimePromise;
       if (chime.ready && chime.audio_url) {
         try {
           const audio = new Audio(chime.audio_url);
@@ -810,8 +817,12 @@ export default function Chat({
           // Ignore chime failures - never block "Hear my day".
         }
       }
-      const { summary } = await api.get<{ summary: string }>("/v1/today/summary");
-      speak(summary);
+      const result = await summaryPromise;
+      if (result && result.summary) {
+        speak(result.summary);
+      } else {
+        setError("Couldn't fetch today's summary.");
+      }
     } catch {
       setError("Couldn't fetch today's summary.");
     }

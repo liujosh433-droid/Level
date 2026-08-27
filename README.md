@@ -96,6 +96,11 @@ see how Level splits pickup duty across two adults.
 - Email drafting still runs (LLM optional); **email sending
   short-circuits to a preview** so you never accidentally email
   anyone during a demo.
+- **No LLM key required** — chat and "Hear my day" fall back to
+  deterministic templates without one. Grab a free key from
+  [aistudio.google.com/apikey](https://aistudio.google.com/apikey)
+  (~60 seconds, no billing) and paste it into `.env` as
+  `GOOGLE_API_KEY=` if you want real Gemini responses.
 - Demo mode is disabled entirely when `LEVEL_ENV=cloud` so a probe
   can't spawn synthetic users against the deployed API.
 

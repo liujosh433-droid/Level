@@ -56,6 +56,22 @@ class QuotaExhausted(Exception):
         super().__init__(message)
 
 
+class LLMUnavailable(Exception):
+    """No LLM backend is reachable in this process.
+
+    Raised when neither ``GOOGLE_API_KEY`` (AI Studio) nor
+    ``GOOGLE_CLOUD_PROJECT`` (Vertex ADC) is configured. ``call_agent``
+    catches this and returns a soft-degraded result so downstream code
+    can use its deterministic fallback (e.g. the daily-summary route
+    synthesizes a summary from the raw event list) instead of 500ing.
+
+    Deliberately separate from ``QuotaExhausted`` and ``SafetyBlocked``
+    because those have retry semantics; this one is a hard configuration
+    fact that won't change until the process restarts with fresh env.
+    """
+
+
+
 def _parse_retry_after(err: Exception) -> int | None:
     """Best-effort: pull the 'retry in Ns' hint out of a Gemini 429 error."""
     text = str(err)
@@ -127,6 +143,10 @@ async def invoke_with_retry(
                 model_id=model_id, spec=spec, contents=contents
             )
         except SafetyBlocked:
+            raise
+        except LLMUnavailable:
+            # No backend configured - retrying and Gemma fallback both
+            # require reaching a Google endpoint, so bubble immediately.
             raise
         except Exception as e:
             last_exc = e
@@ -240,6 +260,15 @@ def _get_gemini_client(*, force_vertex: bool = False) -> Any:
         retry_options=types.HttpRetryOptions(attempts=1)
     )
     use_studio = bool(settings.google_api_key) and not force_vertex
+    # Detect the "no LLM backend at all" case up front so the SDK
+    # doesn't throw a cryptic DefaultCredentialsError / AttributeError
+    # midway through client init - see LLMUnavailable docstring.
+    if not use_studio and not settings.google_cloud_project:
+        raise LLMUnavailable(
+            "No LLM backend configured: set GOOGLE_API_KEY (AI Studio) "
+            "or GOOGLE_CLOUD_PROJECT (Vertex) to enable agent calls. "
+            "Demo mode + deterministic fallbacks continue to work."
+        )
     if use_studio:
         key = ("aistudio", settings.google_api_key)
     else:

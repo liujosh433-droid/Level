@@ -36,16 +36,26 @@ across two adults.
 
 Demo-mode guardrails so you can click freely:
 
-- **Email drafting** runs through the LLM if `GOOGLE_API_KEY` /
-  Vertex is configured; falls back to a deterministic template
+- **Email drafting** runs through the LLM if a key is configured
+  (see next paragraph); falls back to a deterministic template
   otherwise.
 - **Email sending** short-circuits to a preview response. Level
   logs the send, clears the pending draft, but never hits Gmail.
 - **Calendar edits** (book / move / delete) reply with a friendly
   "connect Google to actually book" message; seeded agenda is
   read-only.
+- **Chat + Hear my day** fall back to deterministic templates when
+  no LLM key is present — you'll still get real answers, just
+  without Gemini's phrasing.
 - Demo mode is disabled entirely when `LEVEL_ENV=cloud` so a probe
   can't spawn synthetic users against the deployed API.
+
+**Optional: unlock full Gemini responses (~60 seconds).** Grab a
+free key at <https://aistudio.google.com/apikey> (sign in with any
+Google account, no billing, no GCP project), paste it into `.env`
+as `GOOGLE_API_KEY=…`, and restart `make dev`. Free tier is more
+than enough for a judging session. We deliberately do not ship a
+shared key — public repo keys get scraped and revoked within hours.
 
 **Optional: test with your own Google Calendar + Gmail.** Follow
 [SETUP.md](SETUP.md) to create your own OAuth client, put the client

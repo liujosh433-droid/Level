@@ -73,11 +73,14 @@ async def run(
         model="flash",
         system=SYSTEM,
         response_schema=SummaryResponse,
-        # max_turns=2 (v2): "Hear my day" is 2-3 sentences - the second
-        # refinement rarely improves phrasing. Dropping to 2 keeps the
-        # spoken flow under ~7s cold (was ~12s at the tail) so the
-        # chime -> summary transition feels immediate.
-        max_turns=2,
+        # max_turns=1: source_span is off (nothing to echo back), and a
+        # schema failure on a {summary: str} response is exceedingly
+        # rare on flash. When it does happen, voice.summary now has a
+        # deterministic ``_fallback_summary`` that reads better than a
+        # second LLM turn anyway - so eating another 3-8s roundtrip
+        # for a marginal-quality refinement is a bad trade for a
+        # user-facing "Hear my day" click.
+        max_turns=1,
         temperature=0.4,
         require_source_span=False,
     )

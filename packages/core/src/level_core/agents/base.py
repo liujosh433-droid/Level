@@ -28,6 +28,7 @@ from level_core.agents.gate import Charge, GateDecision, check_gate, record_char
 from level_core.agents.identity import sign as sign_identity
 from level_core.agents.invoke import (
     GEMMA_ELIGIBLE as _GEMMA_ELIGIBLE,  # re-exported for tests
+    LLMUnavailable as _LLMUnavailable,
     QuotaExhausted,
     RawResponse as _RawResponse,
     SafetyBlocked as _SafetyBlocked,
@@ -347,6 +348,26 @@ async def call_agent(
                 audit_id=audit_id,
                 latency_ms=int((time.perf_counter() - started) * 1000),
                 turns_taken=turns_taken or 1,
+            )
+        except _LLMUnavailable as err:
+            # No LLM backend configured (demo-without-creds path).
+            # Return the same soft-degraded shape as gate-blocked so
+            # every caller's existing ``if result.value:`` fallback
+            # kicks in. Log once (info, not warn) - this is expected
+            # in local demo mode, not a runtime regression.
+            logger.info(
+                "agent.llm_unavailable",
+                agent=spec.name,
+                trace_id=trace_id,
+                reason=str(err)[:120],
+            )
+            return AgentResult(
+                value=None,
+                blocked_by_safety=False,
+                audit_id=audit_id,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                turns_taken=turns_taken or 1,
+                soft_degraded=True,
             )
         latency_ms = int((time.perf_counter() - started) * 1000)
 

@@ -22,7 +22,7 @@ from level_core.observability import get_logger
 from level_core.schemas import ActivityType, CachedEvent, LoadBucket
 from level_core.storage.base import UserStore
 from level_core.tz import resolve_tz
-from level_core.voice.summary import get_daily_summary
+from level_core.voice.summary import get_daily_summary, prewarm_daily_summary
 
 from level_api.deps import get_user_store
 
@@ -36,6 +36,10 @@ async def _enrich_safe(store: UserStore) -> None:
         await enrich_agenda(store)
     except Exception as exc:  # noqa: BLE001 - never fail the homepage on classify
         logger.warning("today.enrich_failed", error=str(exc)[:300])
+    # Chain: once agenda is enriched, warm the "Hear my day" cache
+    # in the same background task so the user's click doesn't pay
+    # a cold LLM roundtrip. See voice.summary.prewarm_daily_summary.
+    await prewarm_daily_summary(store)
 
 
 async def refresh_and_enrich_safe(store: UserStore) -> None:
@@ -52,6 +56,9 @@ async def refresh_and_enrich_safe(store: UserStore) -> None:
             await enrich_agenda(store)
     except Exception as exc:  # noqa: BLE001
         logger.warning("today.enrich_failed", error=str(exc)[:300])
+    # Chain the summary prewarm after the refresh/enrich so the
+    # cached text reflects the freshest fingerprint.
+    await prewarm_daily_summary(store)
 
 
 def _aware(dt: datetime) -> datetime:
@@ -81,14 +88,23 @@ async def get_today(
     tokens = await store.tokens.read() or {}
     events = await store.agenda.list()
     pulling = False
+    scheduled_summary_prewarm = False
     if tokens.get("access_token") and settings.is_local:
         sync_meta = await store.calendar_sync.read() or {}
         stale = not agenda_is_fresh(sync_meta)
         if stale or not events:
             pulling = not events
             background.add_task(refresh_and_enrich_safe, store)
+            scheduled_summary_prewarm = True  # chained inside refresh task
         elif any(e.activity_type is None for e in events):
             background.add_task(_enrich_safe, store)
+            scheduled_summary_prewarm = True  # chained inside enrich task
+    if not scheduled_summary_prewarm and events:
+        # Fresh agenda, no enrichment work needed - still worth warming
+        # the summary cache so "Hear my day" is instant. get_daily_summary
+        # is idempotent and cache-checks the current fingerprint, so this
+        # is cheap on subsequent /today loads.
+        background.add_task(prewarm_daily_summary, store)
 
     events.sort(key=lambda e: e.time.start)
     today = datetime.now(tz).date()

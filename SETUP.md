@@ -39,8 +39,8 @@ probe can't spawn synthetic users against the deployed API.
 
 Behavioral guardrails in demo mode:
 
-- **Email drafting** still runs through the LLM (if
-  `GOOGLE_API_KEY`/Vertex is configured); if not, the drafter falls
+- **Email drafting** still runs through the LLM if a key is
+  configured (see next section); without one, the drafter falls
   back to a deterministic template.
 - **Email sending** short-circuits to a "preview" response — Level
   logs the send, clears the pending draft, but never actually hits
@@ -49,6 +49,25 @@ Behavioral guardrails in demo mode:
 - **Calendar edits** (book / move / delete) chat responses degrade to
   a friendly "connect Google to actually book" message; the seeded
   agenda is read-only.
+- **Chat + Hear my day** fall back to deterministic responses if no
+  LLM key is configured — you'll still get a real answer, just from
+  templates instead of Gemini.
+
+### Optional: add a free Gemini API key (~60 seconds, unlocks full LLM chat)
+
+The demo works end-to-end without any API key thanks to the fallbacks
+above, but you'll see richer chat, real drafted emails, and a
+narrative "Hear my day" summary if you plug in a free key:
+
+1. Go to <https://aistudio.google.com/apikey>, sign in with any
+   Google account, click **Create API key**. No credit card, no GCP
+   project, no billing.
+2. Paste it into `.env` as `GOOGLE_API_KEY=...`
+3. Restart `make dev`
+
+Free tier (~15 req/min, ~1M tokens/day for `gemini-2.5-flash`) is
+more than enough for a demo session. We don't ship a shared key
+because a public repo key gets scraped and revoked within hours.
 
 **Variable port?** `make dev` binds `:8080` (API) and `:3000` (web).
 Both are common dev-tool ports — the **Cursor IDE holds both by

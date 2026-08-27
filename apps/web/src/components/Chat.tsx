@@ -388,13 +388,46 @@ function EmailDraftCard({
 
 /**
  * FeedbackChips — three-button chip row (keep / adjust / not-me) below
- * anything Level generated. Every click POSTs to /v1/feedback which
- * writes a NegativeFeedback row on adjust/not-me; the corresponding
- * agent's next call receives it as few-shot "do not propose this again."
+ * anything Level generated. These chips train the corresponding agent
+ * for FUTURE replies - they don't undo, delete, or edit the artifact
+ * that's already been saved:
+ *   - keep    : writes the reply into memory_bank so future drafts
+ *               echo this style ("do more of this").
+ *   - adjust  : records a NegativeFeedback row that becomes a
+ *               few-shot on the next agent call ("close, refine").
+ *   - not_me  : same table, stronger signal ("don't propose this
+ *               pattern again").
  *
  * We render nothing after a submission, only a small ack line, so the
  * transcript stays readable when the user is scrolling back.
  */
+
+// Per-chip hover copy. Kept short so the tooltip renders quickly on
+// mobile long-press without wrapping strangely. The point is to
+// answer "what am I teaching Level right now?" not to summarize the
+// whole feedback system.
+const CHIP_TITLES: Record<FeedbackVerdict, string> = {
+  keep: "Do more of this — remember the style for next time.",
+  adjust: "Close, but refine before proposing next time.",
+  not_me: "Don't propose anything like this again.",
+};
+
+const CHIP_LABELS: Record<FeedbackVerdict, string> = {
+  keep: "Keep",
+  adjust: "Adjust",
+  not_me: "Not me",
+};
+
+// Ack copy after a click. Older copy ("Removed - I won't propose that
+// again") implied the reminder/priority was DELETED, which isn't
+// true - only future behavior is affected. New copy makes the
+// forward-looking nature explicit.
+const CHIP_ACK: Record<FeedbackVerdict, string> = {
+  keep: "Kept — I’ll match this style next time.",
+  adjust: "Got it — I’ll refine before proposing next time.",
+  not_me: "Noted — I won’t propose anything like this again.",
+};
+
 function FeedbackChips({
   target,
   onSubmit,
@@ -406,20 +439,17 @@ function FeedbackChips({
   const submitting = target.submitting;
 
   if (submitted) {
-    return (
-      <p className={styles.feedbackAck}>
-        {submitted === "keep"
-          ? "Kept — thanks."
-          : submitted === "adjust"
-            ? "Got it — I’ll adjust next time."
-            : "Removed — I won’t propose that again."}
-      </p>
-    );
+    return <p className={styles.feedbackAck}>{CHIP_ACK[submitted]}</p>;
   }
 
   return (
-    <div className={styles.feedbackRow} aria-label="Feedback on this reply">
-      <span className={styles.feedbackLabel}>How is this?</span>
+    <div className={styles.feedbackRow} aria-label="Teach Level how to handle this next time">
+      <span
+        className={styles.feedbackLabel}
+        title="Your pick trains Level for next time — this reply stays as-is."
+      >
+        How should I do this next time?
+      </span>
       {(["keep", "adjust", "not_me"] as FeedbackVerdict[]).map((v) => (
         <button
           key={v}
@@ -431,8 +461,10 @@ function FeedbackChips({
           }
           disabled={Boolean(submitting)}
           onClick={() => void onSubmit(v)}
+          title={CHIP_TITLES[v]}
+          aria-label={`${CHIP_LABELS[v]}: ${CHIP_TITLES[v]}`}
         >
-          {v === "keep" ? "Keep" : v === "adjust" ? "Adjust" : "Not me"}
+          {CHIP_LABELS[v]}
         </button>
       ))}
     </div>

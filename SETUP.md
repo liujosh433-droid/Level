@@ -5,28 +5,49 @@ Two paths: **local** (offline, JSON on disk, no GCP needed) and **cloud**
 
 ---
 
-## Local (60 seconds, no Google account required)
+## Local (2 minutes, no Google account required for OAuth)
 
 Prereqs: `node >= 20`, `python >= 3.12`, and
-[`uv`](https://docs.astral.sh/uv/). Install `uv` with `brew install uv`
+`[uv](https://docs.astral.sh/uv/)`. Install `uv` with `brew install uv`
 or `curl -LsSf https://astral.sh/uv/install.sh | sh`.
 
-**Zero-OAuth demo mode** — the recommended path for a first look:
+The recommended local path uses **zero-OAuth demo mode** plus a
+**free Gemini API key** — no Google Cloud project, no OAuth client,
+no calendar import, but real LLM responses.
 
-1. `cp .env.example .env` (defaults are fine; you can leave every
-   `GOOGLE_*` value blank)
-2. `make install`
-3. `make dev`
-4. Open `http://127.0.0.1:3000` and click **Try demo: Solo caregiver**
-   on the landing page
+**Step 1 — Get a free Gemini API key (~60 seconds).** Level's chat,
+email drafting, and "Hear my day" summary are LLM-generated. Without
+a key they still return deterministic template responses so the app
+never breaks, but you'll be looking at the fallback prose (see
+["Skipping the key"](#skipping-the-key-what-you-lose) below) — not
+Level actually reasoning about the caregiver's day. To see the
+project as designed, grab a key:
 
-That last click hits `POST /v1/auth/demo`, which loads
+- Open [https://aistudio.google.com/apikey](https://aistudio.google.com/apikey)
+- Sign in with any Google account, click **Create API key**
+- No credit card, no GCP project, no billing enabled
+
+Free tier is ~15 req/min and ~1M tokens/day on `gemini-2.5-flash` — plenty for a full judging session. I deliberately don't ship a shared key to this public repo.
+
+**Step 2 — Bring up the app.**
+
+```bash
+cp .env.example .env
+# Open .env and paste your key into the GOOGLE_API_KEY= line.
+# Everything else can stay at defaults - GOOGLE_OAUTH_* stays blank.
+make install
+make dev
+```
+
+**Step 3 — Try the demo.** Open `http://127.0.0.1:3000` and click
+**Try demo: Solo caregiver** on the landing page.
+
+That click hits `POST /v1/auth/demo`, which loads
 `example-data/caregiver-month-solo.ics` into a synthetic user, drops
 the same signed session cookie a real OAuth callback would, and
 returns to `/today` with 200+ pre-classified events, a curated cast
 of people, and 6+ missing-usuals for the current week already
-computed. No Google Cloud project, no OAuth client, no calendar
-import.
+computed.
 
 Solo caregiver is the primary demo because the single-parent
 workload is the more distinctive story and the one that best
@@ -37,37 +58,36 @@ Level splits pickup duty across two adults.
 Demo mode is `LEVEL_ENV=local` only. The endpoint 404s in cloud so a
 probe can't spawn synthetic users against the deployed API.
 
-Behavioral guardrails in demo mode:
+Behavioral guardrails in demo mode (with or without an API key):
 
-- **Email drafting** still runs through the LLM if a key is
-  configured (see next section); without one, the drafter falls
-  back to a deterministic template.
 - **Email sending** short-circuits to a "preview" response — Level
-  logs the send, clears the pending draft, but never actually hits
-  Gmail. So a judge can click **Send** on a drafted email without
-  emailing anyone.
+logs the send, clears the pending draft, but never actually hits
+Gmail. So a judge can click **Send** on a drafted email without
+emailing anyone.
 - **Calendar edits** (book / move / delete) chat responses degrade to
-  a friendly "connect Google to actually book" message; the seeded
-  agenda is read-only.
-- **Chat + Hear my day** fall back to deterministic responses if no
-  LLM key is configured — you'll still get a real answer, just from
-  templates instead of Gemini.
+a friendly "connect Google to actually book" message; the seeded
+agenda is read-only.
 
-### Optional: add a free Gemini API key (~60 seconds, unlocks full LLM chat)
+### Skipping the key: what you lose
 
-The demo works end-to-end without any API key thanks to the fallbacks
-above, but you'll see richer chat, real drafted emails, and a
-narrative "Hear my day" summary if you plug in a free key:
+You can boot without `GOOGLE_API_KEY` and the app will still run —
+the endpoints return 200 and nothing 500s. But every LLM path
+degrades to a deterministic template:
 
-1. Go to <https://aistudio.google.com/apikey>, sign in with any
-   Google account, click **Create API key**. No credit card, no GCP
-   project, no billing.
-2. Paste it into `.env` as `GOOGLE_API_KEY=...`
-3. Restart `make dev`
+- **Chat** → intent-matched canned replies (still routed correctly
+by the fast-path regex + gate; you just won't see Gemini generate
+novel prose)
+- **"Hear my day"** → a real 2-3 sentence summary synthesized from
+the seeded events + missing usuals + reminders, but written by
+the fallback function (`voice.summary._fallback_summary`) not by
+Gemini
+- **Email drafting** → a stock template with names/times filled in
+from the event, not an LLM-composed message
+- **Nightly proactive cards, RoleAgent inference, priority ranking**
+→ skipped entirely (they're LLM-only paths)
 
-Free tier (~15 req/min, ~1M tokens/day for `gemini-2.5-flash`) is
-more than enough for a demo session. We don't ship a shared key
-because a public repo key gets scraped and revoked within hours.
+Use the no-key path only for a smoke test or if you can't reach
+`aistudio.google.com` — it's not the intended demo experience.
 
 **Variable port?** `make dev` binds `:8080` (API) and `:3000` (web).
 Both are common dev-tool ports — the **Cursor IDE holds both by
@@ -109,10 +129,10 @@ Import one of the fixture ICS files into a scratch Google account and
 connect that account:
 
 - `example-data/caregiver-month.ics` — two-parent family with a
-  co-parent. Two usuals are missing in the current demo week so the
-  proactive-cards job has something to surface immediately.
+co-parent. Two usuals are missing in the current demo week so the
+proactive-cards job has something to surface immediately.
 - `example-data/caregiver-month-solo.ics` — single caregiver, same
-  kids and same elder-care parent, no co-parent.
+kids and same elder-care parent, no co-parent.
 
 To (re)generate either file:
 

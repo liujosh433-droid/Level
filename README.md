@@ -66,22 +66,36 @@ The mermaid source is at [`docs/architecture.mmd`](docs/architecture.mmd).
   suggestion cards. Users see "Level noticed while you slept" on
   `/today`.
 
-## 60-second local start (no Google account required)
+## 2-minute local start (no OAuth, no GCP, no billing)
 
 Prereqs: `node >= 20`, `python >= 3.12`, and [`uv`](https://docs.astral.sh/uv/)
 (one-line install: `brew install uv` or
 `curl -LsSf https://astral.sh/uv/install.sh | sh`).
 
+**Step 1 — Grab a free Gemini API key** at
+[aistudio.google.com/apikey](https://aistudio.google.com/apikey).
+Sign in with any Google account, click **Create API key**. No
+credit card, no GCP project, no billing. Level's chat, email
+drafting, and "Hear my day" summary are LLM-generated — without a
+key you get deterministic template fallbacks instead of real Gemini
+output (see [Skipping the key](#skipping-the-key-what-you-lose)).
+Free tier is 15 req/min / ~1M tokens/day on `gemini-2.5-flash` —
+plenty for a judging session. We deliberately don't ship a shared
+key (repo-scrape risk).
+
+**Step 2 — Bring it up.**
+
 ```bash
 cp .env.example .env
-# Defaults are fine - GOOGLE_OAUTH_* can stay blank for demo mode.
+# Paste your key into the GOOGLE_API_KEY= line. Everything else can
+# stay at defaults - GOOGLE_OAUTH_* stays blank for demo mode.
 make install
 make dev
 # API on http://127.0.0.1:8080, web on http://127.0.0.1:3000
 ```
 
-Open `http://127.0.0.1:3000` and click **Try demo: Solo caregiver**.
-Level seeds a synthetic user from
+**Step 3 — Click Try demo.** Open `http://127.0.0.1:3000` and click
+**Try demo: Solo caregiver**. Level seeds a synthetic user from
 [`example-data/caregiver-month-solo.ics`](example-data/caregiver-month-solo.ics),
 drops the same signed session cookie a real OAuth callback would, and
 takes you to `/today` with 200+ pre-classified events, a curated
@@ -93,16 +107,19 @@ see how Level splits pickup duty across two adults.
 
 - No Google Cloud project, no OAuth client, no calendar import.
 - `LEVEL_ENV=local` writes state to `.level/local_store/`.
-- Email drafting still runs (LLM optional); **email sending
-  short-circuits to a preview** so you never accidentally email
-  anyone during a demo.
-- **No LLM key required** — chat and "Hear my day" fall back to
-  deterministic templates without one. Grab a free key from
-  [aistudio.google.com/apikey](https://aistudio.google.com/apikey)
-  (~60 seconds, no billing) and paste it into `.env` as
-  `GOOGLE_API_KEY=` if you want real Gemini responses.
+- **Email sending short-circuits to a preview** so you never
+  accidentally email anyone during a demo.
 - Demo mode is disabled entirely when `LEVEL_ENV=cloud` so a probe
   can't spawn synthetic users against the deployed API.
+
+### Skipping the key: what you lose
+
+The app still boots without `GOOGLE_API_KEY` — nothing 500s — but
+every LLM path degrades to a template: chat replies become canned
+intent-matched responses, "Hear my day" is a deterministic
+event-list summary, email drafts use a stock template. Only use
+this if you can't reach AI Studio; it's not the intended demo
+experience. See [SETUP.md](SETUP.md) for the full fallback matrix.
 
 Want to test with your own real Google Calendar and Gmail? Follow
 [SETUP.md](SETUP.md) to create your own OAuth client, then click

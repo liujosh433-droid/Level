@@ -12,18 +12,36 @@ the app does not need to be live at judging time — the demo video and
 this repo are the primary proof of execution. The deployed URL above
 is available for reference and is shown live in the video.
 
-**Recommended path (no Google account, no OAuth setup, 60 seconds):**
+**Recommended path (no OAuth, no GCP, no billing — ~2 minutes):**
+
+**Step 1 — Grab a free Gemini API key.** Level's chat, email
+drafting, and "Hear my day" summary are LLM-generated. Without a
+key you'll see the deterministic template fallbacks — the app runs
+but you're looking at canned prose, not Level reasoning about the
+caregiver's day.
+
+- Open <https://aistudio.google.com/apikey>
+- Sign in with any Google account, click **Create API key**
+- No credit card, no GCP project, no billing enabled
+
+Free tier is ~15 req/min / ~1M tokens/day on `gemini-2.5-flash` —
+plenty for a judging session. We deliberately don't ship a shared
+key because a key committed to a public repo gets scraped and
+revoked within hours.
+
+**Step 2 — Boot the app.**
 
 ```bash
 git clone https://github.com/liujosh433-droid/Level.git
 cd Level
-cp .env.example .env         # defaults are fine, no edits needed
+cp .env.example .env         # paste your key into GOOGLE_API_KEY=
 make install
 make dev
 ```
 
-Open http://127.0.0.1:3000 and click **Try demo: Solo caregiver**.
-`POST /v1/auth/demo` seeds a synthetic user from
+**Step 3 — Try demo.** Open http://127.0.0.1:3000 and click
+**Try demo: Solo caregiver**. `POST /v1/auth/demo` seeds a
+synthetic user from
 [`example-data/caregiver-month-solo.ics`](example-data/caregiver-month-solo.ics),
 sets the same signed session cookie a real OAuth callback would, and
 lands you on `/today` with 200+ pre-classified events, a curated cast
@@ -34,28 +52,24 @@ showcases RoleAgent inference; **Or: Two-parent family** adds a
 co-parent (Alex) if you want to see how Level splits pickup duty
 across two adults.
 
-Demo-mode guardrails so you can click freely:
+Demo-mode guardrails so you can click freely (apply with or
+without an API key):
 
-- **Email drafting** runs through the LLM if a key is configured
-  (see next paragraph); falls back to a deterministic template
-  otherwise.
 - **Email sending** short-circuits to a preview response. Level
   logs the send, clears the pending draft, but never hits Gmail.
 - **Calendar edits** (book / move / delete) reply with a friendly
   "connect Google to actually book" message; seeded agenda is
   read-only.
-- **Chat + Hear my day** fall back to deterministic templates when
-  no LLM key is present — you'll still get real answers, just
-  without Gemini's phrasing.
 - Demo mode is disabled entirely when `LEVEL_ENV=cloud` so a probe
   can't spawn synthetic users against the deployed API.
 
-**Optional: unlock full Gemini responses (~60 seconds).** Grab a
-free key at <https://aistudio.google.com/apikey> (sign in with any
-Google account, no billing, no GCP project), paste it into `.env`
-as `GOOGLE_API_KEY=…`, and restart `make dev`. Free tier is more
-than enough for a judging session. We deliberately do not ship a
-shared key — public repo keys get scraped and revoked within hours.
+**If you skip the Gemini key:** chat replies degrade to canned
+intent-matched responses, "Hear my day" reads a deterministic
+event-list summary instead of an LLM narrative, email drafts use a
+stock template. The endpoints still return 200 and nothing 500s —
+we've built the fallbacks in explicitly — but it's a smoke test, not
+the intended experience. See [SETUP.md](SETUP.md#skipping-the-key-what-you-lose)
+for the full fallback matrix.
 
 **Optional: test with your own Google Calendar + Gmail.** Follow
 [SETUP.md](SETUP.md) to create your own OAuth client, put the client

@@ -218,12 +218,31 @@ export default function TodayPage() {
     return () => window.clearTimeout(t);
   }, [data, load]);
 
+  // Group ids that are already surfaced as a *visible* proactive card.
+  // We hide them from the "Usuals missing this week" list so the two
+  // sections don't nag the caregiver about the same gap twice - the
+  // proactive card carries the "Level noticed while you slept" story
+  // AND the actionable "Yes, put it back" button, so it's the better
+  // home for these rows. If the user dismisses a card, its group falls
+  // back to the missing-week section (no data lost, just re-homed).
+  const activeCardGroupIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const card of data?.proactive_cards ?? []) {
+      if (card.group_id && !dismissedCardIds.has(card.card_id)) {
+        ids.add(card.group_id);
+      }
+    }
+    return ids;
+  }, [data?.proactive_cards, dismissedCardIds]);
+
   const missingByDay = useMemo(
     () =>
       groupMissingByWeekday(
-        (data?.missing_usuals_week ?? []).filter((m) => !resolvedIds.has(m.group_id)),
+        (data?.missing_usuals_week ?? []).filter(
+          (m) => !resolvedIds.has(m.group_id) && !activeCardGroupIds.has(m.group_id),
+        ),
       ),
-    [data?.missing_usuals_week, resolvedIds],
+    [data?.missing_usuals_week, resolvedIds, activeCardGroupIds],
   );
 
   const colorMap = useMemo(() => {
@@ -377,6 +396,45 @@ export default function TodayPage() {
     }
   }
 
+  async function putBackMissingGroup(groupId: string, cardId?: string) {
+    // Optimistic: mark the group resolved + the card dismissed
+    // immediately so the two sections disappear right away, then
+    // refetch /today to pick up the actual booked event on the
+    // agenda. Roll back both flags on error.
+    setResolvingId(groupId);
+    setResolvedIds((prev) => new Set(prev).add(groupId));
+    if (cardId) {
+      setDismissedCardIds((prev) => new Set(prev).add(cardId));
+    }
+    try {
+      await api.post("/v1/today/missing-week/put-back", {
+        group_id: groupId,
+        card_id: cardId,
+      });
+      // Refetch so the newly booked placeholder event shows up in the
+      // Today/Tomorrow list without a full page reload.
+      await load();
+    } catch (err) {
+      setResolvedIds((prev) => {
+        const next = new Set(prev);
+        next.delete(groupId);
+        return next;
+      });
+      if (cardId) {
+        setDismissedCardIds((prev) => {
+          const next = new Set(prev);
+          next.delete(cardId);
+          return next;
+        });
+      }
+      setLoadError(
+        err instanceof ApiError ? err.detail : "Couldn't put that back. Try again?",
+      );
+    } finally {
+      setResolvingId(null);
+    }
+  }
+
   return (
     <div className={styles.wrap}>
       <div className={styles.workspace}>
@@ -438,12 +496,15 @@ export default function TodayPage() {
                       <button
                         type="button"
                         className="button-primary"
-                        onClick={() => {
-                          const payload = { detail: card.text } as CustomEventInit;
-                          window.dispatchEvent(new CustomEvent("level:proactive_ask", payload));
-                        }}
+                        disabled={resolvingId === card.group_id}
+                        aria-busy={resolvingId === card.group_id}
+                        onClick={() =>
+                          void putBackMissingGroup(card.group_id, card.card_id)
+                        }
                       >
-                        Yes, put it back
+                        {resolvingId === card.group_id
+                          ? "Putting back\u2026"
+                          : "Yes, put it back"}
                       </button>
                       <button
                         type="button"

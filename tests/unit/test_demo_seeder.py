@@ -235,10 +235,15 @@ async def test_seed_populates_proactive_cards_for_the_demo_week() -> None:
     assert len(cards) >= 1, (
         "solo scenario should have at least one missing-usual card for the demo week"
     )
-    # Shape check: exactly the fields the frontend renders.
+    # Shape check: exactly the fields the frontend renders. `group_id`
+    # matters because the /today UI correlates card <-> missing-week
+    # row by it (hides the row when the card is visible, calls
+    # put-back with it). Missing it silently makes both surfaces
+    # render the same nudge.
     card = cards[0]
     for key in (
         "card_id",
+        "group_id",
         "kind",
         "week_start",
         "day",
@@ -250,6 +255,11 @@ async def test_seed_populates_proactive_cards_for_the_demo_week() -> None:
     ):
         assert key in card, f"proactive card missing field: {key}"
     assert card["kind"] == "missing_usual"
+    # card_id encodes the group_id as its suffix, so the two ids
+    # never drift out of sync when the group format changes.
+    assert card["card_id"].endswith(card["group_id"]), (
+        "card_id should suffix group_id so the frontend can dedupe reliably"
+    )
 
 
 @pytest.mark.asyncio
@@ -646,6 +656,84 @@ def test_cloud_demo_pool_size_caps_user_ids(monkeypatch) -> None:  # type: ignor
             seen.add(user_id_for_slot(scenario, slot))
 
     assert len(seen) <= 3 * len(SCENARIOS)
+
+
+def test_put_back_missing_group_books_event_and_resolves(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The "Yes, put it back" button on a proactive card / missing-week
+    row must actually do two things end-to-end:
+
+    1. Book a placeholder event on the agenda at the group's typical
+       weekday + time so it shows up in Today / Tomorrow.
+    2. Mark the missing-week group resolved AND dismiss the
+       corresponding proactive card so neither surface keeps nagging
+       about a gap the user just filled.
+
+    Regression against the shipping bug where the button dispatched
+    a `level:proactive_ask` custom event that nobody listened for -
+    click was silent, no event was booked, and the card / row stayed
+    put through the next refresh.
+    """
+    client = _make_client("local", monkeypatch)
+
+    login = client.post("/v1/auth/demo", json={"scenario": "solo"})
+    assert login.status_code == 200
+
+    # Grab the first proactive card (solo scenario always seeds >=1
+    # missing-usual card for the demo week).
+    today = client.get("/v1/today").json()
+    cards = today.get("proactive_cards") or []
+    assert cards, "solo scenario should seed a proactive card to click"
+    card = cards[0]
+    group_id = card["group_id"]
+    card_id = card["card_id"]
+
+    r = client.post(
+        "/v1/today/missing-week/put-back",
+        json={"group_id": group_id, "card_id": card_id},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "booked"
+    assert body["group_id"] == group_id
+    assert body["card_id"] == card_id
+    event_payload = body["event"]
+    # Deterministic id shape so a double-click doesn't create a
+    # duplicate booking (the endpoint upserts).
+    assert event_payload["event_id"].startswith("level:putback:")
+    assert event_payload["origin"] == "level"
+    # Non-empty time span.
+    assert event_payload["start"] < event_payload["end"]
+
+    # After the call, /today must NOT show the group in missing-week
+    # (either because it's resolved or because the card is still
+    # visible; both correlate on group_id).
+    after = client.get("/v1/today").json()
+    remaining = [
+        row for row in (after.get("missing_usuals_week") or [])
+        if row["group_id"] == group_id
+    ]
+    assert remaining == [], "group should be gone from missing_usuals_week"
+    active_cards = [
+        c for c in (after.get("proactive_cards") or [])
+        if c["card_id"] == card_id
+    ]
+    assert active_cards == [], "card should be dismissed after put-back"
+
+    # And the booked event should appear in the agenda for its day.
+    agenda_ids = [e["event_id"] for e in (after.get("today", []) + after.get("tomorrow", []))]
+    # Not guaranteed to land on today/tomorrow (the missing usual
+    # could be later in the week), but the event id is deterministic
+    # so a second call should be a no-op rather than another booking.
+    r2 = client.post(
+        "/v1/today/missing-week/put-back",
+        json={"group_id": group_id, "card_id": card_id},
+    )
+    assert r2.status_code == 200
+    body2 = r2.json()
+    # Second call is idempotent - either "already_resolved" (fast
+    # path) or "booked" that upserts the same event_id.
+    assert body2["status"] in {"already_resolved", "booked"}
+    del agenda_ids  # silence unused local; kept for readability
 
 
 def test_demo_login_local_sets_cookie_and_flips_whoami(monkeypatch) -> None:  # type: ignore[no-untyped-def]

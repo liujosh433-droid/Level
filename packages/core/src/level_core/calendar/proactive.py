@@ -116,9 +116,17 @@ async def regenerate_proactive_cards(
                 f"{display_name}'s {activity_label.lower()} is missing this week. "
                 "Want me to put it back?"
             )
+        # ``group_id`` mirrors the format ``_decorate_missing_group``
+        # emits for missing_usuals_week rows (``{weekday}:{category}``).
+        # The frontend uses it to (a) hide the corresponding missing-
+        # week row so the two sections don't duplicate the same nudge,
+        # and (b) call ``/missing-week/put-back`` with the same id so
+        # one click resolves both surfaces.
+        group_id = f"{int(g.weekday)}:{g.category.value}"
         cards.append(
             {
-                "card_id": f"missing:{g.weekday}:{g.category.value}",
+                "card_id": f"missing:{group_id}",
+                "group_id": group_id,
                 "kind": "missing_usual",
                 "week_start": week_start.isoformat(),
                 "day": day,

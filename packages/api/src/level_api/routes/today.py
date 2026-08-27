@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, BackgroundTasks, Depends, Query
 from pydantic import BaseModel, Field
 from level_core.calendar.enrich import enrich_agenda
-from level_core.calendar.sync import agenda_is_fresh, refresh_agenda
+from level_core.calendar.sync import _rebuild_daily_agenda, agenda_is_fresh, refresh_agenda
 from level_core.calendar.usuals import (
     current_week_bounds,
     missing_usuals_this_week,
@@ -20,6 +20,7 @@ from level_core.calendar.usuals import (
 from level_core.config import get_settings
 from level_core.observability import get_logger
 from level_core.schemas import ActivityType, CachedEvent, LoadBucket
+from level_core.schemas.agenda import EventTime
 from level_core.storage.base import UserStore
 from level_core.tz import resolve_tz
 from level_core.voice.summary import get_daily_summary, prewarm_daily_summary
@@ -308,6 +309,260 @@ async def resolve_missing_group(
     profile["resolved_missing_week"] = {"week_start": week_start_iso, "group_ids": ids}
     await store.profile.write(profile)
     return {"status": "resolved", "group_id": body.group_id, "week_start": week_start_iso}
+
+
+class PutBackBody(BaseModel):
+    group_id: str = Field(min_length=1, max_length=160)
+    # Optional proactive-card id to dismiss in the same round-trip, so
+    # clicking "Yes, put it back" on a card doesn't leave the card
+    # hanging around after we've booked the missing time.
+    card_id: str | None = Field(default=None, max_length=200)
+
+
+@router.post("/missing-week/put-back")
+async def put_back_missing_group(
+    body: PutBackBody, store: UserStore = Depends(get_user_store)
+) -> dict[str, Any]:
+    """Book a placeholder event for a missing-usual group + resolve it.
+
+    Wires up the "Yes, put it back" button on the proactive card AND
+    the equivalent action on the missing-week row. Deterministic, no
+    LLM: we pick the majority-vote weekday/day, use the median start
+    time from the underlying usuals' source events (same logic
+    ``_decorate_missing_group`` uses), then upsert an event whose
+    ``origin="level"`` marks it as a Level-created booking (distinct
+    from Google-sourced events so a future Google sync won't clobber
+    it).
+
+    Idempotent: the event_id is deterministic
+    (``level:putback:{group_id}:{week_start}``), so re-clicking the
+    button on a double-tap or refresh doesn't create duplicates.
+
+    Returns the created event view plus dismissal state so the
+    frontend can update the UI without a full refetch, though the
+    current UI also calls ``load()`` for consistency.
+    """
+    profile = await store.profile.read() or {}
+    tz = resolve_tz(profile.get("tz") if isinstance(profile.get("tz"), str) else None)
+    today = datetime.now(tz).date()
+    week_start, week_end = current_week_bounds(today)
+    week_start_iso = week_start.isoformat()
+
+    events = await store.agenda.list()
+    usuals = await store.usuals.list()
+    people_list = await store.people.list()
+    events_by_id = {e.event_id: e for e in events}
+    people_by_id = {p.person_id: p for p in people_list}
+    week_events = [
+        e
+        for e in events
+        if week_start <= _event_local_date(e, tz) < week_end
+    ]
+
+    missing = missing_usuals_this_week(
+        usuals=usuals,
+        week_events=week_events,
+        as_of_date=today,
+        events_by_id=events_by_id,
+        people=people_list,
+        tz=tz,
+    )
+    group = next(
+        (
+            g
+            for g in missing
+            if f"{int(g.weekday)}:{g.category.value}" == body.group_id
+        ),
+        None,
+    )
+    if group is None:
+        # Group already resolved/covered - still honor the button by
+        # dismissing the card (if any) and returning idempotent status.
+        # This keeps the UX consistent when the user double-clicks
+        # between refreshes.
+        if body.card_id:
+            await _dismiss_card_id(store, body.card_id, week_start_iso)
+        return {
+            "status": "already_resolved",
+            "group_id": body.group_id,
+            "week_start": week_start_iso,
+        }
+
+    # Compute typical time from source events (same logic as
+    # _decorate_missing_group). Falls back to a category-neutral
+    # 5-6pm block if we somehow have no source events.
+    start_min, dur_min = _typical_start_and_duration(
+        group, {u.usual_id: u for u in usuals}, events_by_id, tz
+    )
+    day_this_week = week_start + timedelta(days=int(group.weekday))
+    start_local = datetime.combine(
+        day_this_week,
+        datetime.min.time(),
+        tzinfo=tz,
+    ) + timedelta(minutes=start_min)
+    end_local = start_local + timedelta(minutes=dur_min)
+
+    activity = _majority_activity_type(group, {u.usual_id: u for u in usuals})
+    summary = (group.title_hint or group.category.label).strip()
+    matched_people = list(group.person_ids)
+    attendee_tokens = [
+        people_by_id[pid].display_name.split()[0]
+        for pid in matched_people
+        if pid in people_by_id and not people_by_id[pid].is_self
+    ]
+
+    event_id = f"level:putback:{body.group_id}:{week_start_iso}"
+    new_event = CachedEvent(
+        event_id=event_id,
+        calendar_id="level",
+        summary=summary,
+        time=EventTime(
+            start=start_local,
+            end=end_local,
+            tz=tz.key,
+            all_day=False,
+        ),
+        location=None,
+        attendee_tokens=attendee_tokens,
+        activity_type=activity,
+        classified_at=datetime.utcnow() if activity else None,
+        matched_person_ids=matched_people,
+        origin="level",
+        level_reason="put_back_missing_usual",
+    )
+    await store.agenda.upsert(new_event)
+
+    # Rebuild daily_agenda so /today's O(1) index reflects the new
+    # event without waiting for the nightly rebuild.
+    fresh_events = await store.agenda.list()
+    await _rebuild_daily_agenda(store, fresh_events, tz=tz)
+
+    # Mark the missing group resolved so it stops appearing in both
+    # surfaces (the missing-week list + the proactive-card list, which
+    # the frontend correlates by group_id).
+    resolved = profile.get("resolved_missing_week")
+    if isinstance(resolved, dict) and resolved.get("week_start") == week_start_iso:
+        ids = [str(x) for x in (resolved.get("group_ids") or []) if x]
+    else:
+        ids = []
+    if body.group_id not in ids:
+        ids.append(body.group_id)
+    profile["resolved_missing_week"] = {
+        "week_start": week_start_iso,
+        "group_ids": ids,
+    }
+
+    # Optional card dismissal in the same round trip.
+    if body.card_id:
+        dismissed_raw = profile.get("dismissed_proactive_cards")
+        if (
+            isinstance(dismissed_raw, dict)
+            and dismissed_raw.get("week_start") == week_start_iso
+        ):
+            card_ids = [str(x) for x in (dismissed_raw.get("card_ids") or []) if x]
+        else:
+            card_ids = []
+        if body.card_id not in card_ids:
+            card_ids.append(body.card_id)
+        profile["dismissed_proactive_cards"] = {
+            "week_start": week_start_iso,
+            "card_ids": card_ids,
+        }
+
+    await store.profile.write(profile)
+
+    logger.info(
+        "today.put_back",
+        user_id=store.user_id,
+        group_id=body.group_id,
+        event_id=event_id,
+        activity=str(activity) if activity else None,
+    )
+    return {
+        "status": "booked",
+        "group_id": body.group_id,
+        "card_id": body.card_id,
+        "event": {
+            "event_id": new_event.event_id,
+            "summary": new_event.summary,
+            "start": start_local.isoformat(),
+            "end": end_local.isoformat(),
+            "day": day_this_week.isoformat(),
+            "activity_type": activity.value if activity else None,
+            "origin": new_event.origin,
+        },
+    }
+
+
+async def _dismiss_card_id(store: UserStore, card_id: str, week_start_iso: str) -> None:
+    """Small helper reused by put_back's idempotent fast path."""
+    profile = await store.profile.read() or {}
+    raw = profile.get("dismissed_proactive_cards")
+    if isinstance(raw, dict) and raw.get("week_start") == week_start_iso:
+        card_ids = [str(x) for x in (raw.get("card_ids") or []) if x]
+    else:
+        card_ids = []
+    if card_id in card_ids:
+        return
+    card_ids.append(card_id)
+    profile["dismissed_proactive_cards"] = {
+        "week_start": week_start_iso,
+        "card_ids": card_ids,
+    }
+    await store.profile.write(profile)
+
+
+def _typical_start_and_duration(
+    group: Any,
+    usuals_by_id: dict[str, Any],
+    events_by_id: dict[str, CachedEvent],
+    tz: ZoneInfo,
+) -> tuple[int, int]:
+    """Median start-of-day (minutes) + duration from source events.
+
+    Same shape ``_decorate_missing_group`` computes for display, but
+    returns raw minutes so ``put_back`` can build a datetime with
+    them. Falls back to a benign 5-6pm block if the group has no
+    usable source events (defensive: real data always has some).
+    """
+    starts: list[int] = []
+    durations: list[int] = []
+    for uid in group.representative_usual_ids:
+        u = usuals_by_id.get(uid)
+        if not u:
+            continue
+        for src_uid in u.source_event_uids:
+            ev = events_by_id.get(src_uid)
+            if not ev or ev.time.all_day:
+                continue
+            s_local = ev.time.start.astimezone(tz)
+            e_local = ev.time.end.astimezone(tz)
+            starts.append(s_local.hour * 60 + s_local.minute)
+            durations.append(max(15, int((e_local - s_local).total_seconds() // 60)))
+    if starts:
+        return int(median(starts)), int(median(durations))
+    # 5:00pm, 60 min - benign default for the vanishingly rare case
+    # where the group has no source events to sample from.
+    return 17 * 60, 60
+
+
+def _majority_activity_type(
+    group: Any, usuals_by_id: dict[str, Any]
+) -> ActivityType | None:
+    """Pick the most common activity_type across the group's usuals.
+
+    Returned so the created event colors correctly on the frontend
+    (role-load bar, EventCard palette) instead of showing up as a
+    generic uncategorized event.
+    """
+    counts: Counter[ActivityType] = Counter()
+    for uid in group.representative_usual_ids:
+        u = usuals_by_id.get(uid)
+        if u is not None and u.activity_type is not None:
+            counts[u.activity_type] += 1
+    if not counts:
+        return None
+    return counts.most_common(1)[0][0]
 
 
 def _resolved_group_ids(profile: dict[str, Any], week_start_iso: str) -> set[str]:

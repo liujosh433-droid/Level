@@ -158,9 +158,16 @@
 }
 
 .proactiveText {
+  /*
+   * Design-system foreground text token. Uses --foam (dark ink in
+   * light mode, soft cream in dark mode). NOT --ink - that's the page
+   * background token; naming it as a text color leaves this row
+   * unreadable against the card. Same pitfall we hit on
+   * .missingTitle - see the note above it.
+   */
   margin: 0;
   font-weight: 550;
-  color: var(--ink);
+  color: var(--foam);
 }
 
 .proactiveActions {

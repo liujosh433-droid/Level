@@ -128,6 +128,14 @@ export type CalendarSyncInfo = {
 
 export type ProactiveCard = {
   card_id: string;
+  /**
+   * Matches the corresponding MissingUsualWeek.group_id. The UI uses
+   * this to hide the equivalent row from the "Usuals missing this
+   * week" section so the same nudge doesn't render twice, and to
+   * call /missing-week/put-back with a single id so one click both
+   * books the placeholder event and resolves the group.
+   */
+  group_id: string;
   kind: "missing_usual" | string;
   week_start: string;
   day: string;

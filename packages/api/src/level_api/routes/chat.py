@@ -203,6 +203,30 @@ async def _dispatch_message(
     if pending_email is not None:
         return pending_email
 
+    # Fast path: pure chit-chat ("hi", "how are u", "what can you do")
+    # gets a warm regex-driven reply in <10ms with no LLM. Before this,
+    # "how are u" took ~30s and returned a canned "Noted..." line
+    # because the router had to classify then fall through to the
+    # generic branch. Keep patterns tight so real intents fall through.
+    fast_chit = await _try_fast_chit_chat(store, message)
+    if fast_chit is not None:
+        return fast_chit
+
+    # Fast path: empathy statements ("I'm tired", "rough week"). Warm
+    # reply, no LLM. Router doesn't have a great handler for these
+    # anyway — it just falls through to the general branch.
+    fast_empathy = await _try_fast_empathy(store, message)
+    if fast_empathy is not None:
+        return fast_empathy
+
+    # Fast path: read-only agenda questions ("what's on today", "am I
+    # free tomorrow", "show my schedule"). Data already lives in
+    # store.agenda — no LLM, no Google roundtrip. Sub-second answers
+    # for one of the most common chat inputs.
+    fast_agenda = await _try_fast_agenda_lookup(store, message)
+    if fast_agenda is not None:
+        return fast_agenda
+
     # Fast path: explicit priority statements ("prioritize X over Y") skip
     # the router + PriorityAgent so they still work when Gemini quota is
     # exhausted — and they're ~instant either way.
@@ -242,13 +266,21 @@ async def _dispatch_message(
             # the actual gate was security.
             reply = ARMOR_BLOCK_REPLY
         elif decision.soft_degraded:
+            # Router LLM is quota-blocked. Combine the budget note with
+            # a category-specific hint so the user still gets a
+            # meaningful pointer to a deterministic fast-path they
+            # could use ("book Tuesday 2-3pm dentist" works with the
+            # model off).
             reply = (
-                "I\u2019m at my model budget for the moment. Your message is "
-                "saved \u2014 try again in a few minutes, or ask me to book a "
-                "concrete time and I\u2019ll do it without the model."
+                "I\u2019m at my model budget for the moment. "
+                + _keyword_hint_reply(message)
             )
         else:
-            reply = "I heard you. I'll remember that."
+            # Router returned no value for a non-safety, non-budget
+            # reason (schema mismatch, network hiccup). Keyword-scan
+            # the message so the fallback still hints at what we
+            # think the user was trying to do.
+            reply = _keyword_hint_reply(message)
         return await _ack_no_agent(store, reply)
 
     # Collaborative Partner: honor the router's clarifying-question exit.
@@ -282,11 +314,19 @@ async def _dispatch_message(
         return await _book(store, message, history)
     if path == ChatRouterPath.EMAIL:
         return await _handle_email_request(store, message, history)
-    return {
-        "reply": "Noted. I keep an eye on your calendar and remind you when things line up.",
-        "path": path,
-        "intent": intent,
-    }
+
+    # general/ask + anything the router classified but has no dedicated
+    # handler for: the router already produced a warm chit-chat reply
+    # inline (`general_reply` on the schema) so we don't need a second
+    # LLM call. Persist it and return; falling back to a static
+    # "Noted..." string here would feel robotic (and was: "how are u"
+    # got "Noted. I keep an eye on your calendar..." before this).
+    general_reply = getattr(decision.value, "general_reply", None)  # type: ignore[union-attr]
+    reply = general_reply or (
+        "I heard you. Want me to look at your day, draft something, or "
+        "remember a person? Try \u201cwhen\u2019s a good time for a walk this week?\u201d"
+    )
+    return await _ack_no_agent(store, reply)
 
 
 async def _extract_priority(
@@ -323,6 +363,144 @@ _PRIORITY_LEAD = re.compile(
     re.IGNORECASE,
 )
 
+
+# Deterministic keyword scan used by the router's degraded fallback:
+# if the LLM router itself blocked or errored, we still need to give
+# the user a category-specific hint instead of a generic
+# "I heard you. I'll remember that."
+_KEYWORD_CATEGORIES: list[tuple[re.Pattern[str], str]] = [
+    (
+        re.compile(r"\b(?:book|schedule|move|reschedule|cancel|delete|find|when|free|busy|open)\b", re.I),
+        "schedule",
+    ),
+    (
+        re.compile(r"\b(?:email|draft|send|message|reach out)\b", re.I),
+        "email",
+    ),
+    (
+        re.compile(r"\b(?:remind|reminder|bring|pack|forgot|remember to)\b", re.I),
+        "reminder",
+    ),
+    (
+        re.compile(r"\b(?:priority|prioritize|never miss|always|prefer)\b", re.I),
+        "priority",
+    ),
+    (
+        re.compile(r"\b(?:kid|child|parent|coparent|co-parent|partner|elder|mom|dad|son|daughter|nephew|niece)\b", re.I),
+        "profile",
+    ),
+]
+
+
+def _keyword_hint_reply(message: str) -> str:
+    """Category-aware reply when the router itself failed to classify.
+
+    Beats a static "I heard you" — the user at least gets a hint that
+    matches whatever they were trying to do.
+    """
+    for pat, cat in _KEYWORD_CATEGORIES:
+        if pat.search(message):
+            return {
+                "schedule": (
+                    "That sounds like calendar work. Tell me the day and time "
+                    "(e.g. \u201cbook Tuesday 2\u20133pm dentist\u201d) or a "
+                    "topic (\u201cwhen\u2019s a good time for a walk?\u201d) "
+                    "and I\u2019ll take it from there."
+                ),
+                "email": (
+                    "For email, tell me who to reach and what to say \u2014 "
+                    "e.g. \u201cemail Nova\u2019s teacher about the field trip.\u201d"
+                ),
+                "reminder": (
+                    "Give me the thing to remember and where it attaches, "
+                    "e.g. \u201cremind me to bring the charger before board meetings.\u201d"
+                ),
+                "priority": (
+                    "Tell me what to prioritize and I\u2019ll flag bookings "
+                    "that clash \u2014 e.g. \u201cnever miss Sunday physical therapy.\u201d"
+                ),
+                "profile": (
+                    "Who is this and what\u2019s their role? Try \u201cAlex is "
+                    "my co-parent\u201d or \u201cadd Maya as my kid.\u201d"
+                ),
+            }[cat]
+    return (
+        "I heard you. Want me to look at your day, draft an email, or "
+        "remember a person? Try \u201cwhat\u2019s on today?\u201d or "
+        "\u201cwhen\u2019s a good time for a walk this week?\u201d"
+    )
+
+
+# Fast chit-chat: greetings and self-questions that don't need an LLM.
+# These take <10ms and let the router stay reserved for real intents.
+# Keep the patterns TIGHT — anything ambiguous should fall through to
+# the router so it can classify properly.
+_CHIT_GREETING = re.compile(
+    r"^\s*(?:hi|hey|hello|yo|howdy|sup|good\s+(?:morning|afternoon|evening))"
+    r"[\s.!?]*$",
+    re.IGNORECASE,
+)
+_CHIT_HOW_ARE_YOU = re.compile(
+    r"^\s*(?:how\s+(?:are|r|u|you)\s*(?:you|u|doing|going|is\s+it\s+going)?"
+    r"|how'?s\s+it\s+going|what'?s\s+up|wyd|hru)"
+    r"[\s.!?]*$",
+    re.IGNORECASE,
+)
+_CHIT_WHO_ARE_YOU = re.compile(
+    r"^\s*(?:who\s+are\s+(?:you|u)|what\s+are\s+(?:you|u)|"
+    r"who'?s\s+this|what\s+is\s+level)"
+    r"[\s.!?]*$",
+    re.IGNORECASE,
+)
+_CHIT_HELP = re.compile(
+    r"^\s*(?:what\s+can\s+(?:you|u)\s+do|help|help\s+me|"
+    r"what\s+do\s+(?:you|u)\s+do|how\s+do\s+(?:you|u)\s+work)"
+    r"[\s.!?]*$",
+    re.IGNORECASE,
+)
+_CHIT_THANKS = re.compile(
+    r"^\s*(?:thanks|thank\s+you|thx|ty|thank\s+u)"
+    r"[\s.!?]*$",
+    re.IGNORECASE,
+)
+
+# Empathy / stress statements. Warm, non-clinical reply — no LLM.
+# Keep short so we don't misclassify longer sentences that carry an
+# actual task ("I'm stressed about Nova's Tuesday pickup").
+_EMPATHY_PATTERNS = re.compile(
+    r"^\s*(?:i(?:'m| am)|im|feeling)?\s*"
+    r"(?:so\s+|really\s+|super\s+|kinda\s+|kind of\s+)?"
+    r"(?:tired|exhausted|burnt\s*out|burned\s*out|drained|"
+    r"overwhelmed|stressed(?:\s*out)?|swamped|"
+    r"having a (?:rough|hard|bad|tough) (?:day|week|morning|night)|"
+    r"had a (?:rough|hard|bad|tough) (?:day|week|morning)|"
+    r"rough (?:day|week|morning)|"
+    r"tough (?:day|week|morning))"
+    r"[\s.!?]*$",
+    re.IGNORECASE,
+)
+
+
+# Agenda lookup — questions ABOUT what's on the calendar, not commands
+# to change it. Deterministic answer from `store.agenda` — no LLM.
+_AGENDA_LOOKUP = re.compile(
+    r"\b(?:what'?s\s+on|what\s+do\s+i\s+have|what\s+is\s+on|"
+    r"what\s+does\s+(?:my|the)\s+(?:day|week|schedule)\s+look\s+like|"
+    r"what\s+(?:does|do)\s+(?:my\s+)?(?:today|tomorrow|this\s+week|weekend|"
+    r"monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s+look\s+like|"
+    r"show\s+(?:me\s+)?(?:my\s+)?(?:schedule|calendar|day|week|today|tomorrow)|"
+    r"my\s+(?:schedule|calendar|day|week))\b",
+    re.IGNORECASE,
+)
+_AGENDA_FREE = re.compile(
+    r"\b(?:am\s+i\s+free|do\s+i\s+have\s+anything|anything\s+on)\b",
+    re.IGNORECASE,
+)
+_AGENDA_NEXT = re.compile(
+    r"^\s*(?:what'?s\s+next|next\s+up|what\s+is\s+next)[\s.!?]*$",
+    re.IGNORECASE,
+)
+
 _PRIORITY_ACTIVITY_HINTS: list[tuple[re.Pattern[str], ActivityType]] = [
     (re.compile(r"\b(?:soccer)\b", re.I), ActivityType.SPORTS_SOCCER),
     (re.compile(r"\bbasketball\b", re.I), ActivityType.SPORTS_BASKETBALL),
@@ -336,6 +514,186 @@ _PRIORITY_ACTIVITY_HINTS: list[tuple[re.Pattern[str], ActivityType]] = [
     (re.compile(r"\b(?:elder|dad|mom|father|mother|parent|family)\b", re.I), ActivityType.FAMILY),
     (re.compile(r"\bwork\b", re.I), ActivityType.WORK),
 ]
+
+
+async def _try_fast_empathy(
+    store: UserStore, message: str
+) -> dict[str, Any] | None:
+    """Warm reply for tired / overwhelmed / rough-week statements.
+
+    Zero LLM. The point isn't to pretend to be a therapist — it's to
+    acknowledge and offer a concrete next step from Level.
+    """
+    text = message.strip()
+    if not text or len(text) > 90:
+        return None
+    if not _EMPATHY_PATTERNS.match(text):
+        return None
+    reply = (
+        "That\u2019s a lot. If it helps, I can pull the week into view or "
+        "surface anything you can move \u2014 just say the word."
+    )
+    await _write_reply(store, reply)
+    logger.info("chat.empathy.fast_hit", user=store.user_id)
+    return {"reply": reply, "path": "general", "intent": "ask"}
+
+
+async def _try_fast_agenda_lookup(
+    store: UserStore, message: str
+) -> dict[str, Any] | None:
+    """Read-only agenda questions: 'what\u2019s on today', 'am I free tomorrow',
+    'what\u2019s next', 'show my schedule this week'.
+
+    Formats existing cached events from `store.agenda` — no LLM, no
+    Google roundtrip. Bail if the message looks like a create/move
+    request (has a full time range, or a create/move/cancel verb).
+    """
+    text = message.strip()
+    if not text or len(text) > 140:
+        return None
+    if _TIME_RANGE_RE.search(text):
+        return None
+    if _MOVE_LEAD.search(text) or _CANCEL_LEAD.search(text):
+        return None
+    if _CREATE_LEAD.search(text):
+        return None
+
+    is_next = bool(_AGENDA_NEXT.match(text))
+    is_lookup = bool(_AGENDA_LOOKUP.search(text))
+    is_free_q = bool(_AGENDA_FREE.search(text))
+    if not (is_next or is_lookup or is_free_q):
+        return None
+
+    tz = await tz_for_store(store)
+    now_local = datetime.now(tz)
+    events = await store.agenda.list()
+
+    if is_next:
+        upcoming = sorted(
+            (e for e in events if e.time.start.astimezone(tz) >= now_local),
+            key=lambda e: e.time.start,
+        )
+        if not upcoming:
+            reply = "Nothing more on the calendar right now. Enjoy the quiet."
+        else:
+            reply = "Next up: " + "; ".join(
+                _format_event_line(e, tz) for e in upcoming[:3]
+            ) + "."
+        await _write_reply(store, reply)
+        logger.info("chat.agenda.fast_hit", user=store.user_id, kind="next")
+        return {"reply": reply, "path": "general", "intent": "ask"}
+
+    starts_at, days, label = _horizon_for_message(text, now_local)
+    end_at = starts_at + timedelta(days=days)
+    window_events = sorted(
+        (
+            e for e in events
+            if e.time.start.astimezone(tz) < end_at
+            and e.time.end.astimezone(tz) > starts_at
+        ),
+        key=lambda e: e.time.start,
+    )
+
+    if not window_events:
+        if is_free_q:
+            reply = f"Yes \u2014 you look free {label}."
+        else:
+            reply = f"Nothing on the calendar {label}."
+        await _write_reply(store, reply)
+        logger.info("chat.agenda.fast_hit", user=store.user_id, kind="empty", label=label)
+        return {"reply": reply, "path": "general", "intent": "ask"}
+
+    if is_free_q:
+        reply = (
+            f"Not entirely free {label} \u2014 "
+            + f"{len(window_events)} thing{'s' if len(window_events) != 1 else ''} on. "
+            + "; ".join(_format_event_line(e, tz) for e in window_events[:5])
+        )
+    elif days == 1:
+        reply = f"{label.capitalize()}: " + "; ".join(
+            _format_event_line(e, tz) for e in window_events[:8]
+        )
+    else:
+        reply = f"{label.capitalize()} \u2014 {len(window_events)} thing{'s' if len(window_events) != 1 else ''} across {days} days:\n" + "\n".join(
+            f"\u2022 {_format_event_line(e, tz, include_day=True)}"
+            for e in window_events[:12]
+        )
+        if len(window_events) > 12:
+            reply += f"\n\u2026 and {len(window_events) - 12} more."
+
+    await _write_reply(store, reply)
+    logger.info(
+        "chat.agenda.fast_hit",
+        user=store.user_id,
+        kind="lookup",
+        label=label,
+        count=len(window_events),
+    )
+    return {"reply": reply, "path": "general", "intent": "ask"}
+
+
+def _format_event_line(
+    event: CachedEvent, tz: ZoneInfo, *, include_day: bool = False
+) -> str:
+    """Concise 'Fri 3:15p Nova pickup' rendering for chat agenda lookups."""
+    start_local = event.time.start.astimezone(tz)
+    if event.time.all_day:
+        time_part = "all day"
+    else:
+        time_part = start_local.strftime("%-I:%M%p").lower().replace(":00", "").replace("am", "a").replace("pm", "p")
+    prefix = start_local.strftime("%a ") if include_day else ""
+    title = (event.summary or "(no title)").strip()
+    if len(title) > 60:
+        title = title[:57] + "\u2026"
+    return f"{prefix}{time_part} {title}".strip()
+
+
+async def _try_fast_chit_chat(
+    store: UserStore, message: str
+) -> dict[str, Any] | None:
+    """Answer greetings + self-questions without the LLM.
+
+    Only fires on tight, unambiguous chit-chat patterns. Anything with
+    a time, day, name, or verb like "book"/"remind"/"email" falls
+    through so the real intent gets routed properly.
+    """
+    text = message.strip()
+    if not text or len(text) > 120:
+        return None
+    # Bail if this looks like a task in disguise ("hi, book me lunch").
+    if "," in text or _TIME_RANGE_RE.search(text):
+        return None
+
+    if _CHIT_GREETING.match(text):
+        reply = (
+            "Hi. I\u2019m here whenever you want to look at the week, "
+            "book a time, or draft an email."
+        )
+    elif _CHIT_HOW_ARE_YOU.match(text):
+        reply = (
+            "Doing well \u2014 keeping tabs on your calendar. Want me to "
+            "look at anything specific?"
+        )
+    elif _CHIT_WHO_ARE_YOU.match(text):
+        reply = (
+            "I\u2019m Level \u2014 your second set of hands for the care "
+            "logistics. I watch your calendar, draft school-style emails, "
+            "and remember the people you care for."
+        )
+    elif _CHIT_HELP.match(text):
+        reply = (
+            "I can book time on your calendar, draft emails to teachers "
+            "or doctors, remember people, and flag missing usuals. Try "
+            "\u201cwhen\u2019s a good time for a walk this week?\u201d"
+        )
+    elif _CHIT_THANKS.match(text):
+        reply = "Anytime. I\u2019m here."
+    else:
+        return None
+
+    await _write_reply(store, reply)
+    logger.info("chat.chit_chat.fast_hit", user=store.user_id, pattern=text[:30])
+    return {"reply": reply, "path": "general", "intent": "ask"}
 
 
 async def _try_fast_priority(

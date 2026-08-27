@@ -54,6 +54,12 @@ class ChatRouterDecision(BaseModel):
     # inline "before we book…" bubbles instead of running downstream agents.
     needs_clarification: bool = False
     clarifying_question: str | None = None
+    # For `general/ask` chit-chat (greetings, "how are u", off-topic
+    # questions) the router produces a warm 1-2 sentence reply inline.
+    # Same LLM call - no extra latency - and it saves us from either
+    # a canned "Noted." fallback or spinning up a whole second agent
+    # for casual chat. Non-general paths leave this null.
+    general_reply: str | None = None
 
 
 class ChatTurnResult(BaseModel):

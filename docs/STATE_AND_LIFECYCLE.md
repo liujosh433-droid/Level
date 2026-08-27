@@ -397,17 +397,20 @@ fan-out. Not in scope for the hackathon.
 | Defensive resolve_person_ids        | `calendar/person_match.py` | Late-added people (e.g. Jordan) correctly tag existing events instead of falling back to caregiver-Me |
 | Atomic KV writes (`update_fields`, `mutate`) | `storage/*` | calendar_sync + gate_counters no longer clobber each other under concurrent writers; gate transaction stops quota-cap bypass |
 | Model Armor context scan            | `agents/base.py`, `agents/model_armor.py` | Calendar-derived strings (event titles) get the same injection prefilter as raw user_input |
+| Chit-chat fast-path (`_try_fast_chit_chat`) | `api/routes/chat.py` | "hi" / "how are u" / "what can you do" answered in <10ms with no LLM. Before this: router had to classify then fall through to a generic "Noted..." branch (~30s worst-case under quota pressure, and an off-topic reply) |
 
 ### 5.2 Costs
 
-- **Router call** (Flash, 800 tokens): ~$0.00016 - the only LLM call
-  guaranteed to run on every chat turn. Every other agent is gated
-  by intent or a deterministic fast-path.
-- **Fast-paths** (`_try_fast_priority`, `_try_fast_calendar`, etc.)
-  handle the common cases (book Tuesday 2-3pm, "prioritize X",
-  "remind me to bring shoes") with **zero LLM calls**. This is the
-  single biggest perf + cost lever - most turns don't call Gemini
-  at all.
+- **Router call** (Flash, 800 tokens): ~$0.00016 - runs on any chat
+  turn that isn't caught by a deterministic fast-path first. The
+  chit-chat fast-path in particular means greetings and "who are you"
+  cost $0 and reply in <10ms.
+- **Fast-paths** (`_try_fast_chit_chat`, `_try_fast_priority`,
+  `_try_fast_calendar`, `_try_fast_reminder`, `_try_fast_email`,
+  `_try_fast_person`) handle the common cases (greetings,
+  book Tuesday 2-3pm, "prioritize X", "remind me to bring shoes")
+  with **zero LLM calls**. This is the single biggest perf + cost
+  lever - most turns don't call Gemini at all.
 - **Weekly cost per active user** (target): <$0.25 assuming ~30
   chats/week, 3 emails, 7 summaries.
 

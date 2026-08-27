@@ -302,14 +302,31 @@ async def _generate_veo(*, prompt: str, model: str) -> dict[str, str] | None:
 
 
 async def _generate_lyria(*, mood: str, model: str) -> dict[str, str] | None:
-    """Call Lyria on Vertex. Returns None on any failure.
+    """Call Lyria 3 on Vertex via the Interactions API. Returns None
+    on any failure so callers can silently degrade.
 
-    Prompt is fixed per mood so caching is trivial.
+    Two Vertex-specific gotchas encoded here:
+
+    1. **Wrong method**: an older iteration used
+       ``client.models.generate_music()`` which was never a real SDK
+       surface. Lyria 3 lives on ``client.interactions.create()`` and
+       ``client.models.generate_content()`` returns 400 for Lyria
+       models on Vertex (google/genai issue #2533).
+
+    2. **Region must be "global"**: Lyria 3 on Vertex only serves from
+       the ``global`` location. Any regional location (us-central1,
+       etc.) returns 500 InternalServerError. We hardcode ``global``
+       here instead of ``settings.google_cloud_region`` for that
+       reason - the setting still governs Gemini and Veo where
+       regional placement matters.
+
+    Prompt is fixed per mood, so the caller caches one blob per mood
+    and the whole app shares three chimes.
     """
     prompts = {
-        "calm": "A soft, unobtrusive 3-second ambient chime, warm piano, gentle.",
-        "hopeful": "A hopeful 3-second mallet chime, morning light, uplifting.",
-        "energetic": "A bright 3-second uplifting chord, subtle percussion.",
+        "calm": "A soft, unobtrusive ambient chime, warm piano, gentle intro tone.",
+        "hopeful": "A hopeful mallet chime, morning light, uplifting intro tone.",
+        "energetic": "A bright uplifting chord, subtle percussion, energetic intro tone.",
     }
     prompt = prompts.get(mood, prompts["calm"])
     try:
@@ -324,21 +341,28 @@ async def _generate_lyria(*, mood: str, model: str) -> dict[str, str] | None:
         client = genai.Client(
             vertexai=True,
             project=settings.google_cloud_project,
-            location=settings.google_cloud_region,
+            # Not settings.google_cloud_region - see docstring.
+            location="global",
         )
-        op = await asyncio.to_thread(
-            client.models.generate_music, model=model, prompt=prompt
+        interaction = await asyncio.to_thread(
+            client.interactions.create,
+            model=model,
+            input=prompt,
         )
-        for _ in range(30):
-            if getattr(op, "done", False):
-                break
-            await asyncio.sleep(1.0)
-            op = await asyncio.to_thread(client.operations.get, op)
-        response = getattr(op, "response", None) or {}
-        tracks = getattr(response, "generated_tracks", None) or []
-        if not tracks:
+        audio = getattr(interaction, "output_audio", None)
+        if audio is None:
+            logger.warning("media.lyria.no_audio", mood=mood)
             return None
-        return {"audio_url": getattr(tracks[0], "audio_uri", None) or ""}
+        # output_audio.data is base64-encoded MP3 per the Interactions
+        # API. Rather than upload to GCS (extra IAM, bucket, TTL) we
+        # ship it back as a data: URL - the frontend Audio() element
+        # accepts these transparently and Firestore's 1 MB doc cap
+        # comfortably holds one ~500 KB base64 chime per mood.
+        b64 = getattr(audio, "data", "") or ""
+        if not b64:
+            logger.warning("media.lyria.empty_audio", mood=mood)
+            return None
+        return {"audio_url": f"data:audio/mp3;base64,{b64}"}
     except Exception as err:  # noqa: BLE001
         logger.warning("media.lyria.failed", err=str(err)[:200])
         return None

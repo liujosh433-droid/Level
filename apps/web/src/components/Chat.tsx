@@ -807,11 +807,30 @@ export default function Chat({
           const audio = new Audio(chime.audio_url);
           audio.volume = 0.6;
           await new Promise<void>((resolve) => {
-            audio.onended = () => resolve();
-            audio.onerror = () => resolve();
-            void audio.play().catch(() => resolve());
-            // Absolute ceiling: chime shouldn't hold up TTS more than 4s.
-            window.setTimeout(() => resolve(), 4000);
+            let done = false;
+            const finish = () => {
+              if (done) return;
+              done = true;
+              // Explicitly stop the audio element. Lyria 3 always
+              // returns a 30-second clip so without this the chime
+              // would keep playing under the TTS voice after the
+              // 4s ceiling fires. Fade briefly to avoid a hard cut.
+              try {
+                audio.volume = 0;
+                audio.pause();
+                audio.currentTime = 0;
+              } catch {
+                // ignore - already torn down
+              }
+              resolve();
+            };
+            audio.onended = finish;
+            audio.onerror = finish;
+            void audio.play().catch(finish);
+            // A chime is a doorbell, not a song. Cap at 3.5s so the
+            // summary voice starts landing in a socially-normal
+            // beat regardless of how long the clip actually is.
+            window.setTimeout(finish, 3500);
           });
         } catch {
           // Ignore chime failures - never block "Hear my day".

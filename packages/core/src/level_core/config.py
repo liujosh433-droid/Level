@@ -60,11 +60,20 @@ class Settings(BaseSettings):
     level_adk_mode: bool = False
 
     # Multimodal bonus integrations (rules: +0.2 each Google model).
-    # Veo 3 for weekly recap videos, Lyria for Hear-my-day audio ambience.
-    # Both are gated on being non-empty AND the caller having Vertex
-    # access; missing config degrades silently to text-only.
+    # Veo 3 for weekly recap videos, Lyria for Hear-my-day audio
+    # ambience. Both are gated on being non-empty AND the caller
+    # having Vertex access; missing config degrades silently to
+    # text-only.
+    #
+    # Lyria 3 model ID has to be one of the Interactions API models
+    # (``lyria-3-clip-preview`` = fixed 30-second clip,
+    # ``lyria-3-pro-preview`` = longer compositions). The older
+    # ``lyria-002`` returned "Model has no attribute 'generate_music'"
+    # because the code was calling a method that never existed on the
+    # SDK - see routes/media.py::_generate_lyria for the corrected
+    # ``interactions.create`` shape.
     level_model_veo: str = "veo-3.0-generate-preview"
-    level_model_lyria: str = "lyria-002"
+    level_model_lyria: str = "lyria-3-clip-preview"
     level_media_enabled: bool = False
 
     level_cal_days_back: int = Field(default=14, ge=1, le=365)

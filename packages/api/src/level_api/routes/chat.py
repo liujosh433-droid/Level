@@ -286,12 +286,27 @@ async def _dispatch_message(
     path = decision.value.path  # type: ignore[union-attr]
     intent = decision.value.intent  # type: ignore[union-attr]
 
+    # Router audit_id threads into the dispatchers so the response can
+    # carry it back to the frontend. The frontend echoes it on any
+    # feedback click, which lets /v1/feedback write a FeedbackChip
+    # audit row with parent_audit_id set - producing the click-to-next-
+    # call causal edge in /admin/traces.
+    router_audit_id = decision.audit_id
     if path == ChatRouterPath.PROFILE and intent == ChatRouterIntent.PRIORITY:
-        return await _extract_priority(store, message, decision.value, history)  # type: ignore[arg-type]
+        return await _extract_priority(
+            store, message, decision.value, history,  # type: ignore[arg-type]
+            router_audit_id=router_audit_id,
+        )
     if path == ChatRouterPath.REMINDER and intent == ChatRouterIntent.ADD_REMINDER:
-        return await _extract_reminder(store, message, decision.value, history)  # type: ignore[arg-type]
+        return await _extract_reminder(
+            store, message, decision.value, history,  # type: ignore[arg-type]
+            router_audit_id=router_audit_id,
+        )
     if path == ChatRouterPath.PROFILE and intent == ChatRouterIntent.PERSON_UPDATE:
-        return await _person_update(store, message, decision.value, history)  # type: ignore[arg-type]
+        return await _person_update(
+            store, message, decision.value, history,  # type: ignore[arg-type]
+            router_audit_id=router_audit_id,
+        )
     if path == ChatRouterPath.SCHEDULE and intent == ChatRouterIntent.BOOK_NOW:
         return await _book(store, message, history)
     if path == ChatRouterPath.SCHEDULE and intent == ChatRouterIntent.FIND_TIME:
@@ -316,7 +331,12 @@ async def _dispatch_message(
 
 
 async def _extract_priority(
-    store: UserStore, message: str, decision: Any, history: list[dict[str, str]]
+    store: UserStore,
+    message: str,
+    decision: Any,
+    history: list[dict[str, str]],
+    *,
+    router_audit_id: str = "",
 ) -> dict[str, Any]:
     # Inline shortcut: if the router already extracted a clean priority
     # in its single Flash call, save straight to Firestore. Skips a
@@ -344,6 +364,10 @@ async def _extract_priority(
             "path": "profile",
             "intent": "priority",
             "priority_id": prio.priority_id,
+            # Router's audit_id owns this extraction (inline path skipped
+            # PriorityAgent). Frontend attaches this to the FeedbackChip
+            # click so /admin/traces can render the causal edge.
+            "audit_id": router_audit_id,
         }
 
     # Fallback: router wasn't confident enough to inline-extract. Run
@@ -366,6 +390,8 @@ async def _extract_priority(
         "path": "profile",
         "intent": "priority",
         "priority_id": prio.priority_id,
+        # Specialist path: PriorityAgent's audit_id owns this extraction.
+        "audit_id": result.audit_id,
     }
 
 
@@ -816,7 +842,12 @@ async def _try_fast_person(store: UserStore, message: str) -> dict[str, Any] | N
 
 
 async def _remember_person(
-    store: UserStore, *, name: str, relation: Any, source_span: str | None
+    store: UserStore,
+    *,
+    name: str,
+    relation: Any,
+    source_span: str | None,
+    audit_id: str = "",
 ) -> dict[str, Any]:
     existing = await find_person_by_name(store, name)
     person = await upsert_kept_person(
@@ -844,11 +875,24 @@ async def _remember_person(
     else:
         reply = f"{person.display_name} is already on your list as your {label}."
     await _write_reply(store, reply)
-    return {"reply": reply, "path": "profile", "intent": "person_update", "person_id": person.person_id}
+    response: dict[str, Any] = {
+        "reply": reply,
+        "path": "profile",
+        "intent": "person_update",
+        "person_id": person.person_id,
+    }
+    if audit_id:
+        response["audit_id"] = audit_id
+    return response
 
 
 async def _extract_reminder(
-    store: UserStore, message: str, decision: Any, history: list[dict[str, str]]
+    store: UserStore,
+    message: str,
+    decision: Any,
+    history: list[dict[str, str]],
+    *,
+    router_audit_id: str = "",
 ) -> dict[str, Any]:
     # Inline shortcut: router already extracted the reminder in one
     # Flash call. Saves the ReminderAgent LLM call.
@@ -866,6 +910,7 @@ async def _extract_reminder(
             activity_type=inline.activity_type or ActivityType.OTHER,
             source_span=inline.source_span,
             lead_minutes=inline.lead_minutes,
+            audit_id=router_audit_id,
         )
 
     # Fallback: full ReminderAgent extraction (novel wording, multi-
@@ -880,9 +925,13 @@ async def _extract_reminder(
             activity_type=er.activity_type or ActivityType.OTHER,
             source_span=er.source_span,
             lead_minutes=er.lead_minutes,
+            audit_id=result.audit_id,
         )
     parsed = parse_reminder(message) or parse_reminder_followup(message, history)
     if parsed is not None:
+        # Regex-parsed fast path: no LLM call happened, so audit_id
+        # stays empty and the frontend will simply omit it from the
+        # feedback POST.
         return await _save_reminder(
             store,
             text=parsed.text,
@@ -924,6 +973,7 @@ async def _save_reminder(
     activity_type: ActivityType,
     source_span: str | None,
     lead_minutes: int = 60,
+    audit_id: str = "",
 ) -> dict[str, Any]:
     person_id: str | None = None
     if person_display_name:
@@ -951,16 +1001,26 @@ async def _save_reminder(
     else:
         reply = f"Reminder saved: '{reminder.text}'. I'll flag it on {where} events."
     await _write_reply(store, reply)
-    return {
+    response: dict[str, Any] = {
         "reply": reply,
         "path": "reminder",
         "intent": "add_reminder",
         "reminder_id": reminder.reminder_id,
     }
+    # Only set when a real LLM call produced this reminder; the fast-
+    # path regex parse leaves audit_id empty so we omit it.
+    if audit_id:
+        response["audit_id"] = audit_id
+    return response
 
 
 async def _person_update(
-    store: UserStore, message: str, decision: Any, history: list[dict[str, str]]
+    store: UserStore,
+    message: str,
+    decision: Any,
+    history: list[dict[str, str]],
+    *,
+    router_audit_id: str = "",
 ) -> dict[str, Any]:
     # Inline shortcut: router already extracted the edit in one Flash
     # call. Skips PersonEditAgent (~1-3s under quota pressure).
@@ -972,7 +1032,9 @@ async def _person_update(
             action=inline.action,
             target=inline.target_name,
         )
-        applied = await _apply_person_edit(store, message, inline)
+        applied = await _apply_person_edit(
+            store, message, inline, audit_id=router_audit_id
+        )
         if applied is not None:
             return applied
         # Router said "person_update" but the inline shape doesn't map
@@ -995,14 +1057,20 @@ async def _person_update(
             "Tell me who they are \u2014 \u201cAlex is my co-parent\u201d or \u201cRobert is my kid, not my dad\u201d.",
         )
 
-    applied = await _apply_person_edit(store, message, edit)
+    applied = await _apply_person_edit(
+        store, message, edit, audit_id=result.audit_id
+    )
     if applied is not None:
         return applied
     return await _ack_no_agent(store, "I heard you, but I'm not sure how to change that yet.")
 
 
 async def _apply_person_edit(
-    store: UserStore, message: str, edit: Any
+    store: UserStore,
+    message: str,
+    edit: Any,
+    *,
+    audit_id: str = "",
 ) -> dict[str, Any] | None:
     """Apply a structured person edit (from router inline OR PersonEditAgent).
 
@@ -1020,11 +1088,25 @@ async def _apply_person_edit(
                 name=edit.target_name,
                 relation=relation,
                 source_span=edit.source_span,
+                audit_id=audit_id,
             )
         return await _ack_no_agent(
             store,
             f"I don\u2019t have {edit.target_name} yet. Try \u201c{edit.target_name} is my co-parent\u201d (or kid, elder, partner).",
         )
+
+    def _resp(reply: str) -> dict[str, Any]:
+        """Person-update response shape with audit_id when a real LLM
+        call produced this edit. Fast-path parse_person_intro leaves
+        audit_id empty so the frontend omits it from feedback."""
+        out: dict[str, Any] = {
+            "reply": reply,
+            "path": "profile",
+            "intent": "person_update",
+        }
+        if audit_id:
+            out["audit_id"] = audit_id
+        return out
 
     if edit.action == "add" and edit.new_relation is not None:
         return await _remember_person(
@@ -1032,6 +1114,7 @@ async def _apply_person_edit(
             name=target.display_name,
             relation=edit.new_relation,
             source_span=edit.source_span,
+            audit_id=audit_id,
         )
 
     if edit.action == "change_relation" and edit.new_relation is not None:
@@ -1055,7 +1138,7 @@ async def _apply_person_edit(
         )
         reply = f"Updated {updated.display_name}: {old_relation} \u2192 {edit.new_relation.value}."
         await _write_reply(store, reply)
-        return {"reply": reply, "path": "profile", "intent": "person_update"}
+        return _resp(reply)
 
     if edit.action == "rename" and edit.new_display_name:
         old_name = target.display_name
@@ -1073,7 +1156,7 @@ async def _apply_person_edit(
         _background_enrich(store, source="person_rename")
         reply = f"Got it \u2014 calling them {updated.display_name}."
         await _write_reply(store, reply)
-        return {"reply": reply, "path": "profile", "intent": "person_update"}
+        return _resp(reply)
 
     if edit.action == "mark_self":
         updated = await store.people.upsert(
@@ -1084,7 +1167,7 @@ async def _apply_person_edit(
         _background_enrich(store, source="mark_self")
         reply = f"Marked {updated.display_name} as you."
         await _write_reply(store, reply)
-        return {"reply": reply, "path": "profile", "intent": "person_update"}
+        return _resp(reply)
 
     if edit.action == "remove":
         await set_person_status(store, target.person_id, "not_me")
@@ -1101,7 +1184,7 @@ async def _apply_person_edit(
         _background_enrich(store, source="person_remove")
         reply = f"Removed {target.display_name} from your care list."
         await _write_reply(store, reply)
-        return {"reply": reply, "path": "profile", "intent": "person_update"}
+        return _resp(reply)
 
     return None
 
@@ -1153,6 +1236,7 @@ async def _book(
         end_dt=end_dt,
         source_span=booking.source_span,
         location=booking.location,
+        audit_id=result.audit_id,
     )
 
 
@@ -1997,6 +2081,7 @@ async def _finalize_cal_change(
     calendar_id: str | None = None,
     old_start_dt: datetime | None = None,
     old_end_dt: datetime | None = None,
+    audit_id: str = "",
 ) -> dict[str, Any]:
     """Write the create / move / delete to Google Calendar and refresh the
     local agenda. Shared by the fast path, LLM book path, and confirm-yes.
@@ -2088,13 +2173,19 @@ async def _finalize_cal_change(
         end=end_dt.isoformat(),
     )
     await _write_reply(store, reply)
-    return {
+    response: dict[str, Any] = {
         "reply": reply,
         "path": "schedule",
         "intent": intent,
         "event_id": booked_id,
         "html_link": html_link,
     }
+    # BookAgent audit_id (or later confirm-yes chain that started from
+    # a book LLM call). Fast-path booking never touches an LLM so its
+    # audit_id stays empty and the frontend omits it from feedback.
+    if audit_id:
+        response["audit_id"] = audit_id
+    return response
 
 
 async def _refresh_after_book(store: UserStore) -> None:
@@ -2267,7 +2358,7 @@ async def _draft_for_candidate(
         "I won\u2019t send until you do."
     )
     await _write_reply(store, reply)
-    return {
+    response: dict[str, Any] = {
         "reply": reply,
         "path": "email",
         "intent": "send_email",
@@ -2281,6 +2372,13 @@ async def _draft_for_candidate(
             "kind": contact.kind.value,
         },
     }
+    # EmailAgent audit_id lets a keep/adjust/not-me chip on the draft
+    # post `audit_id` to /v1/feedback, so /admin/traces renders the
+    # causal edge (draft call -> FeedbackChip -> next email call).
+    # Empty when the template fallback fired (no LLM call to attribute).
+    if drafted.audit_id:
+        response["audit_id"] = drafted.audit_id
+    return response
 
 
 async def _read_pending_email_pick(store: UserStore) -> _PendingEmailPick | None:
@@ -2428,6 +2526,7 @@ async def _propose_cal_change(
     old_start_dt: datetime | None = None,
     old_end_dt: datetime | None = None,
     activity: ActivityType | None = None,
+    audit_id: str = "",
 ) -> dict[str, Any]:
     """Check conflicts and priority overlaps, then either write immediately
     or stash a pending change and ask the user to confirm.
@@ -2460,6 +2559,7 @@ async def _propose_cal_change(
             calendar_id=calendar_id,
             old_start_dt=old_start_dt,
             old_end_dt=old_end_dt,
+            audit_id=audit_id,
         )
 
     expires_at = (datetime.now(UTC) + timedelta(minutes=PENDING_BOOKING_TTL_MIN)).isoformat()

@@ -44,6 +44,11 @@ type Message = {
     value: string;
     verdict?: FeedbackVerdict;
     submitting?: FeedbackVerdict;
+    // audit_id of the LLM call that produced this artifact. Threaded
+    // back to /v1/feedback so the FeedbackChip audit row's
+    // parent_audit_id links to the original call in /admin/traces.
+    // Empty for fast-path replies that never touched an LLM.
+    auditId?: string;
   };
 };
 
@@ -218,11 +223,13 @@ function streamingSupported(): boolean {
 }
 
 function feedbackTargetFromResult(result: ChatResult): Message["feedback"] | undefined {
+  const auditId = result?.audit_id || undefined;
   if (result?.email_draft) {
     return {
       agent: "EmailAgent",
       field: "email.body",
       value: `${result.email_draft.subject}: ${result.email_draft.body.slice(0, 200)}`,
+      auditId,
     };
   }
   if (result?.priority_id) {
@@ -230,6 +237,7 @@ function feedbackTargetFromResult(result: ChatResult): Message["feedback"] | und
       agent: "PriorityAgent",
       field: "priority.text",
       value: (result.reply || "").slice(0, 200),
+      auditId,
     };
   }
   if (result?.reminder_id) {
@@ -237,6 +245,7 @@ function feedbackTargetFromResult(result: ChatResult): Message["feedback"] | und
       agent: "ReminderAgent",
       field: "reminder.text",
       value: (result.reply || "").slice(0, 200),
+      auditId,
     };
   }
   if (result?.person_id) {
@@ -244,6 +253,7 @@ function feedbackTargetFromResult(result: ChatResult): Message["feedback"] | und
       agent: "PersonEditAgent",
       field: "person.relation",
       value: (result.reply || "").slice(0, 200),
+      auditId,
     };
   }
   if (result?.event_id) {
@@ -251,6 +261,7 @@ function feedbackTargetFromResult(result: ChatResult): Message["feedback"] | und
       agent: "BookAgent",
       field: "booking.title",
       value: (result.reply || "").slice(0, 200),
+      auditId,
     };
   }
   return undefined;
@@ -270,6 +281,10 @@ type ChatResult = {
   // Set when the server surfaced remembered priorities in this reply
   // (e.g. booking-conflict confirm bubble). Rendered in teal.
   priority_hits?: string[];
+  // Populated when the reply came from a real LLM call. Threaded to
+  // /v1/feedback on chip clicks so /admin/traces can render the
+  // click-to-next-call causal edge.
+  audit_id?: string;
 };
 
 function EmailDraftCard({
@@ -541,6 +556,11 @@ export default function Chat({
           field: msg.feedback.field,
           value: msg.feedback.value,
           verdict,
+          // Included only when the reply came from a real LLM call.
+          // The backend uses this as parent_audit_id on the
+          // FeedbackChip audit row so /admin/traces links the click
+          // to the artifact it judged.
+          audit_id: msg.feedback.auditId,
         });
         setMessages((prev) =>
           prev.map((m) =>

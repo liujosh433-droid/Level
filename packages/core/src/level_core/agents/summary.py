@@ -23,6 +23,11 @@ If a `memory_bank` context is provided, use one such fact ONLY when it
 naturally strengthens the summary (e.g. matches a person or activity
 today). Never force a memory in.
 
+If an `avoid_examples` context is provided, the caregiver has explicitly
+rejected summaries in this style/tone (via the "Adjust" or "Not me" chip
+on prior summaries). Do NOT produce output that echoes any of these
+examples in phrasing or tone.
+
 Return only JSON."""
 
 
@@ -50,12 +55,24 @@ async def run(
     # the daily summary sounds like Level remembers them (e.g. "you
     # usually skip lunch on Wednesdays" or "Nova gets picked up early
     # on library day").
-    memories = await recall_memories(store, limit=6)
-    context = {}
-    if memories:
-        context["memory_bank"] = [
-            {"text": m["text"], "tags": m.get("tags") or []} for m in memories
-        ]
+    #
+    # Memories tagged `avoid` came from adjust/not-me chip clicks on
+    # prior summaries. Split them into a separate `avoid_examples`
+    # bucket so the system prompt treats them as negative constraints.
+    memories = await recall_memories(store, limit=10)
+    positive_memories: list[dict[str, object]] = []
+    avoid_memories: list[dict[str, object]] = []
+    for m in memories:
+        tags = m.get("tags") or []
+        if "avoid" in tags:
+            avoid_memories.append({"text": m["text"], "tags": tags})
+        else:
+            positive_memories.append({"text": m["text"], "tags": tags})
+    context: dict[str, object] = {}
+    if positive_memories:
+        context["memory_bank"] = positive_memories[:6]
+    if avoid_memories:
+        context["avoid_examples"] = avoid_memories[:3]
 
     spec = AgentSpec(
         name="SummaryAgent",

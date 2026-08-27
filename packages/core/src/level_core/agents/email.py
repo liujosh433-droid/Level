@@ -32,6 +32,12 @@ caregiver told Level in prior sessions. Use them ONLY when they are
 clearly relevant to this email (kid's grade, condition, teacher name);
 never fabricate content around them.
 
+If an `avoid_examples` context is provided, the caregiver has explicitly
+rejected drafts in this style/tone before (via the "Adjust" or "Not me"
+chip on prior email drafts). Do NOT produce output that echoes any
+of these examples in phrasing, structure, greeting choice, or closing.
+Treat them as strong negative constraints.
+
 The email must be finished and ready to send:
 - Use Today's date exactly when a date is needed (never "[Current Date]" or similar).
 - Sign with the caregiver's name exactly as given (never "[Your name]" or any bracket token).
@@ -65,12 +71,27 @@ async def run(
     # drafts stay personal across sessions (e.g. "Nova is in 2nd grade",
     # "Papa's doctor is at Kaiser Oakland"). Touched memories bubble to
     # the top of the LRU on next recall.
-    memories = await recall_memories(store, limit=8)
-    context = {}
-    if memories:
-        context["memory_bank"] = [
-            {"text": m["text"], "tags": m.get("tags") or []} for m in memories
-        ]
+    #
+    # Memories tagged `avoid` came from an adjust/not-me chip click on
+    # a prior email draft (see feedback.py::_MEMORY_BANK_FEEDBACK_AGENTS).
+    # We split them out into a separate `avoid_examples` bucket so the
+    # system prompt can treat them as strong negative constraints rather
+    # than facts to echo. This replaces the old EmailAgent -> REMINDER
+    # negative alias which was a silent no-op.
+    memories = await recall_memories(store, limit=12)
+    positive_memories: list[dict[str, object]] = []
+    avoid_memories: list[dict[str, object]] = []
+    for m in memories:
+        tags = m.get("tags") or []
+        if "avoid" in tags:
+            avoid_memories.append({"text": m["text"], "tags": tags})
+        else:
+            positive_memories.append({"text": m["text"], "tags": tags})
+    context: dict[str, object] = {}
+    if positive_memories:
+        context["memory_bank"] = positive_memories[:8]
+    if avoid_memories:
+        context["avoid_examples"] = avoid_memories[:4]
 
     spec = AgentSpec(
         name="EmailAgent",

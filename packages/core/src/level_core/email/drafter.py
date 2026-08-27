@@ -34,6 +34,13 @@ class DraftedEmail:
     subject: str
     body: str
     confirmation_token: str
+    # Populated when the draft came from a real EmailAgent LLM call; empty
+    # when we fell back to the deterministic template (quota exhausted or
+    # LLM error). The chat response threads this to the frontend so a
+    # keep/adjust/not-me click on the draft can post `audit_id` to
+    # /v1/feedback, which lets /admin/traces render the causal edge from
+    # the original draft call to the FeedbackChip audit row.
+    audit_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -110,6 +117,7 @@ async def draft_email(
                 subject=fill_placeholders(draft.subject, ctx),
                 body=fill_placeholders(draft.body, ctx),
                 confirmation_token=secrets.token_urlsafe(24),
+                audit_id=result.audit_id,
             )
     except QuotaExhausted:
         logger.info("email.draft.quota_fallback", user=store.user_id)

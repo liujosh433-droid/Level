@@ -7,7 +7,9 @@ Two paths: **local** (offline, JSON on disk, no GCP needed) and **cloud**
 
 ## Local (offline, 60 seconds)
 
-Prereqs: `node >= 20`, `python >= 3.12`. `uv` is bundled at `.tools/uv`.
+Prereqs: `node >= 20`, `python >= 3.12`, and [`uv`](https://docs.astral.sh/uv/).
+Install `uv` with `brew install uv` or
+`curl -LsSf https://astral.sh/uv/install.sh | sh`.
 
 1. `cp .env.example .env` and fill in at least:
    - `LEVEL_ENV=local`

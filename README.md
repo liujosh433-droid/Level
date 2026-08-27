@@ -68,8 +68,9 @@ The mermaid source is at [`docs/architecture.mmd`](docs/architecture.mmd).
 
 ## 60-second local start
 
-Prereqs: `node >= 20`, `python >= 3.12`. A bundled `uv` binary lives at
-`.tools/uv` so no global install is needed.
+Prereqs: `node >= 20`, `python >= 3.12`, and [`uv`](https://docs.astral.sh/uv/)
+(one-line install: `brew install uv` or
+`curl -LsSf https://astral.sh/uv/install.sh | sh`).
 
 ```bash
 cp .env.example .env

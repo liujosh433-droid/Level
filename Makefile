@@ -2,7 +2,9 @@
         lint format tf-init tf-plan tf-apply deploy-api deploy-jobs \
         diagram clean
 
-UV ?= .tools/uv
+# Prefer a locally-bundled uv at .tools/uv (not committed to the repo)
+# when present, otherwise fall back to the uv binary on PATH.
+UV ?= $(if $(wildcard .tools/uv),.tools/uv,uv)
 PY_DIRS := packages tests
 
 help:
@@ -22,6 +24,16 @@ help:
 	@echo "  make deploy-jobs     build + deploy nightly Cloud Run Job"
 
 install:
+	@command -v $(UV) >/dev/null 2>&1 || { \
+	  echo ""; \
+	  echo "  Level needs the 'uv' Python package manager and none was found."; \
+	  echo "  Install it with one of:"; \
+	  echo "    brew install uv"; \
+	  echo "    curl -LsSf https://astral.sh/uv/install.sh | sh"; \
+	  echo "    pipx install uv"; \
+	  echo ""; \
+	  exit 1; \
+	}
 	$(UV) sync --all-packages --group dev
 	cd apps/web && npm install
 

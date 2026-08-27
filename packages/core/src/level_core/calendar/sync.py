@@ -85,9 +85,48 @@ async def refresh_agenda(
     prev_state = await store.calendar_sync.read() or {}
     sync_tokens: dict[str, str] = dict(prev_state.get("sync_tokens") or {})
 
+    # Circuit breaker: if this user's Google calls have been failing
+    # repeatedly, short-circuit here and return the cached agenda
+    # instead of hammering a broken backend. Reopens automatically
+    # after 30s (see CircuitBreaker defaults).
+    from level_core.calendar.circuit_breaker import (
+        CircuitOpen,
+        get_google_breaker,
+    )
+    breaker = get_google_breaker()
+    try:
+        breaker.before_call(store.user_id)
+    except CircuitOpen as err:
+        logger.warning(
+            "calendar.refresh.circuit_open",
+            user=store.user_id,
+            retry_in_s=round(err.retry_in_s, 1),
+        )
+        cached = await store.agenda.list()
+        return RefreshResult(
+            added=0,
+            updated=0,
+            removed=0,
+            total_cached=len(cached),
+            fingerprint=prev_state.get("fingerprint") or "",
+            fingerprint_changed=False,
+            calendars=[],
+            last_error=(
+                f"google_circuit_open_retry_in_{int(err.retry_in_s)}s"
+            ),
+        )
+
     with span("calendar.refresh", user=store.user_id, calendar=calendar_id or "all"):
-        service = await build_calendar_client(store)
-        calendars = await asyncio.to_thread(_resolve_calendars, service, calendar_id)
+        try:
+            service = await build_calendar_client(store)
+            calendars = await asyncio.to_thread(_resolve_calendars, service, calendar_id)
+        except Exception as build_err:
+            from level_core.calendar.circuit_breaker import (
+                _is_transient_google_error,
+            )
+            if _is_transient_google_error(build_err):
+                breaker.record_failure(store.user_id, build_err)
+            raise
 
     # Single full read at the start. Everything else diffs in memory.
     existing_list = await store.agenda.list()
@@ -253,6 +292,25 @@ async def refresh_agenda(
         full_pulls=full_pulls,
         last_error=last_error,
     )
+    # If every calendar failed, treat this as a Google-side flake;
+    # if at least one succeeded, count that as a healthy call so the
+    # breaker resets. Google having ONE broken calendar shouldn't
+    # cause the whole refresh to trip the breaker.
+    if pulls and all(p.error for p in pulls):
+        transient_errors = [
+            p.error for p in pulls if p.error
+        ]
+        from level_core.calendar.circuit_breaker import (
+            _is_transient_google_error,
+        )
+        # Only trip if any of the errors LOOK transient.
+        if any(_is_transient_google_error(Exception(e or "")) for e in transient_errors):
+            breaker.record_failure(
+                store.user_id, Exception(transient_errors[0] or "google failure")
+            )
+    else:
+        breaker.record_success(store.user_id)
+
     return RefreshResult(
         added=added,
         updated=updated,

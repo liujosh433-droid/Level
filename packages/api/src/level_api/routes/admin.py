@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from level_core.agents.identity import verify as verify_identity
 from level_core.agents.registry import to_dict as registry_snapshot
 from level_core.agents.router_cache import cache_stats as router_cache_stats
+from level_core.calendar.circuit_breaker import circuit_stats
 from level_core.config import get_settings
 from level_core.storage.base import UserStore
 
@@ -76,6 +77,18 @@ async def rate_limit_snapshot() -> dict[str, Any]:
     """Chat HTTP-layer token-bucket stats."""
     _require_admin()
     return rate_limit_stats()
+
+
+@router.get("/calendar_circuit")
+async def calendar_circuit() -> dict[str, Any]:
+    """Per-user circuit-breaker state for Google Calendar calls.
+
+    Shows which users' Google backends we\u2019ve stopped hammering,
+    when the circuit will half-open, and how many failures accumulated
+    in the sliding window.
+    """
+    _require_admin()
+    return circuit_stats()
 
 
 @router.get("/traces")

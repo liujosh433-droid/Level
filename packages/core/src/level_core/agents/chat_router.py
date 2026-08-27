@@ -11,7 +11,10 @@ schema flip the chat handler into "ask the human" mode.
 
 from __future__ import annotations
 
+from typing import Any
+
 from level_core.agents.base import AgentResult, AgentSpec, call_agent
+from level_core.agents.memory_bank import recall as recall_memories
 from level_core.agents.router_cache import get_cached, store_cached
 from level_core.observability import get_logger
 from level_core.schemas import ChatRouterDecision
@@ -44,6 +47,15 @@ If `<context>` has `prior_turns`, use them to resolve short follow-ups:
   time (e.g. "Tuesday 7:45am to 8:22am"), classify as schedule / book_now.
 - If a prior turn set a topic (priority, reminder, person edit) and the
   current message adds a detail, keep the same path/intent.
+
+If `<context>` has `memories`, they are long-lived facts the caregiver
+told Level in earlier sessions ("Nova starts kindergarten Aug 25",
+"Beta's doctor is Dr. Kim"). Use them to disambiguate references:
+- "book Nova's checkup" + memory "Nova's doctor is Dr. Kim" -> route
+  as schedule/book_now with high confidence, no clarify.
+- "email the coach about Wednesday" + memory "Beta plays soccer
+  Wednesdays" -> email path, and treat the coach as Beta's.
+Never invent a memory. Only USE the ones given.
 
 person_update covers BOTH corrections and introductions:
   "Robert is my kid, not my dad", "Alex is my co-parent", "add Maya as my kid".
@@ -119,11 +131,33 @@ async def run(
         temperature=0.0,
         require_source_span=True,
     )
-    context = {"prior_turns": history} if history else None
+    context: dict[str, Any] = {}
+    if history:
+        context["prior_turns"] = history
+
+    # Long-term memory: pass the 3 most recently-used facts so the
+    # router can disambiguate short messages that reference a person
+    # or event by memory ("book Nova's checkup"). Truncate to keep
+    # context small; the router is Flash and we're on the hot path.
+    try:
+        memories = await recall_memories(store, limit=3)
+    except Exception:  # noqa: BLE001 - never let memory bank break the router
+        memories = []
+    if memories:
+        context["memories"] = [
+            {
+                "id": m.get("id"),
+                "text": (m.get("text") or "")[:140],
+                "tags": (m.get("tags") or [])[:4],
+            }
+            for m in memories
+            if m.get("text")
+        ]
+
     result = await call_agent(
         spec,
         user_input=user_message,
-        context=context,
+        context=context or None,
         store=store,
         trace_id=trace_id,
     )

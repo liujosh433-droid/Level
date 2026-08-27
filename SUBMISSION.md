@@ -32,7 +32,7 @@ and is fetchable via `GET /v1/admin/agents`.
 
 | Agent | Class | Cost | Model | Turns | Purpose |
 |---|---|---|---|---|---|
-| ChatRouterAgent | planner | cheap | flash | 1 | Classify chat into path + intent; asks a clarifying question when unsure |
+| ChatRouterAgent | planner | cheap | flash | 1 | Classify chat into path + intent; asks a clarifying question when unsure. **Also does inline extraction for `priority` / `person_update` / `add_reminder` — filling `inline_priority` / `inline_person_edit` / `inline_reminder` in the same Flash call so the dispatcher skips a second specialist LLM roundtrip. Falls back to the specialists below when it's not confident.** |
 | ADKPlannerAgent | planner | cheap | pro | 1 | Deterministic intent -> tool plan on the email hot path when `LEVEL_ADK_MODE=true`; writes its own audit row |
 | RoleAgent | extractor | cheap | flash | 1 | Propose care_people from calendar rollup |
 | UsualAgent | extractor | cheap | flash | 1 | Disambiguate tied weekly patterns |
@@ -138,6 +138,18 @@ enforces (in order):
 - **Router response cache** (LRU + TTL, keyed on user + normalized
   message + history digest) means repeated inputs pay $0 LLM cost.
   `/v1/admin/router_cache` exposes hit-rate.
+- **Router inline extraction** cuts `profile/priority`,
+  `profile/person_update`, and `reminder/add_reminder` from **2 LLM
+  calls to 1**. The router fills `inline_priority` /
+  `inline_person_edit` / `inline_reminder` in the same Flash call as
+  the routing decision; dispatcher writes straight to Firestore and
+  skips the specialist agent. The specialists still run as a
+  fallback so multi-value / novel phrasings don't lose accuracy.
+  This eliminated the ~30s tail we saw on inputs like "elder care
+  with mom takes precedent over other activities" under quota
+  pressure. Router context is enriched with `<people>` +
+  `<negatives>` so the inline extractor has the same signals the
+  specialists did.
 - **HTTP-layer rate limit** on `/v1/chat` (token bucket per user,
   burst=20, refill=30/min) sits ABOVE the LLM gate so runaway
   clients can't burn CPU on fast-paths and Firestore.

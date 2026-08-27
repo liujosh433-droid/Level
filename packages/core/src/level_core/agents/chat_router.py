@@ -17,8 +17,9 @@ from level_core.agents.base import AgentResult, AgentSpec, call_agent
 from level_core.agents.memory_bank import recall as recall_memories
 from level_core.agents.router_cache import get_cached, store_cached
 from level_core.observability import get_logger
-from level_core.schemas import ChatRouterDecision
+from level_core.schemas import ChatRouterDecision, NegativeAgent
 from level_core.storage.base import UserStore
+from level_core.storage.care_store import recent_negatives
 
 logger = get_logger(__name__)
 
@@ -93,6 +94,71 @@ Chit-chat protocol (path=general, intent=ask):
   for messages that AREN'T actions.
 - Leave general_reply null on every non-general path.
 
+Inline-extraction protocol (avoid a second LLM roundtrip):
+The dispatcher will use these fields directly when set, skipping the
+specialist agent. Only fill them when you are CONFIDENT the message
+carries ONE clean value in the shape below. Otherwise leave null and
+the specialist agent will do the extraction.
+
+`inline_priority` (only when path=profile, intent=priority):
+- Fill for a single, unambiguous priority statement.
+- Shape: {text, weight (1-5), activity_types (from the ActivityType
+  enum), source_span}.
+- Weight: 5 = non-negotiable ("never miss", "no matter what",
+  "non-negotiable", "above all"), 4 = strong ("prioritize", "takes
+  precedent", "matters most", "comes first"), 3 = default preference.
+- `activity_types` MUST be from the enum: sports.soccer,
+  sports.basketball, sports.swim, sports.other, school.pickup,
+  school.dropoff, school.event, medical.appointment,
+  medical.therapy, work, family, commute, personal, other.
+- `text` is a short label the user would recognize ("Elder care with
+  mom", "Sunday physical therapy"). Not a full sentence.
+- `source_span` is an exact substring of the user_input.
+- Do NOT re-emit priorities listed under <negatives.priority>.
+- Leave null for: multi-priority statements ("X and Y both matter"),
+  vague ones ("family is important"), or negations ("stop
+  prioritizing X").
+
+`inline_person_edit` (only when path=profile, intent=person_update):
+- Fill for a single, unambiguous edit to the caregiver's people list.
+- Shape: {action, target_name, new_relation (nullable),
+  new_display_name (nullable), source_span}.
+- `action`: add | change_relation | rename | mark_self | remove.
+- `target_name` should match a name/alias in <people> (case-
+  insensitive) for change_relation/rename/mark_self/remove, or be the
+  new person's name for `add`.
+- For `add`, `new_relation` is REQUIRED and MUST be one of the
+  CareRelation values: co-parent, partner, child, elder, self, other.
+- Examples:
+    "Alex is my co-parent"           -> add, Alex, co-parent
+    "Robert is my kid, not my dad"   -> change_relation, Robert, child
+    "call her Nova, not Nova Ann"    -> rename, Nova Ann, new_display_name=Nova
+    "Sam is me"                       -> mark_self, Sam
+    "drop Priya, that's my colleague"-> remove, Priya
+- Leave null for: ambiguous references, multiple edits in one
+  message, or if <people> has multiple plausible matches.
+
+`inline_reminder` (only when path=reminder, intent=add_reminder):
+- Fill for a single, unambiguous "remind me to X (for Y)" statement
+  or a clear follow-up in a reminder thread.
+- Shape: {text, person_display_name (nullable), activity_type,
+  lead_minutes (default 60), source_span}.
+- `activity_type` MUST be from the enum listed above under priority.
+- `person_display_name` should match a display_name/alias from
+  <people> when the reminder is scoped to a person.
+- Examples:
+    "I forgot Theo's soccer shoes"      -> text="Bring soccer shoes",
+      person_display_name="Theo", activity_type=sports.soccer,
+      source_span="soccer shoes"
+    "remind me to bring a charger to my meetings" ->
+      text="Bring a charger", activity_type=work,
+      source_span="bring a charger"
+- Do NOT re-emit reminders listed under <negatives.reminder>.
+- Leave null for: multi-reminder messages, or when the caregiver
+  hasn't said what event/context the reminder attaches to.
+
+Any inline_* field MUST be null on paths/intents other than its own.
+
 Return JSON matching the schema. `source_span` MUST be an exact substring of the user_input."""
 
 
@@ -153,6 +219,45 @@ async def run(
             for m in memories
             if m.get("text")
         ]
+
+    # Inline-extraction context. When the router is confident it can
+    # fill inline_priority / inline_person_edit / inline_reminder we
+    # skip the specialist agent. That means we have to give the router
+    # the same anti-repeat + person-match context those specialists
+    # would have gotten. All three reads are async and independent, so
+    # we fan out; if any single read fails we degrade to "no context"
+    # for that channel rather than block routing.
+    try:
+        people = await store.people.list()
+    except Exception:  # noqa: BLE001 - never let a bad people list break the router
+        people = []
+    if people:
+        context["people"] = [
+            {
+                "display_name": p.display_name,
+                "relation": p.relation.value,
+                "aliases": (p.aliases or [])[:4],
+                "is_self": p.is_self,
+            }
+            for p in people[:40]  # cap to keep the prompt bounded
+        ]
+
+    negatives_by_channel: dict[str, list[dict[str, str]]] = {}
+    for channel_key, agent_enum in (
+        ("priority", NegativeAgent.PRIORITY),
+        ("reminder", NegativeAgent.REMINDER),
+    ):
+        try:
+            negatives = await recent_negatives(store, agent=agent_enum, limit=10)
+        except Exception:  # noqa: BLE001 - graceful degradation
+            negatives = []
+        if negatives:
+            negatives_by_channel[channel_key] = [
+                {"field": n.field, "value": (n.value or "")[:140]}
+                for n in negatives
+            ]
+    if negatives_by_channel:
+        context["negatives"] = negatives_by_channel
 
     result = await call_agent(
         spec,

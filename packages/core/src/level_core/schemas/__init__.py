@@ -16,6 +16,9 @@ from level_core.schemas.chat import (
     ChatRouterIntent,
     ChatRouterPath,
     ChatTurnResult,
+    InlinePersonEdit,
+    InlinePriority,
+    InlineReminder,
 )
 from level_core.schemas.contact import Contact, ContactKind
 from level_core.schemas.negative import NegativeAgent, NegativeFeedback
@@ -44,6 +47,9 @@ __all__ = [
     "DailyAgenda",
     "EventTime",
     "HourBand",
+    "InlinePersonEdit",
+    "InlinePriority",
+    "InlineReminder",
     "LoadBucket",
     "NegativeAgent",
     "NegativeFeedback",

@@ -318,6 +318,37 @@ async def _dispatch_message(
 async def _extract_priority(
     store: UserStore, message: str, decision: Any, history: list[dict[str, str]]
 ) -> dict[str, Any]:
+    # Inline shortcut: if the router already extracted a clean priority
+    # in its single Flash call, save straight to Firestore. Skips a
+    # second ~1-3s LLM roundtrip (PriorityAgent) that was the main
+    # source of the 30s tail on quota-pressured turns.
+    inline = getattr(decision, "inline_priority", None)
+    if inline is not None:
+        logger.info(
+            "chat.priority.router_inline",
+            user=store.user_id,
+            weight=inline.weight,
+            types=[t.value for t in inline.activity_types],
+        )
+        prio = await add_priority(
+            store,
+            text=inline.text,
+            weight=inline.weight,
+            activity_types=inline.activity_types,
+            source_span=inline.source_span,
+        )
+        reply = f"Saved '{prio.text}' as a priority (weight {prio.weight})."
+        await _write_reply(store, reply)
+        return {
+            "reply": reply,
+            "path": "profile",
+            "intent": "priority",
+            "priority_id": prio.priority_id,
+        }
+
+    # Fallback: router wasn't confident enough to inline-extract. Run
+    # PriorityAgent for a proper structured extraction with its own
+    # source_span echo check and negatives context.
     result = await priority_run(store=store, message=message, history=history)
     if not result.value or result.value.priority is None:
         return await _ack_no_agent(store, "I hear you. Say more when you're ready.")
@@ -819,6 +850,26 @@ async def _remember_person(
 async def _extract_reminder(
     store: UserStore, message: str, decision: Any, history: list[dict[str, str]]
 ) -> dict[str, Any]:
+    # Inline shortcut: router already extracted the reminder in one
+    # Flash call. Saves the ReminderAgent LLM call.
+    inline = getattr(decision, "inline_reminder", None)
+    if inline is not None:
+        logger.info(
+            "chat.reminder.router_inline",
+            user=store.user_id,
+            activity=inline.activity_type.value,
+        )
+        return await _save_reminder(
+            store,
+            text=inline.text,
+            person_display_name=inline.person_display_name,
+            activity_type=inline.activity_type or ActivityType.OTHER,
+            source_span=inline.source_span,
+            lead_minutes=inline.lead_minutes,
+        )
+
+    # Fallback: full ReminderAgent extraction (novel wording, multi-
+    # reminder, or follow-up requiring history disambiguation).
     result = await reminder_run(store=store, message=message, history=history)
     if result.value and result.value.reminder is not None:
         er = result.value.reminder
@@ -911,6 +962,25 @@ async def _save_reminder(
 async def _person_update(
     store: UserStore, message: str, decision: Any, history: list[dict[str, str]]
 ) -> dict[str, Any]:
+    # Inline shortcut: router already extracted the edit in one Flash
+    # call. Skips PersonEditAgent (~1-3s under quota pressure).
+    inline = getattr(decision, "inline_person_edit", None)
+    if inline is not None:
+        logger.info(
+            "chat.person.router_inline",
+            user=store.user_id,
+            action=inline.action,
+            target=inline.target_name,
+        )
+        applied = await _apply_person_edit(store, message, inline)
+        if applied is not None:
+            return applied
+        # Router said "person_update" but the inline shape doesn't map
+        # to anything we can apply (e.g., add with no relation). Fall
+        # through to the full agent so we don't drop the user's intent.
+
+    # Fallback: full PersonEditAgent extraction. Handles ambiguous
+    # references, multi-edit messages, and rare phrasings.
     result = await person_edit_run(store=store, message=message, history=history)
     edit = result.value.edit if (result.value and result.value.edit) else None  # type: ignore[union-attr]
     if edit is None or edit.action == "unknown":
@@ -925,6 +995,20 @@ async def _person_update(
             "Tell me who they are \u2014 \u201cAlex is my co-parent\u201d or \u201cRobert is my kid, not my dad\u201d.",
         )
 
+    applied = await _apply_person_edit(store, message, edit)
+    if applied is not None:
+        return applied
+    return await _ack_no_agent(store, "I heard you, but I'm not sure how to change that yet.")
+
+
+async def _apply_person_edit(
+    store: UserStore, message: str, edit: Any
+) -> dict[str, Any] | None:
+    """Apply a structured person edit (from router inline OR PersonEditAgent).
+
+    Returns None when the edit doesn't map to a supported action so the
+    caller can decide how to degrade (fallback to agent, or ack).
+    """
     target = await find_person_by_name(store, edit.target_name)
     if target is None:
         relation = edit.new_relation
@@ -1019,7 +1103,7 @@ async def _person_update(
         await _write_reply(store, reply)
         return {"reply": reply, "path": "profile", "intent": "person_update"}
 
-    return await _ack_no_agent(store, "I heard you, but I'm not sure how to change that yet.")
+    return None
 
 
 async def _book(

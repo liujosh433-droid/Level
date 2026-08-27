@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
+
+from level_core.schemas.activity import ActivityType
+from level_core.schemas.care import CareRelation
 
 
 class ChatRole(StrEnum):
@@ -43,6 +46,42 @@ class ChatMessage(BaseModel):
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
+# Inline extraction payloads. Router fills these when it is confident it
+# already has everything the downstream specialist agent would extract,
+# so we can save the specialist LLM call. Dispatcher falls back to the
+# specialist agent when the router leaves these null (low confidence,
+# multi-priority phrasings, novel wording).
+
+
+class InlinePriority(BaseModel):
+    """Router-extracted priority. Same shape as PriorityAgent output."""
+
+    text: str = Field(min_length=1, max_length=240)
+    weight: int = Field(default=3, ge=1, le=5)
+    activity_types: list[ActivityType] = Field(default_factory=list)
+    source_span: str = Field(min_length=1, max_length=240)
+
+
+class InlinePersonEdit(BaseModel):
+    """Router-extracted person edit. Same shape as PersonEditAgent output."""
+
+    action: Literal["add", "change_relation", "rename", "mark_self", "remove"]
+    target_name: str = Field(min_length=1, max_length=120)
+    new_relation: CareRelation | None = None
+    new_display_name: str | None = Field(default=None, max_length=120)
+    source_span: str = Field(min_length=1, max_length=240)
+
+
+class InlineReminder(BaseModel):
+    """Router-extracted reminder. Same shape as ReminderAgent output."""
+
+    text: str = Field(min_length=1, max_length=240)
+    person_display_name: str | None = Field(default=None, max_length=120)
+    activity_type: ActivityType
+    lead_minutes: int = Field(default=60, ge=0, le=1440)
+    source_span: str = Field(min_length=1, max_length=240)
+
+
 class ChatRouterDecision(BaseModel):
     path: ChatRouterPath
     intent: ChatRouterIntent
@@ -60,6 +99,14 @@ class ChatRouterDecision(BaseModel):
     # a canned "Noted." fallback or spinning up a whole second agent
     # for casual chat. Non-general paths leave this null.
     general_reply: str | None = None
+    # Inline extraction: for the small, structured intents the router
+    # already has everything the specialist agent would extract. Filling
+    # these lets the dispatcher skip a second LLM roundtrip. Leave null
+    # on low-confidence, multi-value, or unusual phrasings — the
+    # specialist agent still runs as a fallback.
+    inline_priority: InlinePriority | None = None
+    inline_person_edit: InlinePersonEdit | None = None
+    inline_reminder: InlineReminder | None = None
 
 
 class ChatTurnResult(BaseModel):

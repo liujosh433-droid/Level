@@ -35,19 +35,22 @@ async def test_chat_extracts_priority_and_reminder(tmp_path, monkeypatch) -> Non
     alpha = await propose_person(store, display_name="Alpha", relation=CareRelation.CHILD)
     await set_person_status(store, alpha.person_id, "kept")
 
+    # Messages are worded to bypass the regex fast paths so the router
+    # LLM is actually invoked - which is where the inline extraction
+    # (a single Flash call that skips the specialist agent) lives.
     register_fake(
         "ChatRouterAgent",
-        {"path": "profile", "intent": "priority", "source_span": "never miss elder therapy", "confidence": 0.9},
-    )
-    register_fake(
-        "PriorityAgent",
         {
-            "priority": {
+            "path": "profile",
+            "intent": "priority",
+            "source_span": "elder therapy",
+            "confidence": 0.9,
+            "inline_priority": {
                 "text": "Never miss elder therapy",
                 "weight": 5,
                 "activity_types": ["medical.therapy"],
-                "source_span": "never miss elder therapy",
-            }
+                "source_span": "elder therapy",
+            },
         },
     )
 
@@ -55,7 +58,7 @@ async def test_chat_extracts_priority_and_reminder(tmp_path, monkeypatch) -> Non
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         r = await client.post(
             "/v1/chat",
-            json={"message": "please make sure I never miss elder therapy"},
+            json={"message": "elder therapy is the one thing I really can't let slip"},
             headers=headers,
         )
     assert r.status_code == 200
@@ -67,26 +70,29 @@ async def test_chat_extracts_priority_and_reminder(tmp_path, monkeypatch) -> Non
     prios = await store.priorities.list()
     assert any(p.text == "Never miss elder therapy" for p in prios)
 
+    # Reminder path: router inline-extracts the reminder in one call.
+    # Message is deliberately NOT phrased as "remind me to X" so the
+    # reminder regex fast path (_try_fast_reminder) does not fire.
     register_fake(
         "ChatRouterAgent",
-        {"path": "reminder", "intent": "add_reminder", "source_span": "soccer shoes", "confidence": 0.9},
-    )
-    register_fake(
-        "ReminderAgent",
         {
-            "reminder": {
+            "path": "reminder",
+            "intent": "add_reminder",
+            "source_span": "soccer shoes",
+            "confidence": 0.9,
+            "inline_reminder": {
                 "text": "Bring soccer shoes",
                 "person_display_name": "Alpha",
                 "activity_type": "sports.soccer",
                 "lead_minutes": 60,
                 "source_span": "soccer shoes",
-            }
+            },
         },
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         r = await client.post(
             "/v1/chat",
-            json={"message": "I keep forgetting Alpha's soccer shoes"},
+            json={"message": "Alpha's soccer shoes always end up left at home"},
             headers=headers,
         )
     assert r.status_code == 200

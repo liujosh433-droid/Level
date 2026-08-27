@@ -23,7 +23,15 @@
 }
 
 .open {
+  /* Fallback for older browsers; JS sets an inline pixel width via
+     `style={{ width }}` which overrides this. */
   width: 22rem;
+}
+
+/* No transition during a drag - width should follow the pointer 1:1
+   or it feels rubber-banded. */
+.resizing {
+  transition: none;
 }
 
 .tab {
@@ -84,6 +92,47 @@
   padding: 0.85rem 0.9rem 1.4rem 0.15rem;
   overflow-x: auto;
   overflow-y: auto;
+}
+
+/* Drag handle at the right edge of the rail. Only rendered when the
+   inspector is open. Uses a wide invisible hit area (6px) with a
+   thinner visible grip so pointer targeting is easy without stealing
+   pixels from content. */
+.resizer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: col-resize;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  transition: background 0.15s ease;
+  touch-action: none;
+}
+
+.resizer:hover,
+.resizer:focus-visible {
+  background: rgba(61, 184, 160, 0.18);
+  outline: none;
+}
+
+.resizerGrip {
+  width: 2px;
+  height: 42px;
+  border-radius: 999px;
+  background: rgba(183, 201, 208, 0.35);
+  transition: background 0.15s ease, height 0.15s ease;
+}
+
+.resizer:hover .resizerGrip,
+.resizer:focus-visible .resizerGrip,
+.resizing .resizerGrip {
+  background: #3db8a0;
+  height: 64px;
 }
 
 .head {
@@ -205,9 +254,19 @@
     left: 0;
     top: 0;
     bottom: 0;
-    width: min(90vw, 22rem);
+    /* On phones we force back to a slide-in drawer width regardless
+       of the persisted desktop width. The inline style JS sets is
+       overridden here via !important because we want a predictable
+       mobile UX. */
+    width: min(90vw, 22rem) !important;
     height: 100dvh;
     z-index: 50;
+  }
+
+  /* Resizing doesn't make sense inside a modal drawer, and the
+     handle would compete with the "swipe to dismiss" mental model. */
+  .resizer {
+    display: none;
   }
 
   .scrim {

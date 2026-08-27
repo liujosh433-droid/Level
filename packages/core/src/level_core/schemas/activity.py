@@ -154,15 +154,22 @@ _LOAD_BUCKET_LABEL: dict[LoadBucket, str] = {
 }
 
 
+# Weekly load palette. Prior palette had WORK, COMMUTE, and OTHER all
+# collapsing to the same gray-blue family (WORK #5a7380, COMMUTE and
+# OTHER both #8aa4b0), and PERSONAL sat right on top of SPORTS teal -
+# so a caregiver looking at the bar couldn't tell them apart at a
+# glance. This palette walks the color wheel so each bucket has a
+# distinct hue while keeping the muted, non-neon feel of the rest of
+# the app (matching --signal-deep #217a6a's saturation profile).
 _LOAD_BUCKET_COLOR: dict[LoadBucket, str] = {
-    LoadBucket.SCHOOL: "#c4843a",
-    LoadBucket.SPORTS: "#3aa38a",
-    LoadBucket.MEDICAL: "#c44d4d",
-    LoadBucket.WORK: "#5a7380",
-    LoadBucket.FAMILY: "#c47a3a",
-    LoadBucket.COMMUTE: "#8aa4b0",
-    LoadBucket.PERSONAL: "#2d9f8a",
-    LoadBucket.OTHER: "#8aa4b0",
+    LoadBucket.SCHOOL: "#d99a4a",    # amber
+    LoadBucket.SPORTS: "#3aa38a",    # green-teal
+    LoadBucket.MEDICAL: "#d15b5b",   # rose
+    LoadBucket.WORK: "#5b7cd8",      # indigo blue
+    LoadBucket.FAMILY: "#e07a5b",    # warm coral
+    LoadBucket.COMMUTE: "#9464c8",   # violet
+    LoadBucket.PERSONAL: "#c88b9a",  # dusty pink
+    LoadBucket.OTHER: "#8892a6",     # muted slate
 }
 
 

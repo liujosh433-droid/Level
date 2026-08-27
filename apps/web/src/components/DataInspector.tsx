@@ -26,7 +26,15 @@ type StoreSnap = {
 type Mutation = { at: string; text: string };
 
 const OPEN_KEY = "level.demo.inspector";
+const WIDTH_KEY = "level.demo.inspector.width";
 const POLL_MS = 2000;
+// Sidebar resize bounds. 288px covers all the section labels without
+// wrapping. 720px is roughly a full column of caregiver-length JSON
+// blobs; beyond that the inspector starts stealing too much room
+// from the main content on typical laptops.
+const MIN_WIDTH_PX = 288;
+const MAX_WIDTH_PX = 720;
+const DEFAULT_WIDTH_PX = 352; // matches the previous 22rem default at root:16px
 
 function labelOf(item: Record<string, unknown>, fallback: string): string {
   const v =
@@ -150,17 +158,35 @@ function pendingLabel(raw: unknown): string | null {
   return JSON.stringify(raw).slice(0, 48);
 }
 
+function clampWidth(px: number): number {
+  if (!Number.isFinite(px)) return DEFAULT_WIDTH_PX;
+  return Math.min(MAX_WIDTH_PX, Math.max(MIN_WIDTH_PX, Math.round(px)));
+}
+
 export default function DataInspector() {
   const [open, setOpen] = useState(false);
+  const [width, setWidth] = useState<number>(DEFAULT_WIDTH_PX);
+  const [resizing, setResizing] = useState(false);
   const [snap, setSnap] = useState<StoreSnap | null>(null);
   const [log, setLog] = useState<Mutation[]>([]);
   const [flash, setFlash] = useState(false);
   const [enabled, setEnabled] = useState(true);
   const prev = useRef<StoreSnap | null>(null);
+  const asideRef = useRef<HTMLElement | null>(null);
+  const widthRef = useRef<number>(DEFAULT_WIDTH_PX);
 
   useEffect(() => {
     try {
       setOpen(localStorage.getItem(OPEN_KEY) === "1");
+      const raw = localStorage.getItem(WIDTH_KEY);
+      if (raw) {
+        const parsed = Number(raw);
+        if (Number.isFinite(parsed)) {
+          const w = clampWidth(parsed);
+          widthRef.current = w;
+          setWidth(w);
+        }
+      }
     } catch {
       /* ignore */
     }
@@ -176,6 +202,76 @@ export default function DataInspector() {
       }
       return next;
     });
+  };
+
+  // Pointer-driven resize. On mobile the aside is a full-height modal
+  // (see the max-width: 767px block in the CSS module) so resizing
+  // would fight the slide-in gesture - skip below the breakpoint.
+  const startResize = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (typeof window !== "undefined" && window.matchMedia("(max-width: 767px)").matches) {
+      return;
+    }
+    e.preventDefault();
+    setResizing(true);
+    const target = e.currentTarget;
+    try {
+      target.setPointerCapture(e.pointerId);
+    } catch {
+      /* older browsers; still works via window listeners below */
+    }
+    // We measure from the aside's LEFT edge (fixed at x=0 for this
+    // layout) so newWidth = pointerX - asideLeft. This survives
+    // horizontal page scroll and browser zoom changes.
+    const asideLeft = asideRef.current?.getBoundingClientRect().left ?? 0;
+    const onMove = (evt: PointerEvent) => {
+      const next = clampWidth(evt.clientX - asideLeft);
+      widthRef.current = next;
+      setWidth(next);
+    };
+    const onUp = () => {
+      setResizing(false);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+      try {
+        target.releasePointerCapture(e.pointerId);
+      } catch {
+        /* ignore */
+      }
+      try {
+        localStorage.setItem(WIDTH_KEY, String(widthRef.current));
+      } catch {
+        /* ignore */
+      }
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+  };
+
+  // Keyboard accessibility: focus the resizer and adjust with arrows.
+  // Shift+Arrow jumps by a larger step; Home/End snap to bounds.
+  const nudgeResize = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const step = e.shiftKey ? 32 : 12;
+    let next: number | null = null;
+    if (e.key === "ArrowLeft") {
+      next = clampWidth(widthRef.current - step);
+    } else if (e.key === "ArrowRight") {
+      next = clampWidth(widthRef.current + step);
+    } else if (e.key === "Home") {
+      next = MIN_WIDTH_PX;
+    } else if (e.key === "End") {
+      next = MAX_WIDTH_PX;
+    }
+    if (next === null) return;
+    e.preventDefault();
+    widthRef.current = next;
+    setWidth(next);
+    try {
+      localStorage.setItem(WIDTH_KEY, String(next));
+    } catch {
+      /* ignore */
+    }
   };
 
   const load = useCallback(async () => {
@@ -207,12 +303,26 @@ export default function DataInspector() {
 
   if (!enabled) return null;
 
+  const asideClass = [
+    styles.rail,
+    open ? styles.open : "",
+    resizing ? styles.resizing : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const asideStyle = open ? { width: `${width}px` } : undefined;
+
   return (
     <>
       {open ? (
         <button type="button" className={styles.scrim} onClick={toggle} aria-label="Close data inspector" />
       ) : null}
-      <aside className={open ? `${styles.rail} ${styles.open}` : styles.rail} aria-label="Live store inspector">
+      <aside
+        ref={asideRef}
+        className={asideClass}
+        style={asideStyle}
+        aria-label="Live store inspector"
+      >
       <button
         type="button"
         className={styles.tab}
@@ -331,6 +441,22 @@ export default function DataInspector() {
           </Section>
         </div>
       )}
+      {open ? (
+        <div
+          className={styles.resizer}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize data inspector"
+          aria-valuemin={MIN_WIDTH_PX}
+          aria-valuemax={MAX_WIDTH_PX}
+          aria-valuenow={width}
+          tabIndex={0}
+          onPointerDown={startResize}
+          onKeyDown={nudgeResize}
+        >
+          <span className={styles.resizerGrip} aria-hidden="true" />
+        </div>
+      ) : null}
     </aside>
     </>
   );

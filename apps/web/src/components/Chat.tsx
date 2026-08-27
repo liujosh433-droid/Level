@@ -201,7 +201,23 @@ function EmailDraftCard({
       onSent();
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
-      setError(/ApiError 400/.test(detail) ? "This draft expired. Ask me to write it again." : detail);
+      // 400 = draft actually expired past its 60-min TTL or token is
+      //   unknown (never registered). Only path forward is redraft.
+      // 502 = Gmail itself hiccuped; the confirmation token is still
+      //   valid server-side (see email.py: token dropped only after
+      //   Gmail success). Retry the same Send button click.
+      // 409 = same idempotency key submitted twice; the send actually
+      //   went through on the first click.
+      if (/ApiError 400/.test(detail)) {
+        setError("This draft expired. Ask me to write it again.");
+      } else if (/ApiError 502/.test(detail)) {
+        setError("Gmail didn't accept it just now. Give it another tap.");
+      } else if (/ApiError 409/.test(detail)) {
+        setError("Already sent - refreshing.");
+        onSent();
+      } else {
+        setError(detail);
+      }
     } finally {
       setBusy(false);
     }

@@ -1,22 +1,59 @@
-"""Email draft + send (human-in-the-loop confirmation token required)."""
+"""Email draft + send (human-in-the-loop confirmation token required).
+
+Confirmation-token lifecycle
+----------------------------
+
+When we draft an email we mint a `confirmation_token` and register the
+draft in TWO places:
+
+  1. `_pending_drafts` (in-memory dict on this API process): fast path,
+     survives just the lifetime of this instance.
+  2. `store.profile["pending_email_draft"]` (Firestore, TTL=60min):
+     authoritative source of truth. Survives Cloud Run instance
+     replacement, multi-pod routing, restarts, etc.
+
+The send endpoint validates against EITHER source. This matters because
+Cloud Run instances can (and do) get replaced while a caregiver has a
+draft open in another tab. Before this, a legitimate "send" 10 minutes
+after "draft" could 400 with `unknown_confirmation_token` even though
+the draft was still visible on screen.
+
+Retry safety
+------------
+
+The pending token is dropped only AFTER Gmail confirms the send. If
+Gmail times out or errors, a subsequent retry (with a fresh
+idempotency key) still finds the token valid. Duplicate identical
+sends (same idempotency key) are blocked by `_sent_idempotency` and
+by Gmail's own idempotency handling.
+"""
 
 from __future__ import annotations
 
 import time
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from level_core.email.drafter import draft_email
 from level_core.email.gmail_client import send_email
+from level_core.observability import get_logger
 from level_core.storage.base import UserStore
 from pydantic import BaseModel
 
 from level_api.deps import get_user_store
 
 router = APIRouter()
+logger = get_logger(__name__)
 
+# Ephemeral optimistic cache. Survives only this instance's lifetime.
+# Used as a fast path so the common case (draft + send on the same
+# instance within seconds) skips a Firestore read.
 _pending_drafts: dict[str, dict[str, Any]] = {}
 _sent_idempotency: dict[str, float] = {}
+
+PENDING_EMAIL_DRAFT_KEY = "pending_email_draft"
+IDEMPOTENCY_WINDOW_S = 600
 
 
 def register_pending_draft(token: str, to: str | None) -> None:
@@ -34,6 +71,27 @@ class SendBody(BaseModel):
     to: str
     subject: str
     body: str
+
+
+def _is_profile_draft_valid(
+    draft_meta: Any, confirmation_token: str
+) -> bool:
+    """Firestore-persisted draft is valid iff token matches AND TTL isn't past."""
+    if not isinstance(draft_meta, dict):
+        return False
+    if draft_meta.get("confirmation_token") != confirmation_token:
+        return False
+    expires_at = draft_meta.get("expires_at")
+    if not isinstance(expires_at, str):
+        # Legacy drafts without expires_at: treat as valid; the chat
+        # dispatcher's own expiry check will clean them up.
+        return True
+    try:
+        expiry = datetime.fromisoformat(expires_at)
+    except ValueError:
+        return True
+    now = datetime.now(expiry.tzinfo) if expiry.tzinfo else datetime.utcnow()
+    return now < expiry
 
 
 @router.post("/draft")
@@ -66,29 +124,57 @@ async def send(
 ) -> dict[str, Any]:
     if not x_idempotency_key:
         raise HTTPException(status_code=400, detail="missing_idempotency_key")
+
     now = time.time()
     for k, t in list(_sent_idempotency.items()):
-        if now - t > 600:
+        if now - t > IDEMPOTENCY_WINDOW_S:
             _sent_idempotency.pop(k, None)
     if x_idempotency_key in _sent_idempotency:
         raise HTTPException(status_code=409, detail="duplicate_send")
 
-    pending = _pending_drafts.pop(body.confirmation_token, None)
-    if not pending:
+    # Validate the confirmation token against BOTH sources of truth.
+    # In-memory dict is a fast optimistic cache; the Firestore-persisted
+    # `pending_email_draft` is authoritative and survives instance churn.
+    in_memory_pending = _pending_drafts.get(body.confirmation_token)
+    profile = dict(await store.profile.read() or {})
+    profile_draft = profile.get(PENDING_EMAIL_DRAFT_KEY)
+    profile_valid = _is_profile_draft_valid(profile_draft, body.confirmation_token)
+
+    if not in_memory_pending and not profile_valid:
+        logger.info(
+            "email.send.unknown_token",
+            user=store.user_id,
+            has_memory=False,
+            has_profile=isinstance(profile_draft, dict),
+        )
         raise HTTPException(status_code=400, detail="unknown_confirmation_token")
 
-    profile = dict(await store.profile.read() or {})
-    draft_meta = profile.get("pending_email_draft")
-    if isinstance(draft_meta, dict) and draft_meta.get("confirmation_token") == body.confirmation_token:
-        profile.pop("pending_email_draft", None)
-        await store.profile.write(profile)
+    # Send FIRST. Only drop the token from both stores on Gmail success.
+    # A Gmail failure leaves the token valid so the caregiver's retry
+    # (with a fresh idempotency key) works instead of 400ing.
+    try:
+        sent = await send_email(
+            store,
+            to=body.to,
+            subject=body.subject,
+            body=body.body,
+            idempotency_key=x_idempotency_key,
+        )
+    except HTTPException:
+        raise
+    except Exception as err:
+        logger.exception(
+            "email.send.failed",
+            user=store.user_id,
+        )
+        # 502 = upstream (Gmail) failed. Clients should retry with a
+        # fresh idempotency key. Token intentionally left valid so
+        # the retry doesn't hit a false "draft expired" 400.
+        raise HTTPException(status_code=502, detail="gmail_send_failed") from err
 
-    sent = await send_email(
-        store,
-        to=body.to,
-        subject=body.subject,
-        body=body.body,
-        idempotency_key=x_idempotency_key,
-    )
+    _pending_drafts.pop(body.confirmation_token, None)
+    if profile_valid:
+        profile.pop(PENDING_EMAIL_DRAFT_KEY, None)
+        await store.profile.write(profile)
     _sent_idempotency[x_idempotency_key] = now
     return {"message_id": sent.message_id, "thread_id": sent.thread_id}

@@ -2140,7 +2140,12 @@ def _background_enrich(store: UserStore, *, source: str) -> None:
 
 PENDING_EMAIL_PICK_KEY = "pending_email_pick"
 PENDING_EMAIL_DRAFT_KEY = "pending_email_draft"
-PENDING_EMAIL_TTL_MIN = 10
+# A caregiver may open the draft, get pulled into something, and come
+# back to send. 10 min was tight - 60 lets them step away for a
+# meeting. The Firestore-persisted draft (`pending_email_draft`) is
+# now the source of truth for /email/send, so instance replacements
+# on Cloud Run no longer invalidate it either.
+PENDING_EMAIL_TTL_MIN = 60
 
 
 class _PendingEmailPick(BaseModel):

@@ -30,3 +30,14 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/level_core"]
+
+# Belt-and-suspenders: make sure the demo ICS fixtures (loaded at
+# runtime via importlib.resources - see
+# level_core.demo.scenarios.ScenarioConfig.ics_path) always land in
+# the wheel. Hatchling includes non-.py files under `packages` by
+# default, but declaring artifacts explicitly means a broader
+# `exclude` pattern added later can't silently strip them and
+# reintroduce demo_ics_missing on the deployed API.
+artifacts = [
+    "src/level_core/demo/data/*.ics",
+]

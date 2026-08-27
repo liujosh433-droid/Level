@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
+from importlib.resources import as_file, files
 from pathlib import Path
 
 from level_core.schemas.care import CareRelation
@@ -56,41 +57,36 @@ class ScenarioConfig:
     anchor_date: date = date(2026, 8, 26)
 
     def ics_path(self) -> Path:
-        """Resolve the ICS fixture path relative to the repo root."""
-        return _repo_root() / "example-data" / self.ics_filename
+        """Resolve the ICS fixture as an on-disk path.
 
+        Reads via ``importlib.resources`` so the lookup works in every
+        install shape:
 
-def _repo_root() -> Path:
-    """Walk up from this module looking for a sibling ``example-data/``.
+          - repo checkout (``uv pip install -e``): ICS files sit at
+            ``packages/core/src/level_core/demo/data/*.ics``
+          - wheel install (Docker container via ``uv pip install
+            --system``): the files travel inside the wheel to
+            ``<site-packages>/level_core/demo/data/*.ics``
 
-    Works in three deployment shapes:
-      - repo checkout: finds ``<repo>/example-data``
-      - editable install: same as repo checkout
-      - Docker image built from repo root: finds ``/app/example-data``
-        (the API Dockerfile explicitly COPYs the directory)
+        Historically we walked up from ``__file__`` looking for a
+        sibling ``example-data/`` at the repo root. That worked in
+        editable installs and broke silently in wheel installs
+        (site-packages has no sibling example-data/), which is what
+        turned into ``demo_ics_missing`` on the deployed API.
 
-    If none of those hits, we log a loud warning and return the module
-    directory - the caller will then raise FileNotFoundError with a
-    path that at least tells you where we looked. Historically the
-    silent fallback here + the generic 500 in the route made
-    "demo_ics_missing" a mystery to diagnose in a container.
-    """
-    here = Path(__file__).resolve()
-    for parent in here.parents:
-        if (parent / "example-data").is_dir():
-            return parent
-    from level_core.observability import get_logger
-
-    get_logger(__name__).error(
-        "demo.example_data_not_found",
-        module=str(here),
-        searched=[str(p) for p in here.parents],
-        hint=(
-            "example-data/ was not on any ancestor path. If this is a "
-            "container, ensure the Dockerfile COPYs example-data into /app."
-        ),
-    )
-    return here.parent
+        Returns a real ``Path`` because callers (icalendar, dateutil)
+        want to open by filename. For a zipped wheel install
+        ``as_file`` transparently extracts to a temp path.
+        """
+        resource = files("level_core.demo.data").joinpath(self.ics_filename)
+        # as_file is a context manager, but for filesystem-installed
+        # wheels the underlying path is stable for the process
+        # lifetime. Exit the context immediately and return the path -
+        # this is safe here because we're not in a zip install (we ship
+        # the wheel as a plain wheel, and even Cloud Run's slim base
+        # image extracts wheels to the filesystem).
+        with as_file(resource) as path:
+            return Path(path)
 
 
 SCENARIOS: dict[str, ScenarioConfig] = {

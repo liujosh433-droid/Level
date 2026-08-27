@@ -12,13 +12,12 @@ RUN pip install --no-cache-dir uv
 COPY packages/core /app/packages/core
 COPY packages/api  /app/packages/api
 
-# Demo-mode fixtures. seeder.py resolves ICS paths by walking up from
-# the demo module looking for a directory containing `example-data/` -
-# without this COPY the walk falls off /app and /v1/auth/demo returns
-# demo_ics_missing. Kept as a plain directory copy (not moved inside
-# the package) so contributors can still eyeball the ICS files at the
-# repo root and the ICS generator writes to its canonical location.
-COPY example-data /app/example-data
+# Demo-mode fixtures ship inside the level_core wheel via
+# packages/core/src/level_core/demo/data/*.ics + importlib.resources,
+# so no separate example-data COPY is needed here. See
+# ``level_core.demo.scenarios.ScenarioConfig.ics_path`` for the
+# runtime lookup, and pyproject.toml's [tool.hatch.build.targets.
+# wheel.force-include] for the packaging fence.
 
 RUN uv pip install --system --no-cache /app/packages/core /app/packages/api
 

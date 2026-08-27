@@ -61,13 +61,35 @@ class ScenarioConfig:
 
 
 def _repo_root() -> Path:
-    """Walk up from this file to the repo root (looks for pyproject.toml)."""
+    """Walk up from this module looking for a sibling ``example-data/``.
+
+    Works in three deployment shapes:
+      - repo checkout: finds ``<repo>/example-data``
+      - editable install: same as repo checkout
+      - Docker image built from repo root: finds ``/app/example-data``
+        (the API Dockerfile explicitly COPYs the directory)
+
+    If none of those hits, we log a loud warning and return the module
+    directory - the caller will then raise FileNotFoundError with a
+    path that at least tells you where we looked. Historically the
+    silent fallback here + the generic 500 in the route made
+    "demo_ics_missing" a mystery to diagnose in a container.
+    """
     here = Path(__file__).resolve()
     for parent in here.parents:
         if (parent / "example-data").is_dir():
             return parent
-    # Should never happen in a normal checkout - the seeder will raise
-    # a clearer error when it tries to read the ICS file.
+    from level_core.observability import get_logger
+
+    get_logger(__name__).error(
+        "demo.example_data_not_found",
+        module=str(here),
+        searched=[str(p) for p in here.parents],
+        hint=(
+            "example-data/ was not on any ancestor path. If this is a "
+            "container, ensure the Dockerfile COPYs example-data into /app."
+        ),
+    )
     return here.parent
 
 

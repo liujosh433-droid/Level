@@ -60,6 +60,65 @@ const DEFAULT_BUSY_HINTS = [
   "Almost there\u2026",
 ];
 
+// Intent-specific busy hints. Email drafting hits Gemini Pro with a
+// tone/template pass so it takes 3-8s consistently; a specific
+// "Drafting the email\u2026" bubble makes the wait feel intentional
+// instead of like silent stalling. Booking also touches an LLM +
+// Google Calendar write when the deterministic parser misses.
+const EMAIL_DRAFTING_HINTS = [
+  "Drafting the email\u2026",
+  "Choosing the right tone\u2026",
+  "Polishing the wording\u2026",
+];
+const BOOKING_HINTS = [
+  "Finding a good time\u2026",
+  "Checking your calendar\u2026",
+  "Locking the slot in\u2026",
+];
+
+// Client-side intent sniffers mirror the server's fast-path regexes
+// (see `level_core/email/resolve.py`::is_email_request). We're only
+// picking a status label - if we guess wrong the request still goes
+// through the router, the user just sees a mildly off hint.
+const _EMAIL_WORD = /\be-?mails?\b/i;
+const _SICK_NOTE_HINT =
+  /\b(?:sick\s+notes?|absence\s+notes?|excuse(?:d)?\s+(?:notes?|absence)|school\s+notes?)\b/i;
+const _TELL_ROLE_HINT =
+  /(?:tell|let)\s+(?:her|him|them|their)\s+(?:teacher|doctor|coach|dr\.?)\s+know/i;
+const _CONTACT_ROLE_HINT =
+  /\b(?:teachers?|homeroom|doctors?|dr\.?|pediatrician|coaches?|coach)\b/i;
+const _SENDISH_HINT = /\b(?:send|write|draft|email|message|text)\b/i;
+const _NOTE_WORD_HINT = /\b(?:notes?|messages?)\b/i;
+
+function looksLikeEmailRequest(text: string): boolean {
+  if (_EMAIL_WORD.test(text) || _SICK_NOTE_HINT.test(text) || _TELL_ROLE_HINT.test(text)) {
+    return true;
+  }
+  if (_CONTACT_ROLE_HINT.test(text) && (_SENDISH_HINT.test(text) || _NOTE_WORD_HINT.test(text))) {
+    return true;
+  }
+  if (_SENDISH_HINT.test(text) && _NOTE_WORD_HINT.test(text)) {
+    return true;
+  }
+  return false;
+}
+
+// Booking-shaped verbs. This is intentionally NARROW - most calendar
+// asks hit the deterministic fast path (<100ms) and don't need a
+// reassurance bubble. We only want the specific "book/schedule X on
+// {day} at {time}" style that runs BookAgent.
+const _BOOKING_HINT = /\b(?:book|schedule|reschedule|move|cancel|find\s+(?:a\s+)?(?:good\s+)?time|when\s+can)\b/i;
+
+function looksLikeBookingRequest(text: string): boolean {
+  return _BOOKING_HINT.test(text);
+}
+
+function hintsForMessage(text: string, fallback: string[]): string[] {
+  if (looksLikeEmailRequest(text)) return EMAIL_DRAFTING_HINTS;
+  if (looksLikeBookingRequest(text)) return BOOKING_HINTS;
+  return fallback;
+}
+
 const MicIcon = ({ className }: { className?: string }) => (
   <svg
     className={className}
@@ -350,20 +409,28 @@ export default function Chat({
   const [listening, setListening] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hintIndex, setHintIndex] = useState(0);
+  // Per-request hint override: when the outgoing message looks like
+  // an email draft or a booking, we swap the generic "Thinking\u2026"
+  // cycle for something specific ("Drafting the email\u2026"). Reset
+  // to null at the end of each send so the next message gets the
+  // right treatment.
+  const [activeHints, setActiveHints] = useState<string[] | null>(null);
   const threadRef = useRef<HTMLDivElement | null>(null);
   const activeEventSource = useRef<EventSource | null>(null);
 
+  const currentHints = activeHints ?? busyHints;
+
   useEffect(() => {
-    if (!busy || busyHints.length === 0) {
+    if (!busy || currentHints.length === 0) {
       setHintIndex(0);
       return;
     }
     setHintIndex(0);
     const id = window.setInterval(() => {
-      setHintIndex((i) => (i + 1) % busyHints.length);
+      setHintIndex((i) => (i + 1) % currentHints.length);
     }, 2200);
     return () => window.clearInterval(id);
-  }, [busy, busyHints]);
+  }, [busy, currentHints]);
 
   useEffect(() => {
     const el = threadRef.current;
@@ -531,9 +598,17 @@ export default function Chat({
         streaming: true,
       };
       setMessages((prev) => [...prev, userMsg, pendingMsg]);
+      // Pick intent-specific hints for THIS message. Emails go through
+      // Gemini Pro with tone + template + Model Armor - a 3-8s ask
+      // that felt like silent stalling before. "Drafting the email\u2026"
+      // makes the wait feel intentional.
+      const specificHints = hintsForMessage(text, busyHints);
+      setActiveHints(specificHints === busyHints ? null : specificHints);
       setBusy(true);
       setError(null);
       setDraft("");
+
+      const clearHints = () => setActiveHints(null);
 
       const removePending = () => {
         setMessages((prev) => prev.filter((m) => m.id !== pendingId && m.id !== userMsg.id));
@@ -558,6 +633,7 @@ export default function Chat({
           handleFailure(err instanceof Error ? err.message : String(err));
         } finally {
           setBusy(false);
+          clearHints();
         }
       };
 
@@ -569,6 +645,7 @@ export default function Chat({
             finalizeMessage(pendingId, result.reply, result);
             onAfterReply?.();
             setBusy(false);
+            clearHints();
           },
           () => {
             void finishPost();
@@ -578,7 +655,7 @@ export default function Chat({
         void finishPost();
       }
     },
-    [busy, messages, sendViaPost, sendViaSSE, finalizeMessage, onAfterReply],
+    [busy, messages, sendViaPost, sendViaSSE, finalizeMessage, onAfterReply, busyHints],
   );
 
   function handleSubmit(e: FormEvent) {
@@ -643,7 +720,8 @@ export default function Chat({
   }
 
   const canSubmit = !busy && draft.trim().length > 0;
-  const statusLine = busy && busyHints.length > 0 ? busyHints[hintIndex % busyHints.length] : null;
+  const statusLine =
+    busy && currentHints.length > 0 ? currentHints[hintIndex % currentHints.length] : null;
   const actions = headerActions ?? (
     <button
       type="button"
@@ -730,7 +808,9 @@ export default function Chat({
           {showTypingIndicator && statusLine ? (
             <div
               className={`${styles.bubble} ${styles.bubbleLevel} ${styles.bubbleTyping}`}
-              aria-label="Level is thinking"
+              aria-label={statusLine.replace(/\u2026$/, "")}
+              aria-live="polite"
+              role="status"
             >
               <span className={styles.waitingDots} aria-hidden="true">
                 <i />

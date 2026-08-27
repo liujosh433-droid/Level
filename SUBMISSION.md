@@ -1,12 +1,45 @@
 # Level — All Things Agentic Hackathon submission
 
 **Track:** Collaborative Partner
-**Live demo:** _fill me in after deploy_
-**Repo:** _fill me in with your GitHub URL_
+**Live demo:** https://level-web-185318998255.us-central1.run.app/today
+**Repo:** https://github.com/liujosh433-droid/Level
 **Demo video (YouTube):** _fill me in after recording_
-**Judge access:** `testing@devpost.com` and `cloudhackathons@google.com`
-are listed as OAuth test users and (if the repo is private) invited as
-GitHub collaborators.
+
+## Judge access
+
+Per the [hackathon guidance](https://allthingsagentichackathon.devpost.com/),
+the app does not need to be live at judging time — the demo video and
+this repo are the primary proof of execution. The deployed URL above
+is available for reference and is shown live in the video.
+
+The whole project also runs **locally without any Google Cloud
+credentials or OAuth setup** — recommended path for a judge who
+wants to poke around independently:
+
+```bash
+git clone https://github.com/liujosh433-droid/Level.git
+cd Level
+cp .env.example .env
+# LEVEL_ENV=local is the default; no GCP credentials required.
+make install
+make dev
+# API on http://127.0.0.1:8080, web on http://127.0.0.1:3000
+```
+
+Then either:
+
+- Connect any Google account (test-user access to the OAuth app is
+  available on request via the hackathon manager — I'll add your
+  email in a few minutes), **or**
+- Import [`example-data/caregiver-month.ics`](example-data/caregiver-month.ics)
+  (family with a co-parent) or
+  [`example-data/caregiver-month-solo.ics`](example-data/caregiver-month-solo.ics)
+  (solo caregiver) into any Google Calendar and connect that account.
+  Both fixtures ship with two engineered "missing usuals" so the
+  proactive-cards flow surfaces content immediately on `/today`.
+
+Tests (`make test`) run offline against `LEVEL_ENV=local` and cover
+the guardrail stack + feedback loop end-to-end.
 
 ## What it is
 

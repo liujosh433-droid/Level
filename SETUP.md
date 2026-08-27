@@ -50,8 +50,9 @@ uv run --package level-jobs python -m level_jobs.make_caregiver_ics --scenario b
    Authorized redirect URIs:
    - `http://localhost:8080/v1/auth/google/callback` (local)
    - `https://<api-domain>/v1/auth/google/callback` (cloud)
-4. Add **test users**: `testing@devpost.com`, `cloudhackathons@google.com`,
-   plus your own email.
+4. Add **test users**: your own email, plus any additional Google
+   accounts you want to grant sign-in access. While the app is in
+   OAuth testing mode, only listed test users can sign in.
 
 ---
 

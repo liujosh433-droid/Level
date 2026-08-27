@@ -26,6 +26,85 @@ The important word in that sentence is **learns**. Level is not a chat wrapper a
 
 Under the hood, that memory closes a real causal loop, and I spent a disproportionate amount of the hackathon making sure that loop was traceable end-to-end. More on that in a minute.
 
+---
+
+## The system at a glance
+
+Here's what's actually running under the hood.
+
+![Level architecture — client, gateway, guardrails, agent runtime, model tier, memory, and background jobs, with the flow arrows labeled by transport (SSE, HTTPS, push webhook, few-shot recall).](https://raw.githubusercontent.com/liujosh433-droid/Level/main/docs/architecture.png)
+
+Every named box in that diagram is a real file. The Mermaid source is at [`docs/architecture.mmd`](https://github.com/liujosh433-droid/Level/blob/main/docs/architecture.mmd) and the box-to-file map is in [`docs/STATE_AND_LIFECYCLE.md`](https://github.com/liujosh433-droid/Level/blob/main/docs/STATE_AND_LIFECYCLE.md). I'll walk the six planes below and, for each, call out what it does, why it looks the way it does, and how it holds up on scale, security, performance, and user experience.
+
+### 1. Client + Gateway — Next.js and FastAPI
+
+- **What.** A Next.js 15 dashboard talks to a FastAPI service on Cloud Run over HTTPS + signed session cookie. Chat replies stream in via Server-Sent Events (`/v1/chat/stream`); everything else is standard REST. `/admin/traces` is a live agent-call waterfall grouped by `trace_id`, refreshing every three seconds. `/today` carries the chat surface, "Level noticed while you slept" proactive cards, and voice input/output via the Web Speech API.
+- **Why.** SSE gives users something to look at within ~200ms without paying the cost of a full websocket layer. Keeping streaming as a UI *adapter* rather than pushing raw model tokens end-to-end means the same agent stack serves chat, admin traces, and background jobs identically — no divergent code paths.
+- **Scale.** Cloud Run autoscales the API; the frontend is CDN-served. Sessions are stateless (HMAC-signed cookies via `itsdangerous.URLSafeSerializer`).
+- **Security.** `httpOnly + Secure (cloud) + SameSite=Lax` cookies; a boot-time assertion refuses to start in cloud mode if `LEVEL_SESSION_SECRET` is left at its default. Trace-Id middleware attaches a per-request id to every log line so a stray error is traceable back to a single user turn without exposing PII.
+- **UX.** Feedback chips underneath every AI-authored artifact (**Keep / Adjust / Not me**); teal highlighting on remembered priorities when they collide with a booking; intent-aware "drafting email…" / "checking your calendar…" hints instead of a generic spinner; a resizable data sidebar so power users can watch the live Firestore mirror as they talk.
+
+### 2. Guardrails plane — code, not prompt
+
+- **What.** Six sequential checks that fire *before* the model does: **Model Armor** deterministic prompt-injection prefilter, **O(1) rate + cost gate** (single Firestore doc read per check), **PII strip** on user text (emails, phone numbers, street addresses), **anti-injection fence + system directive**, **`source_span` echo-back guard** on every extraction schema, and a signed **Agent Identity** token (`name|version|prompt_hash`, HMAC-SHA256) embedded in every audit row.
+- **Why.** Prompt-side defenses lose. If you rely on "please don't obey injected instructions" as your safety layer, an adversary with a text-box wins on their second try. All six checks are pure functions with unit tests; none of them ask the model for permission.
+- **Scale.** The gate reads one Firestore document per check, not the historical `ai_audit` scan I started with. Model Armor is a rule table + regex; latency is single-digit microseconds. Both scale with users, not with events.
+- **Security.** `source_span` drops hallucinated extraction fields without failing the whole batch — one bad row can't tank a list of proposed people. Human-in-the-loop confirmation tokens (idempotent, TTL'd, dropped only after Google confirms success) sit above every mutation of Gmail or Calendar.
+- **Performance.** Blocked calls never reach Vertex; blocked/refused turns cost $0. Gate check adds ~2ms p50.
+- **UX.** When Model Armor fires, the user sees a soft-degrade reply keyed to the intent hint (`"I can help with your calendar and reminders — but I can't share system details"`), not a raw 4xx.
+
+### 3. Agent runtime — registry, base, invoke, planner
+
+- **What.** Eleven agents in a declarative `AgentRegistry` (fetchable at `GET /v1/admin/agents`), each with a name, model, safety class, cost tier, schema version, and registered tool list. The invocation stack is split into two files: [`base.py`](https://github.com/liujosh433-droid/Level/blob/main/packages/core/src/level_core/agents/base.py) holds the guardrail shape (schema, source_span, PII, gate, audit); [`invoke.py`](https://github.com/liujosh433-droid/Level/blob/main/packages/core/src/level_core/agents/invoke.py) holds the SDK layer, retry loop, and tier fallback ladder. The **`ADKPlannerAgent`** wraps a Google ADK `LlmAgent` for the email hot path when `LEVEL_ADK_MODE=true` — its audit row carries a `parent_audit_id` so `/admin/traces` renders a real parent→child waterfall.
+- **Why.** Two axes of change (guardrails vs. SDK retry logic) evolve independently, so they get separate files. The registry means a judge can grep for every LLM in the system without reading code.
+- **Scale.** The `ChatRouterAgent` fills `inline_priority` / `inline_person_edit` / `inline_reminder` in the *same* Flash call as the routing decision, cutting the common path from 2 LLM calls to 1. A **router response cache** (LRU + TTL, keyed on user + normalized message + short history digest) makes repeated inputs cost $0.
+- **Security.** Every audit row's `model` column is the signed `AgentIdentity` token; `GET /v1/admin/agents/verify?token=` returns 200 if the row wasn't hand-edited. Prompt hashes travel with every call so a silent prompt refactor is visible in the trace.
+- **Performance.** A **per-request `ChatContext`** memoizes async accessors for people, agenda, contacts, priorities, and usuals — one chat turn hits Firestore *once per collection* instead of two or three times as agents fan out. Generator agents run under `max_turns=3` real refinement; schema and `source_span` failures feed back into the next turn instead of manual regeneration.
+- **UX.** ~60% of chat turns in my test corpus never touch Gemini at all — they land on the deterministic fast-path registry (chit-chat, empathy, agenda lookup, priority, person, reminder, email, calendar_crud, pending_confirmation, pending_email_pick). Fetchable at `GET /v1/admin/intents` with example utterances.
+
+### 4. Model tier — Gemini 3.5 → 2.5 → Gemma, plus Veo and Lyria
+
+- **What.** Extraction and generation flow through Gemini 3.5 (Flash for cheap extractors, Pro for generators). On 429 or quota exhaustion, the invoke layer walks down: Vertex Gemini 2.5 → Gemma via Vertex Model Garden. Bonus models: **Veo 3** for a weekly recap video, **Lyria** for a "Hear my day" chime.
+- **Why.** Model outages are the most common cause of a demo dying. A three-tier ladder means the app keeps working when a tier goes down, and the row's `fallback_used` column shows which tier actually ran.
+- **Scale.** Gemma handles small-schema extractors (chit-chat, activity classification, priority, reminder, usual) cleanly; generator agents with richer schemas soft-degrade to `"try again in a moment"` rather than emitting bad JSON. The `_GEMMA_ELIGIBLE` list is the source of truth for which agent falls through.
+- **Security.** PII strip runs on both `user_input` and calendar-derived `context` strings before any model tier — Vertex never sees an email or phone number.
+- **Performance.** The router is exempt from the standard cost cap (so chat is never silent) but has a softer cap of its own.
+- **UX.** Veo/Lyria endpoints degrade to `{ready: false, reason: ...}` when the Vertex project doesn't have the model enabled, so the frontend just skips rendering the video/audio — a missing checkbox in the Cloud console doesn't fail a demo.
+
+### 5. Memory + state — a per-user document graph
+
+- **What.** Ten Repo-backed collections and three per-user KV slots. Same interface against JSON files (`LEVEL_ENV=local` → `.level/local_store/{uid}/`) or Firestore (`LEVEL_ENV=cloud`). The Memory Bank lives under `profile["memory_bank"]` and holds both positive keeps *and* `avoid`-tagged negatives from generator feedback; `recall_split()` fans them into separate few-shot blocks in the next prompt.
+- **Why.** No cross-user query surface, ever. Backend selection lives in one file (`storage/factory.py`); feature code never branches on env.
+- **Scale.** Concurrent writers to the same KV slot go through `update_fields()` (native `set(merge=True)`) or `mutate()` (Firestore transaction with auto-retry) so simultaneous updates from the router and a background job don't lose fields. Optimistic concurrency via monotonic `updated_at` — the graph is designed to *not need* cross-doc transactions.
+- **Security.** All Firestore rules enforce per-user isolation (`request.auth.uid == uid`). OAuth tokens live under `state/google_oauth`, encrypted at rest. `DELETE /v1/me` wipes the entire per-user subtree and revokes the Google token in one shot.
+- **Performance.** The rate/cost gate uses a **hot counter** under `profile["_gate_counters"]` — one document read per check, down from an O(N) scan over `ai_audit`. `chat_turns` is capped at 20; older turns roll off. `ai_audit` has a 30-day TTL. `daily_agenda` is a diff-only write so unchanged days don't rewrite.
+- **UX.** Recent corrections surface back to the user as "What Level learned" tiles in the data sidebar — the memory isn't a black box.
+
+### 6. Background + observability — nightly job, scheduler, circuit breaker, Cloud Trace
+
+- **What.** A Cloud Run Job on Cloud Scheduler runs nightly to refresh usuals, trim aged `ai_audit` rows, and stash "Level noticed while you slept" proactive cards under `profile["proactive_cards"]`. Google Calendar failures trip a **per-user circuit breaker** (5 transient failures in 60s → open for 30s → half-open probe). OpenTelemetry-format spans flow to Cloud Trace with a `trace_id` that `/admin/traces` also groups by.
+- **Why.** The proactive-cards job is what lets a judge open `/today` on demo day and see the two missing usuals from the imported `example-data/caregiver-month.ics` — no chat turn needed. Everything the system claims to "notice" is a real background write.
+- **Scale.** Nightly job is per-user parallelized; each user is a self-contained subtree. Circuit breakers are per-user too — one caregiver's flaky OAuth token doesn't affect anyone else.
+- **Security.** Auth errors (401/403) surface immediately without tripping the breaker — those are user problems, not backend problems, and users need to see them. Transient errors (500/502/503/504) count against the breaker.
+- **Performance.** During the open window, chat serves *cached* agenda instead of hammering a backend that's already sad. HTTP-layer token-bucket rate limit (burst 20, refill 30/min) sits *above* the LLM cost gate so runaway clients can't burn CPU on fast-paths.
+- **UX.** Circuit-breaker state is visible at `/v1/admin/calendar_circuit`; rate-limit state at `/v1/admin/rate_limit`. If something's degraded, you can see it.
+
+### One chat turn, end-to-end
+
+Concretely: user types *"prioritize elder care over sports"* on `/today`.
+
+1. Next.js opens an SSE connection to `/v1/chat/stream`. Request carries the signed session cookie; middleware extracts `user_id` and attaches `Trace-Id`.
+2. HTTP rate limit checks the user's bucket. Model Armor scans the message. PII strip runs. All three are microseconds; none of them touch Gemini.
+3. Fast-path registry doesn't match ("prioritize" plus an abstract concept is out of scope for the regex parser). Router runs; `_gate_counters` increments +1; router's response cache misses; a Flash call goes to AI Studio.
+4. Router returns `{path: "profile", intent: "priority", inline_priority: {text: "elder care over sports", weight: 4, activity_types: [...]}}`. `source_span` guard confirms the text appears verbatim in the user input.
+5. Dispatcher sees `inline_priority` is filled → writes to `store.priorities` directly, skipping the specialist PriorityAgent call. Audit row is written with the router's identity token.
+6. Reply text streams back in ~64-char SSE chunks. Three feedback chips render below with `audit_id` threaded through, ready to write to `/v1/feedback` on click.
+7. `/admin/traces` shows the whole thing as a single-row waterfall (router only, no child) refreshed within three seconds. If the user then clicks **Not me**, a *second* row appears with `parent_audit_id` pointing back to the router's row, and the priority is soft-deleted.
+
+Nine bullet-worthy things happened in about 800ms. Six of them were code, not model.
+
+---
+
 ## Three bets
 
 The judging rubric for this hackathon rewards three things: innovation (does it *do* something?), architecture (is it built like software, not like a demo?), and production readiness (can a judge see it work in four minutes?). I made design bets against each of those axes and tried to be honest with myself about which bet a given feature was for.

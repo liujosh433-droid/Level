@@ -97,26 +97,59 @@ enforces (in order):
 - **Discoverable agent surface**: `AgentRegistry` in one file with
   name, module, model, safety_class, cost_tier, version, schema, and
   registered tools; exposed via `GET /v1/admin/agents`.
+- **Discoverable fast-path surface**: matching pattern for the
+  DETERMINISTIC side of chat.
+  [`_fast_path_registry.py`](packages/api/src/level_api/routes/_fast_path_registry.py)
+  registers every intent Level handles without the router LLM
+  (chit-chat, empathy, agenda-lookup, priority, person, reminder,
+  email, calendar_crud, pending_confirmation, pending_email_pick).
+  `GET /v1/admin/intents` returns the full list with priorities +
+  example utterances.
 - **Signed Agent Identity**: every audit row's `model` column carries
   a HMAC-SHA256 signed identity token
   (`name|version|prompt_hash`); `GET /v1/admin/agents/verify?token=`
   detects tampering.
 - **Model Armor** deterministic prefilter runs before the gate and
-  before any LLM call. Blocks obvious prompt injection with zero
-  spend.
+  before any LLM call, and scans both `user_input` AND `context`
+  (calendar-derived strings) for injection. Blocks obvious prompt
+  injection with zero spend.
+- **Layered call orchestration**:
+  [`base.py`](packages/core/src/level_core/agents/base.py) holds the
+  guardrail shape (schema, source_span, PII, gate, audit).
+  [`invoke.py`](packages/core/src/level_core/agents/invoke.py) holds
+  the SDK layer + retry loop + tier fallback ladder (AI Studio →
+  Vertex 2.5 → Gemma). Two axes of change stay separated.
 - **State + lifecycle explicit**: see
   [docs/STATE_AND_LIFECYCLE.md](docs/STATE_AND_LIFECYCLE.md).
 - **Failure isolation**: schema failure returns None and refinements
   attempt N-1 corrections; blocked calls emit `soft_degrade` so
-  chat.py replies with a canned message instead of 500ing.
+  chat.py replies with a keyword-hinted message (not "I heard you")
+  instead of 500ing. Google Calendar failures trip a per-user
+  circuit breaker so we return cached agenda instead of hammering
+  a broken backend.
 - **Human-in-the-loop for external mutations**: Gmail send and
   Calendar create/move/delete require a confirmation token +
   idempotency key.
 - **Rate + cost gate is O(1)** via a hot counter (single Firestore
-  doc read per gate check). Bootstrap path backfills from `ai_audit`
-  on first check per user.
+  doc read per gate check, transactional update via `mutate()`).
+  Bootstrap path backfills from `ai_audit` on first check per user.
 - **Router is exempt** from the standard cost cap so chat is never
   silent, but has its own softer cap.
+- **Router response cache** (LRU + TTL, keyed on user + normalized
+  message + history digest) means repeated inputs pay $0 LLM cost.
+  `/v1/admin/router_cache` exposes hit-rate.
+- **HTTP-layer rate limit** on `/v1/chat` (token bucket per user,
+  burst=20, refill=30/min) sits ABOVE the LLM gate so runaway
+  clients can't burn CPU on fast-paths and Firestore.
+  `/v1/admin/rate_limit` shows bucket stats.
+- **Google Calendar circuit breaker** (5 transient failures in 60s →
+  open for 30s → half-open probe) at
+  [`circuit_breaker.py`](packages/core/src/level_core/calendar/circuit_breaker.py).
+  Auth errors (401/403) surface immediately without tripping.
+  `/v1/admin/calendar_circuit` exposes per-user state.
+- **Per-request `ChatContext`** with memoized async accessors
+  (people, agenda, contacts, priorities, usuals, tz) so one chat
+  turn hits Firestore once per collection, not 2-3x.
 
 ### Demo & Production Readiness (30%)
 
@@ -144,8 +177,8 @@ enforces (in order):
 
 - **+0.2 Gemma via Vertex** as a tier-3 extraction fallback when both
   AI Studio 3.5 and Vertex 2.5 are rate-limited. Live in
-  [`agents/base.py::_try_gemma`](packages/core/src/level_core/agents/base.py);
-  triggered by the eligibility list `_GEMMA_ELIGIBLE`. Surfaces in
+  [`agents/invoke.py::_try_gemma`](packages/core/src/level_core/agents/invoke.py);
+  triggered by the eligibility list `GEMMA_ELIGIBLE`. Surfaces in
   `/admin/traces` as `fallback_used="gemma-3-4b-it"`.
 - **+0.2 Veo 3** weekly recap endpoint at
   [`routes/media.py::weekly_recap`](packages/api/src/level_api/routes/media.py).

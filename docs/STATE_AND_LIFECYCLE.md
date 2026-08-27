@@ -398,6 +398,15 @@ fan-out. Not in scope for the hackathon.
 | Atomic KV writes (`update_fields`, `mutate`) | `storage/*` | calendar_sync + gate_counters no longer clobber each other under concurrent writers; gate transaction stops quota-cap bypass |
 | Model Armor context scan            | `agents/base.py`, `agents/model_armor.py` | Calendar-derived strings (event titles) get the same injection prefilter as raw user_input |
 | Chit-chat fast-path (`_try_fast_chit_chat`) | `api/routes/chat.py` | "hi" / "how are u" / "what can you do" answered in <10ms with no LLM. Before this: router had to classify then fall through to a generic "Noted..." branch (~30s worst-case under quota pressure, and an off-topic reply) |
+| Empathy fast-path (`_try_fast_empathy`) | `api/routes/chat.py` | "I'm tired", "rough week", "overwhelmed" get a warm acknowledgement + concrete next-step offer in <10ms. |
+| Agenda-lookup fast-path (`_try_fast_agenda_lookup`) | `api/routes/chat.py` | "what's on today", "am I free tomorrow", "show my schedule" answered by in-memory formatting of `store.agenda` — no LLM, no Google roundtrip. |
+| Fast-path registry + `/v1/admin/intents` | `api/routes/_fast_path_registry.py` | Every deterministic intent is registered with name + priority + examples. Dispatcher iterates; adding an intent is one register() call. Discoverable at runtime. |
+| ChatContext (memoized per-request store) | `api/routes/_chat_context.py` | ContextVar-scoped memoization of `store.agenda`, `.people`, `.contacts`, `.priorities`, `.usuals`, `.profile`, `tz`. Cold turn hits Firestore once per collection; downstream handlers read in-memory. |
+| Router response cache (LRU + TTL) | `core/agents/router_cache.py` | Repeated messages (chit-chat variations, "what's on today", "book Tuesday 2pm") normalize to the same key. Hits pay $0 LLM cost. TTL=15min so roster changes don't linger. `/v1/admin/router_cache` exposes hit-rate. |
+| HTTP rate limit on `/v1/chat` | `api/rate_limit.py` | Token bucket per user (burst=20, refill=30/min) sits ABOVE the LLM gate. Runaway clients get 429+Retry-After without hitting Firestore. |
+| Google Calendar circuit breaker | `core/calendar/circuit_breaker.py` | Per-user three-state breaker: 5 transient failures in 60s → open for 30s, then half-open probe. `refresh_agenda()` short-circuits to cached data when open. Auth errors (401/403) don't count as failures. `/v1/admin/calendar_circuit` exposes state. |
+| Memory bank in router context | `core/agents/chat_router.py` | Top-3 recent memories are passed to the router LLM so "book Nova's checkup" resolves against "Nova's doctor is Dr. Kim" without a clarifying question. |
+| base.py split → base.py + invoke.py | `core/agents/base.py`, `core/agents/invoke.py` | Guardrail shape (base) separated from SDK layer + retries + tier fallback (invoke). Cleaner change surface: base changes when we add a guardrail; invoke changes when Google backends change. |
 
 ### 5.2 Costs
 
@@ -431,6 +440,14 @@ fan-out. Not in scope for the hackathon.
   `gate_counters` KV** so writes don't collide with unrelated
   profile writes. Small win; only matters at extreme concurrency
   per user.
+- **Redis-backed router cache and rate-limit buckets** so
+  multiple Cloud Run replicas share state. Today each replica has
+  its own view — fine for hackathon scale, less optimal at
+  10+ replicas.
+- **Split `chat.py` (~2900 lines) into a `chat/` subpackage**
+  once the intent list stabilizes. The fast-path registry already
+  gives us discoverability; the split is purely for code
+  navigability.
 
 ### 5.4 What we deliberately did NOT do
 
@@ -457,8 +474,13 @@ fan-out. Not in scope for the hackathon.
 | Incremental calendar sync         | `packages/core/src/level_core/calendar/sync.py::_pull_calendar, _list_events_incremental` |
 | Parallel classification           | `packages/core/src/level_core/calendar/enrich.py::_classify_unseen` |
 | ADK hot-path planner              | `packages/core/src/level_core/agents/adk_runner.py` |
-| Multi-turn refinement + Gemma    | `packages/core/src/level_core/agents/base.py::call_agent, _try_gemma` |
-| Tiered fallback + retry          | `packages/core/src/level_core/agents/base.py::_invoke_with_retry` |
+| Multi-turn refinement + Gemma    | `packages/core/src/level_core/agents/base.py::call_agent`, `packages/core/src/level_core/agents/invoke.py::_try_gemma` |
+| Tiered fallback + retry          | `packages/core/src/level_core/agents/invoke.py::invoke_with_retry` |
+| Fast-path registry               | `packages/api/src/level_api/routes/_fast_path_registry.py` |
+| Router response cache            | `packages/core/src/level_core/agents/router_cache.py` |
+| HTTP rate limit                  | `packages/api/src/level_api/rate_limit.py` |
+| Google circuit breaker           | `packages/core/src/level_core/calendar/circuit_breaker.py` |
+| ChatContext (memoized reads)     | `packages/api/src/level_api/routes/_chat_context.py` |
 | Nightly proactive cards           | `packages/jobs/src/level_jobs/nightly.py::_generate_proactive_cards` |
 | Name-vs-noun guard (RoleAgent)    | `packages/core/src/level_core/calendar/person_guard.py::evaluate_proposed_name` |
 | Trace waterfall                   | `packages/api/src/level_api/routes/admin.py::_group_by_trace` |

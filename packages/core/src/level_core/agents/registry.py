@@ -206,6 +206,25 @@ register(
 
 register(
     AgentDescriptor(
+        name="SlotWindowAgent",
+        module="level_core.agents.slot_window",
+        model="flash",
+        safety_class=SafetyClass.EXTRACTOR,
+        cost_tier=CostTier.CHEAP,
+        max_turns=1,
+        require_source_span=False,
+        schema="SlotWindowAgentResponse",
+        description=(
+            "Fallback for 'best time to book X' when X isn't a common meal or "
+            "time-of-day word. Returns a socially-normal clock window + typical "
+            "duration so the deterministic slot ranker doesn't have to guess "
+            "with an 8am-8pm default."
+        ),
+    )
+)
+
+register(
+    AgentDescriptor(
         name="PersonEditAgent",
         module="level_core.agents.person_edit",
         model="flash",

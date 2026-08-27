@@ -129,7 +129,7 @@ SCENARIOS: dict[str, ScenarioConfig] = {
     "solo": ScenarioConfig(
         id="solo",
         label="Solo caregiver",
-        tagline="Josh on his own with two kids and his mom Helen. No co-parent.",
+        tagline="Single caregiver (Josh) with two kids and elder care for mom Helen.",
         user_id="u_demo_solo",
         email="demo-solo@level.local",
         display_name="Josh",

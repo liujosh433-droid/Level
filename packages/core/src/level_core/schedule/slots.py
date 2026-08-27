@@ -197,6 +197,30 @@ _TOD_PATTERNS: tuple[tuple[re.Pattern[str], tuple[tuple[int, int], ...], float, 
     ),
 )
 
+
+# Meal + drink clocks. These take precedence over time-of-day words
+# because the meal name is stronger evidence than "this afternoon"
+# ("lunch this afternoon" still means lunch, not 2pm). Duration is
+# per-meal — dinner is longer than coffee. Tuple layout mirrors
+# _TOD_PATTERNS with one extra column for duration_minutes:
+#   (pattern, windows, ideal_hour, duration_minutes)
+#
+# Windows are conservative on both ends: dinner starts at 5pm, not
+# 4:30; breakfast ends at 10, not 11 — because the user is asking
+# when to BOOK it, which needs a socially normal time even if their
+# calendar is empty at 3pm.
+_MEAL_PATTERNS: tuple[tuple[re.Pattern[str], tuple[tuple[int, int], ...], float, int], ...] = (
+    (re.compile(r"\bbreakfast\b", re.I), ((7, 10),), 8.0, 45),
+    (re.compile(r"\bbrunch\b", re.I), ((10, 13),), 11.0, 75),
+    (re.compile(r"\blunch(?:es|time)?\b", re.I), ((11, 14),), 12.5, 60),
+    (re.compile(r"\b(?:coffee|espresso|latte)\b", re.I), ((8, 14),), 10.5, 30),
+    (re.compile(r"\b(?:afternoon\s+tea|tea\s+time)\b", re.I), ((14, 17),), 15.5, 45),
+    (re.compile(r"\bsnack\b", re.I), ((14, 17),), 15.5, 20),
+    (re.compile(r"\bdinner\b", re.I), ((17, 21),), 18.5, 90),
+    (re.compile(r"\b(?:happy\s+hour|drinks?|cocktails?)\b", re.I), ((16, 19),), 17.5, 60),
+    (re.compile(r"\bnightcap\b", re.I), ((20, 22),), 20.5, 45),
+)
+
 _DURATION_MIN_RE = re.compile(r"\b(\d{1,3})\s*(?:minutes?|mins?)\b", re.I)
 _DURATION_HR_RE = re.compile(r"\b(\d{1,2}(?:\.\d)?)\s*(?:hours?|hrs?)\b", re.I)
 _AN_HOUR_RE = re.compile(r"\b(?:an|one)\s+hour\b", re.I)
@@ -266,9 +290,32 @@ def calendar_title_from_label(label: str) -> str:
     return head[0].upper() + head[1:]
 
 
-def infer_event_kind(message: str) -> EventKind:
-    """Clock window from duration / morning-evening words. Event type is not used."""
+def infer_event_kind_from_patterns(message: str) -> EventKind | None:
+    """Regex-only inference. Returns None when neither a meal name nor a
+    time-of-day word is present, so an async caller can decide whether
+    to escalate to the LLM window agent for uncommon labels
+    ("afternoon tea", "power lunch", "little Theo's nap"). The
+    synchronous ``infer_event_kind`` wraps this with a default so
+    non-async callers still get a usable EventKind.
+
+    Precedence: MEAL_PATTERNS before TOD_PATTERNS. Meal names are
+    stronger evidence than time-of-day words - "lunch this afternoon"
+    should still narrow to lunch's 11-14 window, not the full 12-17
+    afternoon window.
+    """
     label = plan_label_from_message(message) or _DEFAULT_KIND.label
+
+    for pattern, windows, ideal, duration_minutes in _MEAL_PATTERNS:
+        if pattern.search(message):
+            return EventKind(
+                label=label,
+                duration_minutes=duration_minutes,
+                windows=windows,
+                ideal_hour=ideal,
+                activity_type=ActivityType.PERSONAL,
+                weekdays_only=False,
+            )
+
     for pattern, windows, ideal, weekdays_only in _TOD_PATTERNS:
         if pattern.search(message):
             return EventKind(
@@ -279,11 +326,98 @@ def infer_event_kind(message: str) -> EventKind:
                 activity_type=ActivityType.PERSONAL,
                 weekdays_only=weekdays_only,
             )
+    return None
+
+
+def infer_event_kind(message: str) -> EventKind:
+    """Regex-only, synchronous. Falls back to a "waking hours" window
+    when nothing matched. Used everywhere except the chat fast-path,
+    which uses the async wrapper (see ``infer_event_kind_async``).
+    """
+    hit = infer_event_kind_from_patterns(message)
+    if hit is not None:
+        return hit
+    label = plan_label_from_message(message) or _DEFAULT_KIND.label
     return EventKind(
         label=label,
         duration_minutes=_DEFAULT_KIND.duration_minutes,
         windows=_DEFAULT_KIND.windows,
         ideal_hour=_DEFAULT_KIND.ideal_hour,
+        activity_type=ActivityType.PERSONAL,
+        weekdays_only=False,
+    )
+
+
+async def infer_event_kind_async(
+    store,  # type: ignore[no-untyped-def]  # avoid circular import on UserStore
+    message: str,
+) -> EventKind:
+    """Regex-first, LLM-fallback event-kind inference.
+
+    Fast path (~50µs, no network): if the message contains a known
+    meal name or time-of-day word, return the deterministic
+    EventKind immediately. This covers "lunch", "coffee", "in the
+    evening", "after school", etc.
+
+    Slow path (~500-1500ms): only when the fast path missed AND we
+    extracted a real plan label ("afternoon tea", "power lunch",
+    "playdate for Nova", "book club"). We ask SlotWindowAgent for
+    a socially-normal window instead of shipping the 8am-8pm default,
+    which was surfacing dinner-time slots for lunch requests.
+
+    Failure mode: if the LLM path errors (unavailable, safety,
+    quota, schema mismatch), ``call_agent`` returns
+    ``soft_degraded=True`` with ``value=None`` and we transparently
+    fall back to the sync default. The user never sees a 500 - at
+    worst they get the "waking hours" window that used to fire
+    unconditionally.
+    """
+    hit = infer_event_kind_from_patterns(message)
+    if hit is not None:
+        return hit
+
+    label = plan_label_from_message(message)
+    if not label:
+        # No label + no time-of-day word means we've got nothing for
+        # the LLM to work with either. Return the default and let the
+        # ranker deal with it.
+        return EventKind(
+            label=_DEFAULT_KIND.label,
+            duration_minutes=_DEFAULT_KIND.duration_minutes,
+            windows=_DEFAULT_KIND.windows,
+            ideal_hour=_DEFAULT_KIND.ideal_hour,
+            activity_type=ActivityType.PERSONAL,
+            weekdays_only=False,
+        )
+
+    # Import here to avoid making the whole slots module import the
+    # agent registry (which pulls in Gemini SDK). Kept sync-side
+    # patterns pure and free of LLM deps.
+    from level_core.agents import slot_window as _slot_window
+
+    result = await _slot_window.run(store=store, message=message, label=label)
+    proposed = getattr(result.value, "window", None) if result.value else None
+    if proposed is None:
+        return EventKind(
+            label=label,
+            duration_minutes=_DEFAULT_KIND.duration_minutes,
+            windows=_DEFAULT_KIND.windows,
+            ideal_hour=_DEFAULT_KIND.ideal_hour,
+            activity_type=ActivityType.PERSONAL,
+            weekdays_only=False,
+        )
+
+    # Re-clamp to the module-wide floor/ceiling before returning so
+    # a rogue LLM window can't sneak past ``recommend_slots``'
+    # clamp either.
+    start_h = max(_KIND_HOUR_FLOOR, min(proposed.start_hour, _KIND_HOUR_CEILING - 1))
+    end_h = max(start_h + 1, min(proposed.end_hour, _KIND_HOUR_CEILING))
+    ideal = float(max(start_h, min(proposed.ideal_hour, end_h)))
+    return EventKind(
+        label=label,
+        duration_minutes=proposed.duration_minutes,
+        windows=((start_h, end_h),),
+        ideal_hour=ideal,
         activity_type=ActivityType.PERSONAL,
         weekdays_only=False,
     )

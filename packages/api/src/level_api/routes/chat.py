@@ -34,6 +34,7 @@ from level_core.schedule.book import book_event, delete_event, move_event
 from level_core.schedule.slots import (
     calendar_title_from_label,
     infer_event_kind,
+    infer_event_kind_async,
     parse_duration_minutes,
     plan_label_from_message,
     recommend_slots,
@@ -1604,7 +1605,10 @@ async def _fast_find_time(store: UserStore, message: str) -> dict[str, Any]:
     """Suggest open slots from the cached agenda. No LLM, no calendar write."""
     tz = await ctx_tz(store)
     now_local = datetime.now(tz)
-    kind = infer_event_kind(message)
+    # Regex-first with LLM fallback for uncommon labels ("afternoon
+    # tea", "power lunch", "playdate"). Common meals / time-of-day
+    # words never touch the network.
+    kind = await infer_event_kind_async(store, message)
     duration = parse_duration_minutes(message, kind.duration_minutes)
     starts_at, window_days, horizon_label = _horizon_for_message(message, now_local)
 

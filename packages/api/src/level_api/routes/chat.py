@@ -69,6 +69,17 @@ from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from level_api.deps import get_user_store
+from level_api.rate_limit import chat_rate_limit_gate
+from level_api.routes._chat_context import (
+    ChatContext,
+    bind_chat_ctx,
+    ctx_agenda,
+    ctx_contacts,
+    ctx_people,
+    ctx_priorities,
+    ctx_tz,
+    ctx_usuals,
+)
 from level_api.routes.email import register_pending_draft
 
 router = APIRouter()
@@ -118,6 +129,11 @@ def _prepare_history(history: list[ChatTurn] | None) -> list[dict[str, str]]:
 
 @router.post("/chat")
 async def chat(body: ChatBody, store: UserStore = Depends(get_user_store)) -> dict[str, Any]:
+    # Per-user token-bucket check sits BEFORE the LLM gate and before
+    # any Firestore reads: even fast-path traffic is bounded so a
+    # runaway client can't hammer the endpoint. Raises 429 with
+    # Retry-After when the bucket is dry.
+    chat_rate_limit_gate(store.user_id)
     return await _handle_message(store, body.message, _prepare_history(body.history))
 
 
@@ -129,6 +145,7 @@ async def chat_stream(
     EventSource (GET only) has the same conversational context that
     POST /v1/chat receives via the request body.
     """
+    chat_rate_limit_gate(store.user_id)
 
     async def event_source() -> AsyncIterator[dict[str, Any]]:
         history = await _history_from_store(store)
@@ -174,8 +191,15 @@ async def _handle_message(
     )
     await store.chat_turns.upsert(turn_in)
 
+    # Bind a per-request ChatContext so every fast-path / handler that
+    # reads store.agenda / people / contacts / priorities / usuals /
+    # profile / tz shares one memoized view. First read pays the
+    # Firestore round-trip; subsequent reads are in-memory. Chit-chat
+    # turns never touch Firestore at all (lazy).
+    ctx = ChatContext(store=store, message=message, history=list(history))
     try:
-        return await _dispatch_message(store, message, history)
+        with bind_chat_ctx(ctx):
+            return await _dispatch_message(store, message, history)
     except QuotaExhausted as err:
         wait = f" in about {err.retry_after_s}s" if err.retry_after_s else ""
         logger.warning(
@@ -564,9 +588,9 @@ async def _try_fast_agenda_lookup(
     if not (is_next or is_lookup or is_free_q):
         return None
 
-    tz = await tz_for_store(store)
+    tz = await ctx_tz(store)
     now_local = datetime.now(tz)
-    events = await store.agenda.list()
+    events = await ctx_agenda(store)
 
     if is_next:
         upcoming = sorted(
@@ -999,7 +1023,7 @@ async def _book(
     datetime range, inserts into Google Calendar, and re-syncs the local
     agenda cache.
     """
-    tz = await tz_for_store(store)
+    tz = await ctx_tz(store)
     today_local = datetime.now(tz).date()
     result = await book_run(
         store=store,
@@ -1248,9 +1272,9 @@ async def _match_agenda_events(
     end_t: time | None,
     title_hint: str | None,
 ) -> list[Any]:
-    tz = await tz_for_store(store)
+    tz = await ctx_tz(store)
     matches: list[Any] = []
-    for event in await store.agenda.list():
+    for event in await ctx_agenda(store):
         if event.time.all_day:
             continue
         local_start = event.time.start.astimezone(tz)
@@ -1300,7 +1324,7 @@ async def _try_fast_calendar(
     if picked is not None:
         return picked
 
-    tz = await tz_for_store(store)
+    tz = await ctx_tz(store)
     today_local = datetime.now(tz).date()
     is_move = bool(_MOVE_LEAD.search(message))
     is_cancel = bool(_CANCEL_LEAD.search(message)) and not is_move
@@ -1407,15 +1431,15 @@ def _horizon_for_message(
 
 async def _fast_find_time(store: UserStore, message: str) -> dict[str, Any]:
     """Suggest open slots from the cached agenda. No LLM, no calendar write."""
-    tz = await tz_for_store(store)
+    tz = await ctx_tz(store)
     now_local = datetime.now(tz)
     kind = infer_event_kind(message)
     duration = parse_duration_minutes(message, kind.duration_minutes)
     starts_at, window_days, horizon_label = _horizon_for_message(message, now_local)
 
-    events = await store.agenda.list()
-    priorities = await store.priorities.list()
-    usuals = await store.usuals.list()
+    events = await ctx_agenda(store)
+    priorities = await ctx_priorities(store)
+    usuals = await ctx_usuals(store)
 
     picks = recommend_slots(
         events=events,
@@ -1555,7 +1579,7 @@ async def _try_pick_offered_slot(
     if pending is None:
         return None
 
-    tz = await tz_for_store(store)
+    tz = await ctx_tz(store)
     today_local = datetime.now(tz).date()
     parsed = _parse_time_range(message)
     target = _resolve_target_date(message, today_local)
@@ -1619,7 +1643,7 @@ async def _try_pick_offered_slot(
 
 async def _fast_create(store: UserStore, message: str) -> dict[str, Any]:
     parsed = _parse_time_range(message)
-    tz = await tz_for_store(store)
+    tz = await ctx_tz(store)
     today_local = datetime.now(tz).date()
     target = _resolve_target_date(message, today_local)
     if parsed is None or target is None:
@@ -1662,7 +1686,7 @@ async def _fast_create(store: UserStore, message: str) -> dict[str, Any]:
 
 async def _fast_delete(store: UserStore, message: str) -> dict[str, Any]:
     parsed = _parse_time_range(message)
-    tz = await tz_for_store(store)
+    tz = await ctx_tz(store)
     today_local = datetime.now(tz).date()
     target = _resolve_target_date(message, today_local) or today_local
     title_hint = _title_from_message(message)
@@ -1706,7 +1730,7 @@ async def _fast_delete(store: UserStore, message: str) -> dict[str, Any]:
 
 
 async def _fast_move(store: UserStore, message: str) -> dict[str, Any]:
-    tz = await tz_for_store(store)
+    tz = await ctx_tz(store)
     today_local = datetime.now(tz).date()
     parts = re.split(r"\bto\b", message, maxsplit=1, flags=re.IGNORECASE)
     src_text = parts[0]
@@ -1839,7 +1863,7 @@ async def _title_from_usual_category(
     contains noisy auto-derived text like "N \u2192 BrightStart".
     """
     band = hour_to_band(start_hour)
-    for u in await store.usuals.list():
+    for u in await ctx_usuals(store):
         if int(u.weekday) == weekday and u.hour_band == band:
             return u.activity_type.category.label
     return None
@@ -2062,8 +2086,8 @@ async def _handle_email_request(
             used_adk=plan.used_adk,
             fallback=plan.fallback_reason,
         )
-    people = await store.people.list()
-    contacts = await store.contacts.list()
+    people = await ctx_people(store)
+    contacts = await ctx_contacts(store)
     resolved = resolve_email_targets(message, people, contacts, history)
     if resolved.status == "ask":
         await _write_pending_email_pick(store, message, resolved.candidates)
@@ -2090,8 +2114,8 @@ async def _handle_pending_email_pick(
         return None
     if is_email_request(message):
         return None
-    people = await store.people.list()
-    contacts = await store.contacts.list()
+    people = await ctx_people(store)
+    contacts = await ctx_contacts(store)
     by_id = {c.contact_id: c for c in contacts}
     people_by_id = {p.person_id: p for p in people}
     candidates: list[EmailCandidate] = []
@@ -2507,7 +2531,7 @@ async def _overlapping_events(
 ) -> list[CachedEvent]:
     skip = ignore_event_ids or set()
     out: list[CachedEvent] = []
-    for e in await store.agenda.list():
+    for e in await ctx_agenda(store):
         if e.time.all_day or e.event_id in skip:
             continue
         if e.time.start < end_dt and e.time.end > start_dt:
@@ -2640,7 +2664,7 @@ async def _find_priority_notes(
         topic_words |= _keywords(event.summary or "")
     conflict_text = " ".join(e.summary or "" for e in overlapping)
 
-    people = await store.people.list()
+    people = await ctx_people(store)
     people_by_id = {p.person_id: p for p in people}
     conflict_people = []
     seen_pids: set[str] = set()
@@ -2658,7 +2682,7 @@ async def _find_priority_notes(
                 conflict_people.append(person)
 
     notes: list[str] = []
-    for p in await store.priorities.list():
+    for p in await ctx_priorities(store):
         if p.status != "kept":
             continue
         if activity is not None and activity in p.activity_types:

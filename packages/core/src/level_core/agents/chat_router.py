@@ -12,8 +12,12 @@ schema flip the chat handler into "ask the human" mode.
 from __future__ import annotations
 
 from level_core.agents.base import AgentResult, AgentSpec, call_agent
+from level_core.agents.router_cache import get_cached, store_cached
+from level_core.observability import get_logger
 from level_core.schemas import ChatRouterDecision
 from level_core.storage.base import UserStore
+
+logger = get_logger(__name__)
 
 SYSTEM = """You are Level's chat router. Classify the caregiver's message into a path and intent.
 
@@ -87,6 +91,25 @@ async def run(
     history: list[dict[str, str]] | None = None,
     trace_id: str | None = None,
 ) -> AgentResult:
+    # Router cache: repeated chit-chat, "what's on today", "help", etc.
+    # all normalize to the same key. Same user + normalized message +
+    # same recent history -> same routing decision. TTL keeps stale
+    # routes from lingering after roster changes. This is a fully
+    # separate lookup from the deterministic fast paths in chat.py —
+    # this catches the LONG TAIL of variations those regexes miss.
+    cached = get_cached(
+        user_id=store.user_id, message=user_message, history=history
+    )
+    if cached is not None:
+        logger.info(
+            "agent.router_cache_hit",
+            user=store.user_id,
+            path=cached.path.value,
+            intent=cached.intent.value,
+            trace_id=trace_id,
+        )
+        return AgentResult(value=cached, cost_usd=0.0, latency_ms=0)
+
     spec = AgentSpec(
         name="ChatRouterAgent",
         model="flash",
@@ -97,10 +120,18 @@ async def run(
         require_source_span=True,
     )
     context = {"prior_turns": history} if history else None
-    return await call_agent(
+    result = await call_agent(
         spec,
         user_input=user_message,
         context=context,
         store=store,
         trace_id=trace_id,
     )
+    if result.value is not None and not result.blocked_by_safety:
+        store_cached(
+            user_id=store.user_id,
+            message=user_message,
+            history=history,
+            value=result.value,  # type: ignore[arg-type]
+        )
+    return result

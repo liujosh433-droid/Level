@@ -88,6 +88,14 @@ class Settings(BaseSettings):
     # a response, even when downstream agents get soft-degraded.
     level_router_cost_cap_multiplier: float = 3.0
 
+    # HTTP-layer rate limit on /v1/chat (see level_api.rate_limit).
+    # Sits ABOVE the LLM gate - protects the fast-path CPU + Firestore
+    # reads even when the model isn't invoked. Token bucket: `burst`
+    # capacity, refill at `per_min` messages/min. Defaults suit a
+    # normal caregiver typing pace.
+    level_chat_rate_burst: int = Field(default=20, ge=1, le=1000)
+    level_chat_rate_per_min: int = Field(default=30, ge=1, le=6000)
+
     google_oauth_client_id: str = ""
     google_oauth_client_secret: str = ""
     google_oauth_redirect_uri: str = "http://localhost:8080/v1/auth/google/callback"

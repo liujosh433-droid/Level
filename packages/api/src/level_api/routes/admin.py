@@ -13,10 +13,12 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from level_core.agents.identity import verify as verify_identity
 from level_core.agents.registry import to_dict as registry_snapshot
+from level_core.agents.router_cache import cache_stats as router_cache_stats
 from level_core.config import get_settings
 from level_core.storage.base import UserStore
 
 from level_api.deps import get_user_store
+from level_api.rate_limit import rate_limit_stats
 
 router = APIRouter()
 
@@ -55,6 +57,25 @@ async def verify_agent_identity(token: str) -> dict[str, Any]:
         "version": identity.version,
         "prompt_hash": identity.prompt_hash,
     }
+
+
+@router.get("/router_cache")
+async def router_cache() -> dict[str, Any]:
+    """Router-decision LRU cache stats.
+
+    Shows hit/miss counts + hit-rate so the demo video can prove the
+    cache is doing work. Every hit here is a Gemini Flash call NOT
+    made — direct cost savings and 429 pressure relief.
+    """
+    _require_admin()
+    return router_cache_stats()
+
+
+@router.get("/rate_limit")
+async def rate_limit_snapshot() -> dict[str, Any]:
+    """Chat HTTP-layer token-bucket stats."""
+    _require_admin()
+    return rate_limit_stats()
 
 
 @router.get("/traces")

@@ -135,9 +135,20 @@ def load_events(
 
 
 def _compute_shift_days(anchor: date, today: date) -> int:
-    """Whole-week shift so ``anchor``'s weekday of today's week."""
-    raw_delta = (today - anchor).days
-    return round(raw_delta / 7) * 7
+    """Whole-week shift that aligns ``anchor``'s ISO week with today's.
+
+    We compute the delta between the two ISO Mondays rather than
+    rounding ``(today - anchor) / 7``. The old rounding formula
+    silently mis-aligned any date that was 4-6 days after the anchor
+    inside the same ISO week (e.g. anchor Wed 8/26 + today Sun 8/30
+    is only 4 days apart but rounds up to a 7-day shift, pushing the
+    anchor week's missing usuals INTO NEXT WEEK, so /today sees no
+    nudge). Monday-to-Monday math is exact and preserves weekday
+    alignment for every calendar date.
+    """
+    today_monday = today - timedelta(days=today.weekday())
+    anchor_monday = anchor - timedelta(days=anchor.weekday())
+    return (today_monday - anchor_monday).days
 
 
 def _expand_vevent(

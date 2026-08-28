@@ -14,13 +14,20 @@ Two scenarios are emitted into ``example-data/``:
   Helen cadence, plus a standing biweekly sitter block, to match how
   a solo caregiver actually spends the week.
 
-Both files cover Mon 2026-08-03 through Fri 2026-09-25 so Level can
+Both files cover Mon 2026-08-03 through Sun 2026-11-08 so Level can
 infer usuals from four full weeks of history the moment a judge
-imports the calendar. The current demo week (Mon 2026-08-24 through
-Sun 2026-08-30) is engineered so that **two normally-recurring events
-are missing** - the nightly proactive-cards job picks them up and
-renders them on ``/today`` as ``"Level noticed while you slept"``
-nudges.
+imports the calendar AND every judge running any day between the
+demo launch and mid-October still lands on a rich, non-empty agenda
+after the whole-week date shift (see ``ics_loader._compute_shift_days``).
+The current demo week (Mon 2026-08-24 through Sun 2026-08-30) is
+engineered so that **three normally-recurring events are missing on
+distinct weekdays** (Thu, Fri, Sun) - the nightly proactive-cards
+job picks them up and renders them on ``/today`` as ``"Level
+noticed while you slept"`` nudges. Spreading the misses across late
+weekdays means judges who test on Fri, Sat, or Sun still see at
+least one nudge for the current week (the ``today_wd`` filter in
+``missing_usuals_this_week`` drops any weekday that has already
+passed).
 
 Weekly rhythm is a deliberate mix: RRULE for the true recurring
 anchors (school dropoff, work, commute) and **individual VEVENTs
@@ -30,7 +37,7 @@ into a repeating series. See ``_messy_weekly`` at the bottom of
 this module.
 
 Three "messy usuals" (Nova ballet, Helen PT, grocery run) are
-laid down as 4-5 separate VEVENTs each - not a single RRULE -
+laid down as ~10 separate VEVENTs each - not a single RRULE -
 with:
 
 - text variance ("Nova ballet" / "Ballet - Nova" / "Nova ballet
@@ -40,9 +47,9 @@ with:
 This proves the usuals engine clusters on
 ``(person_id, weekday, hour_band, activity_type)`` and picks the
 majority-vote display name - not on exact string match of the
-event summary. The two "missing this week" stories still hold:
+event summary. The three "missing this week" stories still hold:
 Nova ballet is absent this Thursday, grocery run is absent this
-Friday.
+Friday, and Helen's Sunday grocery drop is absent this Sunday.
 """
 
 from __future__ import annotations
@@ -65,7 +72,14 @@ PROD_ID = "-//Level//Caregiver Month//EN"
 # ---------------------------------------------------------------------------
 
 START = date(2026, 8, 3)  # Monday
-END = date(2026, 9, 25)  # Friday
+# END drives every RRULE UNTIL stamp. Judges test between the launch
+# and Oct 1; ``ics_loader`` shifts the fixture forward by whole ISO
+# weeks so anchor-week events always land in the judge's current
+# week. A late-window judge (say Oct 1) sees roughly 5 shifted weeks
+# after their "today" — so END has to sit ~5 weeks past the anchor's
+# tail to keep the +28-day forward window populated. Nov 8 covers
+# through mid-October judges with a couple of weeks of slack.
+END = date(2026, 11, 8)  # Sunday
 TODAY = date(2026, 8, 26)  # Wednesday - anchors the "missing this week" story
 
 # Weekday shape of the demo week: Thu = 8/27, Fri = 8/28, Sat = 8/29, Sun = 8/30.
@@ -75,11 +89,15 @@ TODAY = date(2026, 8, 26)  # Wednesday - anchors the "missing this week" story
 # and grocery (encoded as ``skip_offsets=(THIS_WEEK,)``).
 THIS_WEEK = 3
 
-# Missing-usuals story for the current demo week: Nova ballet and
-# the grocery run are absent this week for both scenarios (skipped
-# via ``skip_offsets`` inside the ``_messy_weekly`` blocks below).
-# The solo scenario adds a third: Helen's Sunday grocery drop, which
-# still uses RRULE + EXDATE because it's a "clean" recurring block.
+# Missing-usuals story for the current demo week: Nova ballet
+# (Thu), the grocery run (Fri), and Helen's weekly Sunday grocery
+# drop are all absent this week for both scenarios. The first two
+# are ``_messy_weekly`` blocks with ``skip_offsets=(THIS_WEEK,)``;
+# the third is a clean RRULE with an EXDATE for the anchor Sunday.
+# Three misses spread across Thu/Fri/Sun guarantees at least one
+# actionable nudge for judges who visit on any weekday - the
+# ``missing_usuals_this_week`` filter drops any weekday earlier
+# than today (you can't put back yesterday's ballet).
 MISSING_HELEN_SUNDAY = date(2026, 8, 30)
 
 LABOR_DAY = date(2026, 9, 7)
@@ -369,15 +387,14 @@ def build_family_events() -> list[str]:
         # class"), no RRULE. Level still infers Thursday-afternoon
         # ballet as Nova's usual because clustering keys on
         # (person, weekday, hour_band, activity_type). Missing THIS
-        # Thursday (2026-08-27) is the first of the two demo missing-
+        # Thursday (2026-08-27) is the first of the three demo missing-
         # usuals stories - the nightly proactive-cards job surfaces it.
         #
-        # Majority vote: 3× "Nova ballet" vs 1× each of the two
-        # variants means the picked display name settles on the clean
-        # form. Weeks 0/1/2 are in the past, so those three drive the
-        # majority. Weeks 4/5 are the same clean form because a real
-        # user reverts to their default wording once the "let's try
-        # this" experiment (variant text) passes.
+        # Majority vote: most weeks are the clean "Nova ballet" form so
+        # the picked display name settles on it. Weeks 0/1/2 drive the
+        # historical majority; weeks 4-9 keep the ballet visible after
+        # the whole-week shift for judges running later in the demo
+        # window.
         *_messy_weekly(
             uid_prefix="fam-nova-ballet",
             weekday_of_first=first["TH"],
@@ -386,8 +403,12 @@ def build_family_events() -> list[str]:
                 ("Ballet - Nova", (16, 45), (17, 45)),      # week 1 - past, variant
                 ("Nova ballet", (16, 30), (17, 30)),        # week 2 - past, majority
                 ("Nova ballet class", (16, 30), (17, 30)),  # week 3 (SKIPPED - missing)
-                ("Nova ballet", (16, 30), (17, 30)),        # week 4 - future
-                ("Nova ballet", (16, 30), (17, 30)),        # week 5 - future
+                ("Nova ballet", (16, 30), (17, 30)),        # week 4
+                ("Nova ballet", (16, 30), (17, 30)),        # week 5
+                ("Nova ballet", (16, 30), (17, 30)),        # week 6
+                ("Ballet - Nova", (16, 45), (17, 45)),      # week 7 - variant
+                ("Nova ballet", (16, 30), (17, 30)),        # week 8
+                ("Nova ballet", (16, 30), (17, 30)),        # week 9
             ],
             location="Studio B",
             skip_offsets=(THIS_WEEK,),
@@ -405,11 +426,22 @@ def build_family_events() -> list[str]:
                 ("Helen physical therapy", (10, 0), (11, 0)),  # week 0
                 ("Helen PT", (9, 45), (10, 45)),               # week 1
                 ("Helen physical therapy", (10, 0), (11, 0)),  # week 2 - majority text
-                ("PT - Helen", (10, 15), (11, 15)),            # week 3
-                ("Helen physical therapy", (10, 0), (11, 0)),  # this week - present in agenda
+                ("PT - Helen", (10, 15), (11, 15)),            # week 3 - this week, variant
+                ("Helen physical therapy", (10, 0), (11, 0)),  # week 4
+                ("Helen PT", (9, 45), (10, 45)),               # week 5 - variant
+                ("Helen physical therapy", (10, 0), (11, 0)),  # week 6
+                ("Helen physical therapy", (10, 0), (11, 0)),  # week 7
+                ("PT - Helen", (10, 15), (11, 15)),            # week 8 - variant
+                ("Helen physical therapy", (10, 0), (11, 0)),  # week 9
             ],
             location="Bayside PT Clinic",
         ),
+        # Missing usual #3: Helen weekly grocery drop on Sun 2026-08-30.
+        # Skips the anchor Sunday so late-week (Fri/Sat/Sun) judges still
+        # see at least one nudge — Thursday (ballet) and Friday (grocery
+        # run) have already passed by then. The RRULE still expands
+        # every other Sunday across the demo window, so the visible
+        # cadence stays intact.
         series(
             uid="fam-helen-grocery-drop@level.local",
             first=first["SU"],
@@ -418,6 +450,7 @@ def build_family_events() -> list[str]:
             summary="Helen weekly grocery drop",
             byday="SU",
             location="Helen's apartment",
+            exdates=[MISSING_HELEN_SUNDAY],
         ),
         series(
             uid="fam-call-helen@level.local",
@@ -433,8 +466,7 @@ def build_family_events() -> list[str]:
         # make it recurring. Level's second missing-usuals story for
         # the demo week (absent this Friday 2026-08-28) - the nightly
         # proactive-cards job surfaces it alongside Nova ballet.
-        # Majority-vote display picks "Grocery run" (2 of the 3 past
-        # events).
+        # Majority-vote display picks "Grocery run".
         *_messy_weekly(
             uid_prefix="fam-grocery-run",
             weekday_of_first=first["FR"],
@@ -443,8 +475,12 @@ def build_family_events() -> list[str]:
                 ("Trader Joe's", (16, 30), (17, 5)),      # week 1 - past, variant
                 ("Grocery run", (16, 15), (16, 50)),      # week 2 - past, majority
                 ("Grocery pickup", (16, 45), (17, 20)),   # week 3 (SKIPPED - missing)
-                ("Grocery run", (16, 15), (16, 50)),      # week 4 - future
-                ("Grocery run", (16, 15), (16, 50)),      # week 5 - future
+                ("Grocery run", (16, 15), (16, 50)),      # week 4
+                ("Grocery run", (16, 15), (16, 50)),      # week 5
+                ("Trader Joe's", (16, 30), (17, 5)),      # week 6 - variant
+                ("Grocery run", (16, 15), (16, 50)),      # week 7
+                ("Grocery run", (16, 15), (16, 50)),      # week 8
+                ("Grocery run", (16, 15), (16, 50)),      # week 9
             ],
             skip_offsets=(THIS_WEEK,),
         ),
@@ -624,8 +660,12 @@ def build_solo_events() -> list[str]:
                 ("Ballet - Nova", (16, 45), (17, 45)),      # week 1 - past, variant
                 ("Nova ballet", (16, 30), (17, 30)),        # week 2 - past, majority
                 ("Nova ballet class", (16, 30), (17, 30)),  # week 3 (SKIPPED - missing)
-                ("Nova ballet", (16, 30), (17, 30)),        # week 4 - future
-                ("Nova ballet", (16, 30), (17, 30)),        # week 5 - future
+                ("Nova ballet", (16, 30), (17, 30)),        # week 4
+                ("Nova ballet", (16, 30), (17, 30)),        # week 5
+                ("Nova ballet", (16, 30), (17, 30)),        # week 6
+                ("Ballet - Nova", (16, 45), (17, 45)),      # week 7 - variant
+                ("Nova ballet", (16, 30), (17, 30)),        # week 8
+                ("Nova ballet", (16, 30), (17, 30)),        # week 9
             ],
             location="Studio B",
             skip_offsets=(THIS_WEEK,),
@@ -639,8 +679,13 @@ def build_solo_events() -> list[str]:
                 ("Helen physical therapy", (10, 0), (11, 0)),  # week 0
                 ("Helen PT", (9, 45), (10, 45)),               # week 1
                 ("Helen physical therapy", (10, 0), (11, 0)),  # week 2 - majority
-                ("PT - Helen", (10, 15), (11, 15)),            # week 3
-                ("Helen physical therapy", (10, 0), (11, 0)),  # this week
+                ("PT - Helen", (10, 15), (11, 15)),            # week 3 - this week, variant
+                ("Helen physical therapy", (10, 0), (11, 0)),  # week 4
+                ("Helen PT", (9, 45), (10, 45)),               # week 5 - variant
+                ("Helen physical therapy", (10, 0), (11, 0)),  # week 6
+                ("Helen physical therapy", (10, 0), (11, 0)),  # week 7
+                ("PT - Helen", (10, 15), (11, 15)),            # week 8 - variant
+                ("Helen physical therapy", (10, 0), (11, 0)),  # week 9
             ],
             location="Bayside PT Clinic",
         ),
@@ -664,10 +709,11 @@ def build_solo_events() -> list[str]:
             byday="MO,WE,FR",
         ),
         # -- Household -------------------------------------------------------
-        # Grocery run - messy weekly. Solo caregiver: no missing-week
-        # skip here because the demo already has TWO missing usuals
-        # (Nova ballet + Helen Sunday drop). Grocery run stays present
-        # this Friday to keep the demo agenda from feeling barren.
+        # Grocery run - messy weekly. Skips the anchor Friday so the
+        # solo scenario shows the same three-day miss pattern as
+        # family (Thu ballet + Fri grocery + Sun Helen drop). A judge
+        # running on Fri/Sat has ballet already past; the Friday miss
+        # and the Sunday miss keep at least one nudge on screen.
         *_messy_weekly(
             uid_prefix="solo-grocery-run",
             weekday_of_first=first["FR"],
@@ -675,10 +721,15 @@ def build_solo_events() -> list[str]:
                 ("Grocery run", (16, 15), (16, 50)),      # week 0 - past, majority
                 ("Trader Joe's", (16, 30), (17, 5)),      # week 1 - past, variant
                 ("Grocery run", (16, 15), (16, 50)),      # week 2 - past, majority
-                ("Grocery pickup", (16, 45), (17, 20)),   # week 3 - THIS week, variant
-                ("Grocery run", (16, 15), (16, 50)),      # week 4 - future
-                ("Grocery run", (16, 15), (16, 50)),      # week 5 - future
+                ("Grocery pickup", (16, 45), (17, 20)),   # week 3 (SKIPPED - missing)
+                ("Grocery run", (16, 15), (16, 50)),      # week 4
+                ("Grocery run", (16, 15), (16, 50)),      # week 5
+                ("Trader Joe's", (16, 30), (17, 5)),      # week 6 - variant
+                ("Grocery run", (16, 15), (16, 50)),      # week 7
+                ("Grocery run", (16, 15), (16, 50)),      # week 8
+                ("Grocery run", (16, 15), (16, 50)),      # week 9
             ],
+            skip_offsets=(THIS_WEEK,),
         ),
         series(
             uid="solo-meal-prep@level.local",

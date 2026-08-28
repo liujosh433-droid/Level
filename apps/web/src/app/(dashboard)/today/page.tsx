@@ -490,6 +490,21 @@ export default function TodayPage() {
                         )}
                         {" \u00b7 "}
                         {card.day}
+                        {card.typical_start && card.typical_end ? (
+                          <>
+                            {" \u00b7 "}
+                            {/*
+                              Show WHEN the usual normally sits, not just
+                              which day. En-dash matches the range
+                              convention used elsewhere in the app.
+                            */}
+                            <span className={styles.metaMuted}>
+                              {card.typical_start}
+                              {"\u2013"}
+                              {card.typical_end}
+                            </span>
+                          </>
+                        ) : null}
                       </p>
                     </div>
                     <div className={styles.proactiveActions}>

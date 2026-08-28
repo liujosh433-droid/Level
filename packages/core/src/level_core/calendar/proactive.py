@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo
 from level_core.calendar.usuals import (
     current_week_bounds,
     missing_usuals_this_week,
+    typical_time_range,
 )
 from level_core.observability import get_logger
 from level_core.schemas.agenda import CachedEvent
@@ -34,6 +35,20 @@ logger = get_logger(__name__)
 # names without stringly-typed drift.
 PROACTIVE_CARDS_KEY = "proactive_cards"
 MAX_PROACTIVE_CARDS = 5
+
+
+def _format_time_range(start: str | None, end: str | None) -> str | None:
+    """Render "4:30pm-5:30pm" as a compact parenthetical for card bodies.
+
+    Returns ``None`` when either endpoint is unknown so the caller
+    can fall through to the un-timed template. Uses ``\u2013`` (en
+    dash) between the endpoints — the caregivers judging the demo
+    read this on a phone; en-dash is the typographic convention for
+    time ranges and reads cleaner than a hyphen.
+    """
+    if not start or not end:
+        return None
+    return f"{start}\u2013{end}"
 
 
 def _strip_owner_prefix(activity_label: str, display_name: str) -> str:
@@ -119,6 +134,10 @@ async def regenerate_proactive_cards(
     # Reuse the roster we already have instead of re-listing - this
     # is what shaves a second full people.list() off every call.
     people_by_id = {p.person_id: p for p in people}
+    # ``typical_time_range`` needs the raw usuals to trace back through
+    # ``source_event_uids``. Cheap ordinary local list, one shared
+    # across every card in this run.
+    usuals = await store.usuals.list()
     cards: list[dict[str, Any]] = []
     for g in missing[:MAX_PROACTIVE_CARDS]:
         primary = people_by_id.get(g.person_id)
@@ -136,18 +155,24 @@ async def regenerate_proactive_cards(
         # title_hint like "Helen weekly grocery drop" produces
         # "Helen's helen weekly grocery drop is missing".
         activity_label = _strip_owner_prefix(activity_label, display_name)
+        # Median start/end from the source usuals' historical events.
+        # Falls through to a time-less body when there are no timed
+        # source events (badly-seeded data or all-day usuals).
+        typical_start, typical_end = typical_time_range(g, usuals, events_by_id, tz)
+        time_range = _format_time_range(typical_start, typical_end)
+        time_clause = f" (usually {time_range})" if time_range else ""
         if primary and primary.is_self:
             # Own-usual phrasing: "Your grocery run is missing" reads
             # better than "Josh's grocery run is missing" when it's
             # the caregiver themselves.
             body_text = (
-                f"Your {activity_label.lower()} is missing this week. "
-                "Want me to put it back?"
+                f"Your {activity_label.lower()} is missing this week"
+                f"{time_clause}. Want me to put it back?"
             )
         else:
             body_text = (
-                f"{display_name}'s {activity_label.lower()} is missing this week. "
-                "Want me to put it back?"
+                f"{display_name}'s {activity_label.lower()} is missing this week"
+                f"{time_clause}. Want me to put it back?"
             )
         # ``group_id`` mirrors the format ``_decorate_missing_group``
         # emits for missing_usuals_week rows (``{weekday}:{category}``).
@@ -170,6 +195,11 @@ async def regenerate_proactive_cards(
                 "person_id": g.person_id,
                 "person_name": display_name,
                 "text": body_text,
+                # Structured time endpoints so the frontend can render
+                # them in its own layout (chip, meta line, tooltip)
+                # without re-parsing the free-form ``text``.
+                "typical_start": typical_start,
+                "typical_end": typical_end,
                 "created_at": datetime.now(UTC).isoformat(),
             }
         )

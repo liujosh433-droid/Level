@@ -250,6 +250,63 @@ def current_week_bounds(as_of: date) -> tuple[date, date]:
     return start, start + timedelta(days=7)
 
 
+def _fmt_hm(total_minutes: int) -> str:
+    """12-hour clock formatter shared by every missing-usual surface.
+
+    Returns strings like ``"9am"``, ``"9:30am"``, ``"4:30pm"``. Compact
+    (no space before am/pm) so the range formatter can render them
+    end-to-end without wasting horizontal space on card bodies.
+    """
+    total_minutes = max(0, min(23 * 60 + 59, total_minutes))
+    hour_24 = (total_minutes // 60) % 24
+    minute = total_minutes % 60
+    suffix = "am" if hour_24 < 12 else "pm"
+    hour_12 = hour_24 % 12 or 12
+    if minute == 0:
+        return f"{hour_12}{suffix}"
+    return f"{hour_12}:{minute:02d}{suffix}"
+
+
+def typical_time_range(
+    group: MissingCategoryGroup,
+    usuals: list[Usual],
+    events_by_id: dict[str, CachedEvent],
+    tz: ZoneInfo,
+) -> tuple[str | None, str | None]:
+    """Return the median start/end times for a missing-usual group.
+
+    Rolls through every source event on every representative usual and
+    computes the median start minute + median duration. Median (not
+    mean) so a single wildly-off calendar entry can't skew the label.
+    All-day events are ignored — a caregiver would never nudge on
+    "the whole day is missing". Returns ``(None, None)`` when the
+    group has no timed source events (badly seeded data or usuals
+    without event backing).
+    """
+    starts: list[int] = []
+    durations: list[int] = []
+    usuals_by_id = {u.usual_id: u for u in usuals}
+    for uid in group.representative_usual_ids:
+        u = usuals_by_id.get(uid)
+        if not u:
+            continue
+        for src_uid in u.source_event_uids:
+            ev = events_by_id.get(src_uid)
+            if not ev or ev.time.all_day:
+                continue
+            s_local = ev.time.start.astimezone(tz)
+            e_local = ev.time.end.astimezone(tz)
+            starts.append(s_local.hour * 60 + s_local.minute)
+            durations.append(max(15, int((e_local - s_local).total_seconds() // 60)))
+    if not starts:
+        return None, None
+    from statistics import median as _median
+
+    start_min = int(_median(starts))
+    dur_min = int(_median(durations))
+    return _fmt_hm(start_min), _fmt_hm(start_min + dur_min)
+
+
 def _people_on_usual(
     usual: Usual, events_by_id: dict[str, CachedEvent] | None
 ) -> list[str]:

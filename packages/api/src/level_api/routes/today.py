@@ -16,6 +16,7 @@ from level_core.calendar.usuals import (
     current_week_bounds,
     missing_usuals_this_week,
     missing_usuals_today,
+    typical_time_range,
 )
 from level_core.config import get_settings
 from level_core.observability import get_logger
@@ -581,29 +582,12 @@ def _decorate_missing_group(
     today: Any,
 ) -> dict[str, Any]:
     """Coarse category-level missing entry with typical time + person context."""
-    starts: list[int] = []
-    durations: list[int] = []
-    usuals_by_id = {u.usual_id: u for u in all_usuals}
-    for uid in group.representative_usual_ids:
-        u = usuals_by_id.get(uid)
-        if not u:
-            continue
-        for src_uid in u.source_event_uids:
-            ev = events_by_id.get(src_uid)
-            if not ev or ev.time.all_day:
-                continue
-            s_local = ev.time.start.astimezone(tz)
-            e_local = ev.time.end.astimezone(tz)
-            starts.append(s_local.hour * 60 + s_local.minute)
-            durations.append(max(15, int((e_local - s_local).total_seconds() // 60)))
-    if starts:
-        start_min = int(median(starts))
-        dur_min = int(median(durations))
-        typical_start = _fmt_hm(start_min)
-        typical_end = _fmt_hm(start_min + dur_min)
-    else:
-        typical_start = None
-        typical_end = None
+    # Time-range math lives in level_core.calendar.usuals so the
+    # proactive-cards path (also missing-usual-based) can compute the
+    # same label. Keep this shim thin.
+    typical_start, typical_end = typical_time_range(
+        group, all_usuals, events_by_id, tz
+    )
 
     person_views: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -647,17 +631,6 @@ def _decorate_missing_group(
         "typical_start": typical_start,
         "typical_end": typical_end,
     }
-
-
-def _fmt_hm(total_minutes: int) -> str:
-    total_minutes = max(0, min(23 * 60 + 59, total_minutes))
-    hour_24 = (total_minutes // 60) % 24
-    minute = total_minutes % 60
-    suffix = "am" if hour_24 < 12 else "pm"
-    hour_12 = hour_24 % 12 or 12
-    if minute == 0:
-        return f"{hour_12}{suffix}"
-    return f"{hour_12}:{minute:02d}{suffix}"
 
 
 def _week_load(week_events: list[Any]) -> list[dict[str, Any]]:

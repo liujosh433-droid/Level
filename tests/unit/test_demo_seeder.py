@@ -425,13 +425,16 @@ async def test_messy_events_still_cluster_as_usuals(  # type: ignore[no-untyped-
     assert grocery is not None, "Josh FRI grocery usual missing"
     assert grocery.display_summary == "Grocery run"
 
-    # 4. Missing-usuals story for the demo week: Nova ballet is
-    #    intentionally absent this Thursday (both scenarios). Grocery
-    #    run is absent this Friday for FAMILY only; SOLO keeps it
-    #    present under a variant name to demo that a variant title
-    #    still covers the usual and doesn't trigger a false alarm.
+    # 4. Missing-usuals story for the demo week: three normally-
+    #    recurring events are absent this week on distinct weekdays
+    #    (Thu ballet, Fri grocery run, Sun Helen grocery drop). Spread
+    #    across the week guarantees at least one "still fixable" nudge
+    #    for judges visiting on any day - the today_wd filter in
+    #    missing_usuals_this_week drops weekdays that have already
+    #    passed. Applies to both family and solo scenarios.
     thu = date(2026, 8, 27)
     fri = date(2026, 8, 28)
+    sun = date(2026, 8, 30)
     thu_ballet = [
         e for e in events
         if e.time.start.date() == thu and "ballet" in e.summary.lower()
@@ -441,13 +444,17 @@ async def test_messy_events_still_cluster_as_usuals(  # type: ignore[no-untyped-
         if e.time.start.date() == fri
         and ("grocery" in e.summary.lower() or "trader" in e.summary.lower())
     ]
+    sun_helen_drop = [
+        e for e in events
+        if e.time.start.date() == sun and "helen weekly grocery drop" in e.summary.lower()
+    ]
     assert not thu_ballet, f"ballet should be missing this Thu, found: {thu_ballet}"
-    if scenario_id == "family":
-        assert not fri_grocery, (
-            f"family grocery should be missing this Fri, found: {fri_grocery}"
-        )
-    else:
-        assert fri_grocery, "solo grocery should still be present under a variant name"
+    assert not fri_grocery, (
+        f"grocery should be missing this Fri, found: {fri_grocery}"
+    )
+    assert not sun_helen_drop, (
+        f"Helen Sunday drop should be missing this Sun, found: {sun_helen_drop}"
+    )
 
 
 def test_heuristic_grocery_pickup_not_misclassified_as_school() -> None:

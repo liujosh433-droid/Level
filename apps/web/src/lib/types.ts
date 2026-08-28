@@ -147,6 +147,14 @@ export type ProactiveCard = {
   person_id: string;
   person_name: string;
   text: string;
+  /**
+   * Median start/end of the source usuals' historical events, formatted
+   * like "4:30pm". Both null when the underlying usual has no timed
+   * source events. Rendered on the card meta line so caregivers see
+   * WHEN the missing slot normally sits without opening the details.
+   */
+  typical_start?: string | null;
+  typical_end?: string | null;
   created_at: string;
 };
 

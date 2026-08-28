@@ -43,6 +43,17 @@ IN_FLIGHT_KEY = "recap_in_flight"
 # under media_cache so it shares the same ISO-week rollover as the
 # cached video. See ``_read_regen_quota`` for the reset rule.
 REGEN_QUOTA_KEY = "recap_regens"
+# Where a failed Veo generation memoizes its reason so the next
+# poll can surface it instead of silently spawning a fresh
+# background task. Without this, a Veo failure (veo_no_output,
+# quota, region misconfig) would cascade into an infinite
+# generate-fail-repoll-generate loop: each background task clears
+# in_flight without writing a recap, so the next 6s poll sees a
+# clean slate and starts over with a NEW ``started_at``. The
+# visible symptom was the elapsed-time counter resetting from
+# ~60s back to 0 forever with no video ever appearing. See
+# ``ERROR_COOLDOWN_SECONDS`` for the retry gate.
+RECAP_ERROR_KEY = "recap_error"
 # Stale threshold for the in-flight flag. Set to 1.5x
 # VEO_POLL_CEILING_SECONDS so the frontend re-poll window can
 # NEVER clear a flag while a legit background task is still
@@ -60,6 +71,16 @@ IN_FLIGHT_MAX_AGE_SECONDS = 900
 # us enough headroom to catch essentially every legit generation
 # while still bailing out on genuinely hung operations.
 VEO_POLL_CEILING_SECONDS = 600
+# How long to memoize a Veo failure before allowing another
+# automatic (cold-path) retry. Bounded so a genuinely transient
+# outage (regional quota blip) heals on its own without judge
+# intervention, but long enough that a hard misconfig
+# (LEVEL_MEDIA_ENABLED=true but Veo not enabled in the project)
+# doesn't burn a fresh $1.20 attempt every 6s of polling. The
+# Regenerate button clears the cooldown so a user who thinks the
+# outage has passed can retry immediately - but the automatic
+# poll cycle stays gated to prevent runaway retries.
+ERROR_COOLDOWN_SECONDS = 300
 
 
 class RecapResponse(BaseModel):
@@ -265,6 +286,12 @@ async def weekly_recap(
                 regenerations_used=regens_used,
                 regenerations_max=regen_max,
             )
+        # A user who explicitly clicked Regenerate is telling us
+        # they want to retry NOW, so wipe any active cooldown
+        # before invoking Veo. If Veo still fails, the sync path
+        # will re-write the cooldown so the automatic poll cycle
+        # remains gated - only the explicit user action bypasses.
+        cache.pop(RECAP_ERROR_KEY, None)
         cache[REGEN_QUOTA_KEY] = {
             "week_start": week_start_iso,
             "count": regens_used + 1,
@@ -283,6 +310,31 @@ async def weekly_recap(
         result.regenerations_used = regens_used + 1
         result.regenerations_max = regen_max
         return result
+
+    # Failure memoization gate. If a prior generation for this week
+    # failed inside the cooldown window, return the memoized reason
+    # instead of spawning yet another attempt. Without this the
+    # frontend polls every 6s, each poll finds "no in-flight, no
+    # recap" and spawns a new $1.20 background task with a fresh
+    # started_at - producing the "elapsed counter loops from 0 to
+    # ~60s forever" symptom and burning credits on every cycle.
+    recap_error = cache.get(RECAP_ERROR_KEY) or {}
+    if recap_error.get("week_start") == week_start_iso:
+        failed_at = _parse_iso_datetime(recap_error.get("failed_at"))
+        if failed_at is not None:
+            error_age = (datetime.now(timezone.utc) - failed_at).total_seconds()
+            if error_age < ERROR_COOLDOWN_SECONDS:
+                return RecapResponse(
+                    ready=False,
+                    reason=recap_error.get("reason") or "veo_unavailable",
+                    week_start=week_start_iso,
+                    regenerations_used=regens_used,
+                    regenerations_max=regen_max,
+                )
+        # Cooldown expired - clear it and let the cold path retry.
+        # A stale/unparseable timestamp falls through here too so
+        # a corrupt blob can't strand the user forever.
+        cache.pop(RECAP_ERROR_KEY, None)
 
     # Not cached, not forcing. Check whether a background task is
     # already running for this week. The flag is only trusted while
@@ -386,9 +438,11 @@ async def _run_recap_in_background(
     """
     try:
         result = await _generate_veo(prompt=prompt, model=model)
+        exc_reason: str | None = None
     except Exception as err:  # noqa: BLE001 - defensive; media must never break chat
         logger.warning("media.veo.background_exception", err=str(err)[:200])
         result = None
+        exc_reason = "veo_unavailable"
 
     # Refresh the cache blob to avoid clobbering unrelated media
     # sub-keys (chime cache, etc.) that other requests may have
@@ -405,6 +459,27 @@ async def _run_recap_in_background(
             "poster_url": (result or {}).get("poster_url") or None,
             "model": model,
             "generated_at": datetime.utcnow().isoformat(),
+        }
+        # A success wipes any prior error - the outage that caused
+        # it has clearly cleared. Leaving a stale error blob here
+        # would let the next poll (unluckily hitting the stale
+        # cooldown before its own cache read caught up) still
+        # surface an "unavailable" for a video that just landed.
+        cache.pop(RECAP_ERROR_KEY, None)
+    else:
+        # Persist the reason so the next poll cycle stops looping.
+        # Without this, an empty background-task exit clears the
+        # in-flight flag but writes no recap - the next 6s poll
+        # then sees "no in-flight, no recap" and treats it as
+        # cold, spawning ANOTHER background task with a fresh
+        # ``started_at``. Symptom: elapsed counter climbs to ~60s,
+        # resets to 0, climbs again, forever. Fix: memoize the
+        # failure so subsequent polls return the actual reason
+        # (frontend treats it as terminal and stops polling).
+        cache[RECAP_ERROR_KEY] = {
+            "week_start": week_start_iso,
+            "reason": (result or {}).get("reason") or exc_reason or "veo_unavailable",
+            "failed_at": datetime.now(timezone.utc).isoformat(),
         }
     await _write_cache(store, cache)
     logger.info(
@@ -433,6 +508,19 @@ async def _run_recap_synchronously(
     """
     result = await _generate_veo(prompt=prompt, model=model)
     if not result or not result.get("video_url"):
+        # Same error-memoization contract as the background path:
+        # a failed synchronous force=true persists the reason so a
+        # subsequent cold-path GET returns the terminal error
+        # (within the cooldown window) rather than kicking off a
+        # fresh background task. Otherwise the user hits Regenerate,
+        # sees "unavailable," and every subsequent /week visit
+        # spawns a $1.20 attempt in the background.
+        cache[RECAP_ERROR_KEY] = {
+            "week_start": week_start_iso,
+            "reason": (result or {}).get("reason") or "veo_unavailable",
+            "failed_at": datetime.now(timezone.utc).isoformat(),
+        }
+        await _write_cache(store, cache)
         return RecapResponse(
             ready=False,
             reason=(result or {}).get("reason") or "veo_unavailable",
@@ -449,6 +537,9 @@ async def _run_recap_synchronously(
             "model": model,
             "generated_at": datetime.utcnow().isoformat(),
         }
+        # Success wipes any prior cooldown - same rationale as the
+        # background path.
+        cache.pop(RECAP_ERROR_KEY, None)
         await _write_cache(store, cache)
     logger.info(
         "media.veo.generated",

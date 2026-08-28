@@ -1154,6 +1154,154 @@ def test_weekly_recap_regen_quota_blocks_after_max(monkeypatch) -> None:  # type
     assert b4["regenerations_max"] == 2
 
 
+def test_weekly_recap_veo_failure_does_not_loop(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """When Veo fails, subsequent polls must NOT spawn fresh
+    background tasks. Without this guard the failure loop was:
+       poll1 -> cold path, spawns task, sets in_flight=T0
+       task  -> Veo returns veo_no_output, clears in_flight, no recap
+       poll2 -> sees no in_flight + no recap, spawns NEW task,
+                sets in_flight=T1
+       task  -> fails again...
+    The elapsed counter visibly reset from ~60s back to 0 every
+    cycle and each cycle burned another ~$1.20 Veo attempt.
+
+    Fix: the background task memoizes the failure reason via
+    RECAP_ERROR_KEY, and subsequent GETs return that reason
+    directly (within ERROR_COOLDOWN_SECONDS) instead of falling
+    into the cold path.
+    """
+    from level_api.routes import media as media_routes
+
+    monkeypatch.setenv("LEVEL_MEDIA_ENABLED", "true")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-project")
+    client = _make_client("local", monkeypatch)
+
+    login = client.post("/v1/auth/demo", json={"scenario": "solo"})
+    assert login.status_code == 200
+
+    veo_calls = {"n": 0}
+
+    async def failing_veo(*, prompt: str, model: str) -> dict[str, str]:
+        veo_calls["n"] += 1
+        # Simulate the exact shape _generate_veo returns when Veo
+        # completes the LRO but sends no video (region misconfig,
+        # model not enabled, etc.). This is the case that was
+        # driving the reset-loop bug in prod.
+        return {"reason": "veo_no_output"}
+
+    monkeypatch.setattr(media_routes, "_generate_veo", failing_veo)
+
+    # First GET: cold path spawns a background task that will fail
+    # via failing_veo. The response itself is "generating"; we then
+    # need to give the event loop a chance to run the task.
+    r1 = client.get("/v1/media/recap")
+    assert r1.status_code == 200
+    b1 = r1.json()
+    assert b1["generating"] is True
+    assert b1["reason"] == "generating"
+
+    # Yield to the loop so the fire-and-forget task can complete.
+    # TestClient is synchronous, so we hop into anyio to run one
+    # loop iteration.
+    import anyio
+
+    async def _yield() -> None:
+        # Two sleeps give the background task room to (1) call
+        # failing_veo and (2) write the RECAP_ERROR_KEY blob.
+        await anyio.sleep(0.05)
+        await anyio.sleep(0.05)
+
+    anyio.run(_yield)
+
+    # Now the second poll must see the memoized failure reason,
+    # NOT spawn another background task.
+    r2 = client.get("/v1/media/recap")
+    assert r2.status_code == 200
+    b2 = r2.json()
+    assert b2["ready"] is False
+    assert b2["generating"] is False, (
+        f"second poll spawned another task instead of returning the "
+        f"memoized failure - the loop bug is back. body={b2}"
+    )
+    assert b2["reason"] == "veo_no_output"
+
+    # And a third poll (still within the cooldown) confirms the
+    # gate stays closed - one Veo call total, not N.
+    r3 = client.get("/v1/media/recap")
+    assert r3.status_code == 200
+    b3 = r3.json()
+    assert b3["reason"] == "veo_no_output"
+    assert veo_calls["n"] == 1, (
+        f"expected exactly one Veo attempt during cooldown, got "
+        f"{veo_calls['n']} - the failure-memo gate is leaking"
+    )
+
+
+def test_weekly_recap_force_true_bypasses_error_cooldown(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """A user hitting Regenerate after seeing an error is
+    explicitly saying "retry now." The automatic poll cycle stays
+    gated by the cooldown, but force=true wipes the RECAP_ERROR_KEY
+    blob so the retry actually invokes Veo. Regression covers the
+    "clicked Regenerate but nothing happened" bug we'd get if the
+    error blob leaked through the force path.
+    """
+    from level_api.routes import media as media_routes
+
+    monkeypatch.setenv("LEVEL_MEDIA_ENABLED", "true")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-project")
+    client = _make_client("local", monkeypatch)
+
+    login = client.post("/v1/auth/demo", json={"scenario": "solo"})
+    assert login.status_code == 200
+
+    call_seq: list[str] = []
+
+    async def flaky_veo(*, prompt: str, model: str) -> dict[str, str]:
+        if not call_seq:
+            call_seq.append("fail")
+            return {"reason": "veo_no_output"}
+        call_seq.append("success")
+        return {
+            "video_url": "https://example.test/veo/recovered.mp4",
+            "poster_url": "https://example.test/veo/poster.jpg",
+        }
+
+    monkeypatch.setattr(media_routes, "_generate_veo", flaky_veo)
+
+    # First force=true fails and memoizes the error.
+    r_fail = client.get("/v1/media/recap?force=true")
+    assert r_fail.status_code == 200
+    assert r_fail.json()["reason"] == "veo_no_output"
+    assert call_seq == ["fail"]
+
+    # A non-force poll during cooldown returns the memo without
+    # calling Veo (as the previous test asserts).
+    r_gated = client.get("/v1/media/recap")
+    assert r_gated.status_code == 200
+    assert r_gated.json()["reason"] == "veo_no_output"
+    assert call_seq == ["fail"], "cooldown leak: non-force call re-invoked Veo"
+
+    # But force=true clears the cooldown and Veo runs again. This
+    # time Veo succeeds and the recap lands.
+    r_retry = client.get("/v1/media/recap?force=true")
+    assert r_retry.status_code == 200
+    body = r_retry.json()
+    assert body["ready"] is True, (
+        f"force=true was blocked by the error cooldown - the "
+        f"Regenerate button is broken. body={body}"
+    )
+    assert body["video_url"] == "https://example.test/veo/recovered.mp4"
+    assert call_seq == ["fail", "success"]
+
+    # And a subsequent poll gets the cached video (the success
+    # cleared the error blob too, so no stale reason).
+    r_after = client.get("/v1/media/recap")
+    assert r_after.status_code == 200
+    b_after = r_after.json()
+    assert b_after["ready"] is True
+    assert b_after["cached"] is True
+
+
 def test_weekly_recap_survives_demo_reset(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """Every "Try demo" click calls ``reset_demo_state``, which
     recursively wipes the user's profile subtree. Without an

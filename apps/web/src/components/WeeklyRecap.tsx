@@ -320,14 +320,42 @@ export default function WeeklyRecap() {
         </figure>
       )}
 
-      {state.kind === "not_ready" && (
-        <div className={styles.placeholder}>
-          <span className={styles.placeholderBadge}>
-            {state.data.reason === "regeneration_limit_reached" ? "Budget reached" : "Off"}
-          </span>
-          <p>{reasonCopy(state.data.reason)}</p>
-        </div>
-      )}
+      {state.kind === "not_ready" && (() => {
+        // Recoverable Veo failures (transient outage, empty output)
+        // get a "Try again" button that fires force=true. The
+        // backend cooldown gates the automatic poll cycle but
+        // an explicit user action bypasses it - that's the whole
+        // point of exposing the button. Suppressed for
+        // media_disabled (server config, retry can't help) and
+        // regeneration_limit_reached (waiting is the answer).
+        const retryable =
+          state.data.reason === "veo_unavailable" ||
+          state.data.reason === "veo_no_output";
+        const used = state.data.regenerations_used ?? 0;
+        const max = state.data.regenerations_max ?? 0;
+        const hasBudget = max === 0 || used < max;
+        return (
+          <div className={styles.placeholder}>
+            <span className={styles.placeholderBadge}>
+              {state.data.reason === "regeneration_limit_reached"
+                ? "Budget reached"
+                : retryable
+                  ? "Unavailable"
+                  : "Off"}
+            </span>
+            <p>{reasonCopy(state.data.reason)}</p>
+            {retryable && hasBudget ? (
+              <button
+                type="button"
+                className={styles.regenerate}
+                onClick={() => void fetchRecap("force")}
+              >
+                Try again
+              </button>
+            ) : null}
+          </div>
+        );
+      })()}
 
       {state.kind === "error" && (
         <div className={styles.placeholder}>

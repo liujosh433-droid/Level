@@ -129,14 +129,24 @@ async def reset_demo_state(store: UserStore) -> dict[str, object]:
         )
         return {}
 
-    # Cold-slot short-circuit: if the profile KV is empty/None this
-    # slot has never been touched, so there's no pollution to wipe
-    # and any list-every-collection loop would burn RTT confirming
-    # zeroes. One KV read is enough to prove the slot is fresh.
+    # Cold-slot short-circuit: empty profile usually means this slot
+    # has never been touched. That is NOT enough on its own — a
+    # previous ``recursive_delete`` can wipe ``state/profile`` first
+    # and leave ``care_people`` behind (Firestore recursive delete is
+    # not atomic, and the family ICS is large enough that two overlapping
+    # "Try demo" clicks race). If we skip the wipe then, ``_seed_people``
+    # would mint a second roster on top of the leftover one.
     profile = await store.profile.read()
     if not profile:
-        logger.info("demo.reset.cold_slot", user_id=store.user_id)
-        return {"reset": False, "reason": "cold_slot"}
+        leftover_people = await store.people.list()
+        if not leftover_people:
+            logger.info("demo.reset.cold_slot", user_id=store.user_id)
+            return {"reset": False, "reason": "cold_slot"}
+        logger.warning(
+            "demo.reset.orphaned_people",
+            user_id=store.user_id,
+            leftover=len(leftover_people),
+        )
 
     # Preserve the Lyria chime cache across the wipe so "Try demo"
     # doesn't force a fresh music generation on the same slot.
@@ -219,15 +229,8 @@ async def seed_demo_user(
     # priorities, edited people, feedback verdicts, memory_bank
     # entries) is gone before we lay down the fresh seed. Only
     # skipped by the defensive prefix guard, never by choice.
-    reset_result = await reset_demo_state(store)
-    # If the reset touched a demo slot (cold or warm), the people
-    # collection is guaranteed empty. Skip the per-spec
-    # ``find_person_by_name`` lookups in that case - each was a
-    # network round trip on Firestore returning nothing, saving
-    # ~one RTT per scenario person.
-    people_slot_fresh = bool(reset_result)
-
-    people = await _seed_people(store, scenario, slot_is_fresh=people_slot_fresh)
+    await reset_demo_state(store)
+    people = await _seed_people(store, scenario)
     # 28 days back gives four full weeks of history - enough for the
     # usuals engine to establish a stable majority-vote display name
     # even when the ICS fixture intentionally varies event wording
@@ -289,67 +292,53 @@ async def seed_demo_user(
     )
 
 
+def _demo_person_id(scenario_id: str, display_name: str) -> str:
+    """Stable per-scenario person id so a re-seed overwrites, never doubles.
+
+    Random UUIDs plus a skipped name-lookup (the old ``slot_is_fresh``
+    fast path) stacked a second Josh/Alex/Nova/Theo/Helen roster on
+    the family demo when Firestore still had leftover ``care_people``.
+    """
+    slug = display_name.strip().lower().replace(" ", "_")
+    return f"p_demo_{scenario_id}_{slug}"
+
+
 async def _seed_people(
     store: UserStore,
     scenario: ScenarioConfig,
-    *,
-    slot_is_fresh: bool = False,
 ) -> list[CarePerson]:
     """Upsert the scenario's people as ``status="kept"`` and return them.
 
-    ``slot_is_fresh`` says "you just wiped this slot, don't bother
-    checking whether these people already exist". Saves one
-    ``store.people.list()`` per spec on the fresh path - meaningful
-    on Firestore where each list is a round trip.
+    Always writes stable ids (``p_demo_<scenario>_<name>``) so two
+    overlapping seeds, or a seed after a partial reset, collapse onto
+    the same five docs. Leftover rows from an older UUID-based seed
+    are deleted.
     """
     from level_core.schemas.care import role_for_relation
-    from level_core.storage.care_store import find_person_by_name, new_id
 
     out: list[CarePerson] = []
+    keep_ids: set[str] = set()
     for spec in scenario.people:
-        existing = (
-            None
-            if slot_is_fresh
-            else await find_person_by_name(store, spec.display_name)
-        )
-        aliases = list(spec.aliases)
-        if existing is not None:
-            # Re-run: keep the same person_id + status, but refresh
-            # aliases in case we edited the scenario since last seed.
-            updated = existing.model_copy(
-                update={
-                    "relation": spec.relation,
-                    "care_role_id": role_for_relation(spec.relation),
-                    "aliases": _merge_aliases(existing.aliases, aliases),
-                    "is_self": spec.is_self,
-                    "status": "kept",
-                }
-            )
-            out.append(await store.people.upsert(updated))
-            continue
-
+        person_id = _demo_person_id(scenario.id, spec.display_name)
+        keep_ids.add(person_id)
         person = CarePerson(
-            person_id=new_id("p"),
+            person_id=person_id,
             display_name=spec.display_name,
             relation=spec.relation,
             care_role_id=role_for_relation(spec.relation),
-            aliases=aliases,
+            aliases=list(spec.aliases),
             is_self=spec.is_self,
             status="kept",
             source_span="demo-mode-seed",
         )
         out.append(await store.people.upsert(person))
+
+    leftovers = [
+        p.person_id for p in await store.people.list() if p.person_id not in keep_ids
+    ]
+    if leftovers:
+        await store.people.delete_many(leftovers)
     return out
-
-
-def _merge_aliases(current: list[str], incoming: list[str]) -> list[str]:
-    seen = {a.lower() for a in current}
-    merged = list(current)
-    for a in incoming:
-        if a.lower() not in seen:
-            merged.append(a)
-            seen.add(a.lower())
-    return merged
 
 
 async def _seed_usuals(

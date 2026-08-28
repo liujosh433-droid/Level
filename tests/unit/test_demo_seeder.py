@@ -8,7 +8,8 @@ Guarantees the OAuth-less landing experience judges will click:
   multiple judges hitting the same slot don't see each other's
   chat turns, priorities, feedback verdicts, or edited people.
 - Re-seeding is idempotent in counts (no doubling); person_ids
-  intentionally rotate on reset because a demo user is throwaway.
+  are stable per scenario+name so a partial Firestore reset cannot
+  stack a second roster.
 - ``POST /v1/auth/demo`` fences correctly across the three modes:
     * local: always allowed, unslotted user id
     * cloud + LEVEL_DEMO_IN_CLOUD=false (default): 404 - the
@@ -73,6 +74,39 @@ async def test_seed_family_populates_people_agenda_usuals(store) -> None:  # typ
 
 
 @pytest.mark.asyncio
+async def test_family_seed_does_not_duplicate_orphaned_people() -> None:
+    """Regression: empty profile + leftover care_people used to look
+    like a cold slot, so the seeder skipped the wipe and minted a
+    second UUID roster. Family is the large ICS so this showed up
+    there first. After the fix, a re-seed with a wiped profile still
+    lands on exactly the five canonical people.
+    """
+    store = get_store(f"{DEMO_USER_ID_PREFIX}family")
+    await seed_demo_user(store, scenario_id="family")
+    # Simulate a partial Firestore recursive_delete: profile gone,
+    # people still there (and with extra UUID leftovers).
+    from level_core.schemas.care import CarePerson, CareRelation, role_for_relation
+
+    leftover = CarePerson(
+        person_id="p_orphan_alex",
+        display_name="Alex",
+        relation=CareRelation.COPARENT,
+        care_role_id=role_for_relation(CareRelation.COPARENT),
+        status="kept",
+        source_span="orphan",
+    )
+    await store.people.upsert(leftover)
+    await store.profile.write({})
+
+    await seed_demo_user(store, scenario_id="family")
+    people = await store.people.list()
+    names = [p.display_name for p in people]
+    assert len(people) == 5, names
+    assert sorted(names) == ["Alex", "Helen", "Josh", "Nova", "Theo"]
+    assert "p_orphan_alex" not in {p.person_id for p in people}
+
+
+@pytest.mark.asyncio
 async def test_seed_solo_has_no_coparent(store) -> None:  # type: ignore[no-untyped-def]
     await seed_demo_user(store, scenario_id="solo")
     people = await store.people.list()
@@ -104,9 +138,10 @@ async def test_seed_is_idempotent_on_non_demo_store(store) -> None:  # type: ign
 
     assert first.events_count == second.events_count
     assert len(events_after) == len(events_before)
-    # Reset is a no-op for non-demo ids so person_ids are preserved
-    # by the reuse-by-name branch inside ``_seed_people``.
+    # Reset is a no-op for non-demo ids; stable person_ids still
+    # overwrite the same five docs instead of stacking a second roster.
     assert {p.person_id for p in people_after} == {p.person_id for p in people_before}
+    assert len(people_after) == 5
 
 
 @pytest.mark.asyncio
@@ -185,18 +220,17 @@ async def test_seed_wipes_prior_session_pollution_on_demo_store() -> None:
     assert "pending_booking" not in profile_after
     assert "dismissed_missing_week" not in profile_after
 
-    # Person ids rotate (fresh UUIDs) because reset wiped people first,
-    # even though display names are the scenario's canonical roster.
+    # Person ids are stable per scenario+name so a re-seed overwrites
+    # the same docs instead of stacking a second roster.
     people_after = await store.people.list()
     names_before = {p.display_name for p in people_before}
     names_after = {p.display_name for p in people_after}
     assert names_before == names_after
-    assert not ({p.person_id for p in people_before} & {p.person_id for p in people_after}), (
-        "person_ids should rotate on session reset - a fresh judge shouldn't inherit prior ids"
+    assert {p.person_id for p in people_before} == {p.person_id for p in people_after}, (
+        "person_ids should be stable across session reset"
     )
-    # Nova specifically must have a new id (identity check via name).
     nova_after = next(p for p in people_after if p.display_name == "Nova")
-    assert nova_after.person_id != nova.person_id
+    assert nova_after.person_id == nova.person_id
 
     # Identity fields survive - they're rewritten by ``_write_profile``
     # right after reset.

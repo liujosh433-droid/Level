@@ -1,204 +1,272 @@
 # Level
 
-Caregiver partner for busy parents and multi-generational households.
-Level reads your Google Calendar, learns which humans you care for,
-notices your usual weekly rhythm, tracks your priorities, drafts
-school emails, and speaks a short
-summary of your day.
+Caregiver partner for busy parents and multi-generational households. Level
+reads your Google Calendar, learns which humans you care for, notices your
+usual weekly rhythm, tracks your priorities, drafts school emails, and speaks
+a short summary of your day.
 
 Built for the [All Things Agentic Hackathon](https://allthingsagentichackathon.devpost.com/)
 in the **Collaborative Partner** track.
 
-## Stack (hackathon mandatory checklist)
+---
 
-- **Gemini 3.5 (Pro + Flash)** via AI Studio or Vertex AI - every LLM
-  call goes through `packages/core/src/level_core/agents/base.py::call_agent`.
-- **Google Agent Development Kit (ADK)** on the hot path: set
-  `LEVEL_ADK_MODE=true` and every email + booking intent is planned by
-  a `google.adk.LlmAgent`. Planner audit rows carry a `parent_audit_id`
-  so `/admin/traces` renders a real waterfall.
-- **Google Cloud** - Cloud Run (API), Cloud Run Jobs (nightly),
-  Firestore (state), Vertex AI (model host), Secret Manager,
-  Cloud Trace (OpenTelemetry), Cloud Scheduler, Gmail API, Calendar API.
+## Try it, watch it, read it
 
-## Bonus Google models integrated
+- **Live demo**: <!-- TODO: paste Cloud Run URL -->
+  Click **Try demo: Solo caregiver** on the landing page. Nothing to install,
+  no API key on your end.
+- **Video walkthrough**: <!-- TODO: paste YouTube URL -->
+  3-minute demo of the full loop: connect \u2192 today \u2192 chat \u2192 draft email \u2192 hear my day.
+- **Write-up**: <!-- TODO: paste Medium article URL -->
+  What we built, why we built it this way, and what surprised us.
 
-- **Gemma 3** as a tier-3 extraction fallback when both AI Studio 3.5
-  and Vertex 2.5 return 429. See `agents/base.py::_try_gemma`.
-- **Veo 3** for an 8-second Info-page film on `/about`. Generated once
-  and reused from GCS; disable with `LEVEL_MEDIA_ENABLED=false`.
-- **Lyria** for a calm/hopeful/energetic chime around "Hear my day".
+---
 
-## Architecture
+## What Level does
 
-![architecture](docs/architecture.png)
+- **Reads your calendar, per-person.** Google Calendar delta sync fills a
+  cache; the RoleAgent proposes who each event is about; a name-vs-noun guard
+  keeps `"Grocery run"` from becoming a care person.
+- **Learns your weekly rhythm.** Four weeks of history \u2192 majority-vote
+  usuals like *"Nova ballet, Thu 4:30\u20135:30pm"*. Handles messy calendars where
+  the same event is titled three different ways.
+- **Notices what's missing.** A nightly job flags usuals that didn't happen
+  this week. On `/today` they surface as **"Level noticed while you slept"**
+  cards with a one-tap "put it back."
+- **Chat that gets things done.** Fast-paths handle greetings, priorities,
+  bookings, reminders, and agenda lookups in <10 ms with zero LLM cost.
+  Everything else routes through a Gemini 3.5 Flash router, then a specialist
+  agent (Email / Book / Person / Summary / \u2026). Streams back over SSE.
+- **Drafts school emails.** Gmail send is behind a confirmation token + 10 min
+  TTL; demo mode short-circuits to a preview so nothing ever leaves your
+  inbox by accident.
+- **"Hear my day"** in one tap. SummaryAgent \u2192 Web Speech TTS, with an
+  optional Lyria calm/hopeful/energetic chime intro.
+- **Feedback closes the loop.** Every AI artifact has keep / adjust / not-me
+  chips. Kept facts land in Memory Bank; rejections become few-shot
+  negatives on the next matching agent call.
+- **Traceable end-to-end.** Every LLM call carries an HMAC-signed
+  `agent_identity` + `parent_audit_id`. `/admin/traces` renders a real
+  waterfall grouped by `trace_id`.
 
-Full walkthrough of state, lifecycle, security, scalability, and
-performance in [docs/STATE_AND_LIFECYCLE.md](docs/STATE_AND_LIFECYCLE.md).
+### Google stack we're using
 
-The mermaid source is at [`docs/architecture.mmd`](docs/architecture.mmd).
+**Required (Collaborative Partner track):**
 
-## What's inside
+- **Gemini 3.5 Pro + Flash** \u2014 every LLM call goes through
+  `agents/base.py::call_agent`. Flash for the router + extractors, Pro
+  for generators.
+- **Google Agent Development Kit (ADK)** \u2014 hot-path planner. Set
+  `LEVEL_ADK_MODE=true` and every email + booking intent is planned by a
+  `google.adk.LlmAgent`. Planner audit rows carry `parent_audit_id` so
+  `/admin/traces` renders a real waterfall
+  (`agents/adk_runner.py`).
+- **Google Cloud** \u2014 Cloud Run (API), Cloud Run Jobs (nightly),
+  Firestore (state), Vertex AI (model host), Secret Manager, Cloud Trace
+  (OpenTelemetry), Cloud Scheduler, Gmail API, Calendar API.
 
-- **12 registered agents** (ChatRouter, Activity, Role, Usual,
-  Priority, Reminder, Book, SlotWindow, PersonEdit, Email, Summary,
-  ADKPlanner), all discoverable via
-  `packages/core/src/level_core/agents/registry.py` and
-  `GET /v1/admin/agents`.
-- **Model Armor** prompt-injection prefilter runs BEFORE every LLM call
-  (`agents/model_armor.py`).
-- **Signed Agent Identity** in every audit row (HMAC-SHA256 of
-  name|version|prompt_hash); verify with `GET /v1/admin/agents/verify`.
-- **O(1) rate + cost gate**: hot counter under
-  `profile["_gate_counters"]` replaces the O(N) `ai_audit` scan.
-- **Multi-turn refinement** (`max_turns`) actually enforced: generator
-  agents get 3 turns to produce a schema-valid, source_span-verified
-  response before we log `loop_broken=True`.
-- **Memory Bank**: long-lived facts persisted from `verdict=keep`
-  feedback, injected into generator prompts.
-- **Feedback chips** (keep / adjust / not-me) below every AI artifact
-  in chat write to `/v1/feedback` and adapt the next agent call.
-- **SSE-chunked replies** on `/v1/chat/stream`; the frontend renders
-  ~64-char chunks with a blinking caret. Same agent pipeline serves
-  the sync and SSE routes; streaming is a UI adapter, not a separate
-  model path.
-- **Trace waterfall** at `/admin/traces` grouped by `trace_id` with
-  expandable JSON.
-- **Proactive nudges**: nightly job detects missing usuals and stashes
-  suggestion cards. Users see "Level noticed while you slept" on
-  `/today`.
+**Bonus models integrated for extra credit:**
 
-## Try it live (10 seconds, nothing to install)
+- **Gemma 3** as a tier-3 extraction fallback when both AI Studio 3.5 and
+  Vertex 2.5 return 429. Extractor agents (RoleAgent, ActivityAgent,
+  UsualAgent, \u2026) keep working through quota storms
+  (`agents/invoke.py::_try_gemma`).
+- **Veo 3** generates the 8-second Info-page film on `/about`. Generated
+  once, cached in GCS, reused forever
+  (`api/routes/media.py::about_intro`). Enable with
+  `LEVEL_MEDIA_ENABLED=true`.
+- **Lyria** generates calm / hopeful / energetic chime intros for
+  "Hear my day," cached per mood
+  (`api/routes/media.py::daily_chime`).
 
-Open the deployed URL and click **Try demo: Solo caregiver** on the
-landing page. `POST /v1/auth/demo` seeds a synthetic user from
-[`example-data/caregiver-month-solo.ics`](example-data/caregiver-month-solo.ics),
-sets a signed session cookie, and lands you on `/today` with a
-fully populated agenda, people list, and missing-usuals card. The
-hosted demo uses our prod Gemini quota, so chat and "Hear my day"
-return real LLM responses — no API key needed on your end.
+Full agent list, guardrails, and hackathon rubric mapping in
+[SUBMISSION.md](SUBMISSION.md).
 
-Safety: bounded user pool (SHA-256 hash of client IP → slot, 6
-total demo users), per-IP rate limit on the demo endpoint, and the
-existing per-user daily cost cap keep worst-case spend at `$12/day`
-even under adversarial load. Details in
-[SETUP.md — Hosted demo mode](SETUP.md#hosted-demo-in-cloud).
+---
 
-## 2-minute local start (no OAuth, no GCP, no billing)
+## Local setup (2 minutes, no GCP, no OAuth)
 
-Prereqs: `node >= 20`, `python >= 3.12`, and [`uv`](https://docs.astral.sh/uv/)
-(one-line install: `brew install uv` or
-`curl -LsSf https://astral.sh/uv/install.sh | sh`).
+Prereqs: `node >= 20`, `python >= 3.12`, and [`uv`](https://docs.astral.sh/uv/).
+Install `uv` with `brew install uv` or
+`curl -LsSf https://astral.sh/uv/install.sh | sh`.
 
-**Step 1 — Grab a free Gemini API key** at
+**Step 1 \u2014 Grab a free Gemini API key** at
 [aistudio.google.com/apikey](https://aistudio.google.com/apikey).
-Sign in with any Google account, click **Create API key**. No
-credit card, no GCP project, no billing. Level's chat, email
-drafting, and "Hear my day" summary are LLM-generated — without a
-key you get deterministic template fallbacks instead of real Gemini
-output (see [Skipping the key](#skipping-the-key-what-you-lose)).
-Free tier is 15 req/min / ~1M tokens/day on `gemini-2.5-flash` —
-plenty for a judging session. We deliberately don't ship a shared
-key (repo-scrape risk).
+No credit card, no GCP project. Free tier (~15 req/min, ~1M tokens/day on
+`gemini-2.5-flash`) is plenty for a judging session. Without a key the app
+still runs \u2014 every LLM path degrades to a deterministic template (see
+[SETUP.md \u00a7 Skipping the key](SETUP.md#skipping-the-key-what-you-lose)).
 
-**Step 2 — Bring it up.**
+**Step 2 \u2014 Bring it up.**
 
 ```bash
 cp .env.example .env
-# Paste your key into the GOOGLE_API_KEY= line. Everything else can
-# stay at defaults - GOOGLE_OAUTH_* stays blank for demo mode.
+# Paste your key into the GOOGLE_API_KEY= line. Everything else can stay
+# at defaults \u2014 GOOGLE_OAUTH_* stays blank for demo mode.
 make install
 make dev
 # API on http://127.0.0.1:8080, web on http://127.0.0.1:3000
 ```
 
-**Step 3 — Click Try demo.** Open `http://127.0.0.1:3000` and click
+**Step 3 \u2014 Click Try demo.** Open `http://127.0.0.1:3000` and click
 **Try demo: Solo caregiver**. Level seeds a synthetic user from
 [`example-data/caregiver-month-solo.ics`](example-data/caregiver-month-solo.ics),
-drops the same signed session cookie a real OAuth callback would, and
-takes you to `/today` with 200+ pre-classified events, a curated
-cast of people, and 6+ missing usuals for the current week already
-computed. Solo caregiver is the primary demo because the workload
-and RoleAgent-inference story are more distinctive; **Or: Two-parent
-family** is a second option that adds a co-parent (Alex) so you can
-see how Level splits pickup duty across two adults.
+drops the same signed session cookie a real OAuth callback would, and lands
+you on `/today` with 200+ pre-classified events, a curated cast of people,
+and missing-usuals for the current week already computed.
 
-- No Google Cloud project, no OAuth client, no calendar import.
-- `LEVEL_ENV=local` writes state to `.level/local_store/`.
-- **Email sending short-circuits to a preview** so you never
-  accidentally email anyone during a demo.
-- Demo mode is off by default when `LEVEL_ENV=cloud` so a probe can't
-  spawn synthetic users against the deployed API. Set
-  `LEVEL_DEMO_IN_CLOUD=true` to expose the hosted-demo entrypoint for
-  judges — that path enforces a fixed slot pool, per-IP rate limit,
-  and per-user cost cap. See SETUP.md § Hosted demo in cloud.
+Two scenarios are available:
 
-### Skipping the key: what you lose
+- **Solo caregiver** \u2014 the primary demo. Single parent (Josh) with two kids
+  and elder care for Helen. RoleAgent inference story lands hardest here.
+- **Two-parent family** \u2014 adds co-parent Alex so you can see how Level
+  splits pickup duty across two adults.
 
-The app still boots without `GOOGLE_API_KEY` — nothing 500s — but
-every LLM path degrades to a template: chat replies become canned
-intent-matched responses, "Hear my day" is a deterministic
-event-list summary, email drafts use a stock template. Only use
-this if you can't reach AI Studio; it's not the intended demo
-experience. See [SETUP.md](SETUP.md) for the full fallback matrix.
+Everything else \u2014 real OAuth setup, cloud deploy, Veo/Lyria wiring, port
+collisions with Cursor \u2014 lives in [SETUP.md](SETUP.md).
 
-Want to test with your own real Google Calendar and Gmail? Follow
-[SETUP.md](SETUP.md) to create your own OAuth client, then click
-**Connect Google** on the same landing page instead of the demo
-button.
-
-Two ICS fixtures are provided (both used by demo mode; both also
-importable into a scratch Google account for OAuth testing):
-
-- [`example-data/caregiver-month.ics`](example-data/caregiver-month.ics)
-  — two-parent family (Josh + Alex + Nova + Theo + Helen). Two usuals
-  are engineered to be missing in the current demo week so the
-  proactive-cards job has something to surface.
-- [`example-data/caregiver-month-solo.ics`](example-data/caregiver-month-solo.ics)
-  — single caregiver, same kids and same elder-care parent, no
-  co-parent anywhere.
-
-## Environment knobs
-
-| Env var                        | Default            | Purpose |
-|--------------------------------|--------------------|---------|
-| `LEVEL_ENV`                    | `local`            | `local` for JSON store, `cloud` for Firestore |
-| `LEVEL_MODEL_PRO`              | `gemini-3.5-flash` | Model alias for generator agents |
-| `LEVEL_MODEL_FLASH`            | `gemini-3.5-flash` | Model alias for extractor agents |
-| `LEVEL_MODEL_GEMMA`            | `gemma-3-4b-it`    | Tier-3 extraction fallback |
-| `LEVEL_ADK_MODE`               | `false`            | Route email + book intents through ADK LlmAgent |
-| `LEVEL_MEDIA_ENABLED`          | `false`            | Enable Veo + Lyria endpoints |
-| `LEVEL_MODEL_VEO`              | `veo-3.1-fast-generate-001` | Info-page film model (Vertex; use `-001` suffix, not `-preview` — see config.py) |
-| `LEVEL_VEO_INTRO_URL`          | *(empty)*          | Pin a previously generated intro URL to skip Veo entirely |
-| `LEVEL_MODEL_LYRIA`            | `lyria-3-clip-preview` | Hear-my-day chime model (via Interactions API on Vertex, `global` region) |
-| `LEVEL_DAILY_COST_CAP_USD`     | `2.00`             | Per-user daily cap for downstream agents |
-| `LEVEL_ROUTER_COST_CAP_MULTIPLIER` | `3.0`          | Softer cap for the exempt ChatRouterAgent |
-| `LEVEL_USER_RATE_PER_HOUR`     | `60`               | Hourly call cap per user |
-| `LEVEL_USER_RATE_PER_DAY`      | `500`              | Daily call cap per user |
-
-## Cloud deploy
-
-See [SETUP.md](SETUP.md). One-liner once terraform is applied:
-
-```bash
-make deploy-api && make deploy-jobs
-```
-
-## Test
+### Test
 
 ```bash
 make test          # unit + security + e2e (all offline)
+make test-cov      # enforces 75% on packages/api (85% target on packages/core)
 make test-e2e-web  # Playwright smoke against local dev
 ```
 
-Coverage target: 85% on `packages/core`, 75% on `packages/api`.
-Run `make test-cov` to enforce the lower bar (75%) locally; the target
-uses `pytest --cov` with `--cov-fail-under=75`.
+---
 
-## Hackathon submission
+## Architecture
 
-See [SUBMISSION.md](SUBMISSION.md) for the rubric mapping, agent list,
-demo video plan, and judge access instructions.
+![architecture](docs/architecture.png)
+
+Diagram source: [`docs/architecture.mmd`](docs/architecture.mmd). Regenerate
+with `make diagram`.
+
+### The request path
+
+```
+Caregiver \u2192 Next.js /today
+         \u2192 FastAPI /v1/chat (or /v1/chat/stream SSE)
+             \u2192 Model Armor (prompt-injection prefilter, deterministic)
+             \u2192 O(1) rate + cost gate (hot counter, not audit scan)
+             \u2192 strip_pii + <user_input> fence
+             \u2192 call_agent (ChatRouter \u2192 specialist)
+                 \u2192 Gemini 3.5 Flash / Pro
+                    \u2193 429
+                 \u2192 Gemini 2.5 (tier-2)
+                    \u2193 429
+                 \u2192 Gemma 3 (tier-3, extractors only)
+             \u2192 source_span hallucination guard \u2192 SSE stream out
+             \u2192 ai_audit row with signed agent_identity
+```
+
+### State model
+
+Level is a **per-user document graph** with dumb CRUD repos and one KV per
+user. There is no cross-user query surface.
+
+```
+UserStore                              cloud backing (Firestore)
+\u251c\u2500\u2500 people             \u2192 users/{uid}/care_people/{id}
+\u251c\u2500\u2500 usuals             \u2192 users/{uid}/usuals/{id}
+\u251c\u2500\u2500 priorities         \u2192 users/{uid}/priorities/{id}
+\u251c\u2500\u2500 reminders          \u2192 users/{uid}/reminders/{id}
+\u251c\u2500\u2500 contacts           \u2192 users/{uid}/contacts/{id}
+\u251c\u2500\u2500 agenda             \u2192 users/{uid}/agenda_cache/{id}
+\u251c\u2500\u2500 daily_agenda      \u2192 users/{uid}/daily_agenda/{id}
+\u251c\u2500\u2500 chat_turns         \u2192 users/{uid}/chat_turns/{id}
+\u251c\u2500\u2500 negatives          \u2192 users/{uid}/negatives/{id}
+\u251c\u2500\u2500 ai_audit           \u2192 users/{uid}/ai_audit/{id}
+\u2514\u2500\u2500 KV slots           \u2192 users/{uid}/state/{profile,calendar_sync,google_oauth}
+```
+
+Two backends implement `UserStore` behind one interface: `local` (JSON on
+disk with per-file `asyncio.Lock`) and `cloud` (Firestore Native Mode with
+transactional `KVStore` writes). Backend selection lives in one file
+(`storage/factory.py`); feature code never branches on env.
+
+### Lifecycle (the parts that surprised us)
+
+| State                     | Lifecycle |
+|---------------------------|-----------|
+| `agenda`                  | Delta sync via GCal `syncToken`; window is 14d back + 28d forward; 410 falls back to full pull. |
+| `chat_turns`              | Trimmed to last 20 per user by the nightly job. Long-lived context lives in Memory Bank, not here. |
+| `ai_audit`                | 30-day TTL enforced by nightly job. `/admin/traces` reads the most recent 50\u2013100 rows. |
+| `negatives`               | No TTL; small rows fed back as few-shot on the next matching agent call (capped at 20). |
+| `profile["memory_bank"]`  | Written on `verdict=keep`; capped at 40 per user (LRU by `last_used_at`); `avoid` tag splits positive vs. anti-example. |
+| `profile["_gate_counters"]` | Hot counter for the rate + cost gate. Auto-rolls on hour + day boundaries. Bootstrap path backfills from `ai_audit` on first read. |
+| `profile["proactive_cards"]` | Regenerated nightly. Only the current ISO week's cards are surfaced. Dismissal is per-card, per-week. |
+| `tokens`                  | Firestore-native encryption; refresh tokens rotate transparently; wiped by `DELETE /v1/me`. |
+| Demo mode                 | `POST /v1/auth/demo` resets the whole per-user subtree first (`store.reset_all()` = one `recursive_delete` call), then re-seeds. Every click is a clean slate. |
+
+The full walkthrough of security, scalability, performance, and every
+"why we did it this way" tradeoff is in
+[docs/STATE_AND_LIFECYCLE.md](docs/STATE_AND_LIFECYCLE.md).
+
+### What scales, what doesn't
+
+- **Trivially horizontal**: no cross-user state, so 10\u00d7 users is 10\u00d7
+  independent document graphs. Firestore + Cloud Run both scale linearly.
+- **O(1) hot paths**: rate + cost gate reads one counter doc, not the
+  full `ai_audit` history (~500\u00d7 fewer Firestore reads per turn).
+- **Delta sync + diff writes**: rescans send only changed events; writes
+  are keyed by etag so a no-op sync does 0 writes.
+- **First bottleneck**: `nightly.py::_list_users` does a
+  `collection("users").stream()`. Fine for hackathon scale; at >1M users
+  we'd shard by uid-hash or move to Pub/Sub fan-out.
+
+---
+
+## Where the code lives
+
+| Concept                             | Path |
+|-------------------------------------|------|
+| **Request path** |  |
+| FastAPI routers                     | `packages/api/src/level_api/routes/` |
+| Chat + SSE stream                   | `packages/api/src/level_api/routes/chat.py::chat`, `chat_stream` |
+| Fast-path registry                  | `packages/api/src/level_api/routes/_fast_path_registry.py` |
+| Per-request memoized store          | `packages/api/src/level_api/routes/_chat_context.py` |
+| HTTP rate limit (token bucket)      | `packages/api/src/level_api/rate_limit.py` |
+| **Agent runtime** |  |
+| Agent registry                      | `packages/core/src/level_core/agents/registry.py` |
+| Agent identity signing (HMAC)       | `packages/core/src/level_core/agents/identity.py` |
+| Model Armor prefilter               | `packages/core/src/level_core/agents/model_armor.py` |
+| Memory Bank                         | `packages/core/src/level_core/agents/memory_bank.py` |
+| O(1) rate + cost gate               | `packages/core/src/level_core/agents/gate.py` |
+| Router response cache (LRU + TTL)   | `packages/core/src/level_core/agents/router_cache.py` |
+| Multi-turn refinement + tiered fallback | `packages/core/src/level_core/agents/base.py::call_agent`, `agents/invoke.py::invoke_with_retry` |
+| Gemma 3 tier-3 fallback             | `packages/core/src/level_core/agents/invoke.py::_try_gemma` |
+| ADK hot-path planner                | `packages/core/src/level_core/agents/adk_runner.py` |
+| **Calendar** |  |
+| Incremental sync (syncToken + 410)  | `packages/core/src/level_core/calendar/sync.py` |
+| Parallel classification (Sem 4)     | `packages/core/src/level_core/calendar/enrich.py::_classify_unseen` |
+| Circuit breaker for GCal            | `packages/core/src/level_core/calendar/circuit_breaker.py` |
+| Name-vs-noun guard (RoleAgent)      | `packages/core/src/level_core/calendar/person_guard.py::evaluate_proposed_name` |
+| Usuals engine                       | `packages/core/src/level_core/calendar/usuals.py` |
+| Proactive-cards generator           | `packages/core/src/level_core/calendar/proactive.py` |
+| **Storage** |  |
+| Storage factory (backend switch)    | `packages/core/src/level_core/storage/factory.py` |
+| Firestore backend                   | `packages/core/src/level_core/storage/firestore.py` |
+| Local JSON backend                  | `packages/core/src/level_core/storage/local_json.py` |
+| **Background** |  |
+| Nightly job (usuals + TTL + cards)  | `packages/jobs/src/level_jobs/nightly.py` |
+| Demo seeder                         | `packages/core/src/level_core/demo/seeder.py` |
+| ICS fixture generator               | `packages/jobs/src/level_jobs/make_caregiver_ics.py` |
+| **Observability + admin** |  |
+| Trace waterfall                     | `packages/api/src/level_api/routes/admin.py::_group_by_trace` |
+| Feedback loop                       | `packages/api/src/level_api/routes/feedback.py` (write) + `agents/memory_bank.py::recall_split` (read) |
+| Loop integration test               | `tests/unit/test_feedback_loop_closes.py` |
+| **Media** |  |
+| Veo Info-page film                  | `packages/api/src/level_api/routes/media.py::about_intro` |
+| Lyria chime                         | `packages/api/src/level_api/routes/media.py::daily_chime` |
+| **Frontend** |  |
+| Next.js dashboard                   | `apps/web/src/app/(dashboard)/` |
+| Today page + proactive cards        | `apps/web/src/app/(dashboard)/today/page.tsx` |
+| **Infra** |  |
+| Terraform (GCP)                     | `infra/terraform/` |
+| Firestore rules (per-user isolation)| `infra/firestore.rules` |
+
+---
 
 ## Repo layout
 
@@ -211,8 +279,6 @@ infra/terraform             GCP resources
 infra/firestore.rules       Per-user isolation
 docs/architecture.mmd       Architecture diagram source
 docs/STATE_AND_LIFECYCLE.md State + security + scalability + performance walkthrough
-docs/writeup-devto.md       Publish-ready dev.to article
-docs/social-post.md         Publish-ready X + LinkedIn drafts
 tests/unit                  Fast offline tests
 tests/security              Prompt-injection corpus + auth + Firestore rules
 tests/e2e                   Full API flow with LEVEL_ENV=local
@@ -220,4 +286,4 @@ tests/e2e                   Full API flow with LEVEL_ENV=local
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT \u2014 see [LICENSE](LICENSE).

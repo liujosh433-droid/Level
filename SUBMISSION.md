@@ -287,11 +287,6 @@ enforces (in order):
   [`routes/media.py::daily_chime`](packages/api/src/level_api/routes/media.py).
   Wired into the frontend's speakDay() flow: chime plays before the
   SummaryAgent TTS starts, so "Hear my day" gets a warm intro.
-- **+0.2 dev.to writeup**: [`docs/writeup-devto.md`](docs/writeup-devto.md)
-  (publish-ready; already tagged with `#AllThingsAgenticHackathon`
-  and hackathon disclosure).
-- **+0.2 Social post**: [`docs/social-post.md`](docs/social-post.md)
-  (X + LinkedIn drafts, publish-ready).
 
 ## Demo video plan (<= 4 min)
 

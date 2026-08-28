@@ -2,7 +2,7 @@
 
 Hackathon bonus: rules give +0.2 for each additional Google AI model
 integrated (Gemma, Veo, Lyria) up to +0.6. Level integrates Veo for a
-weekly recap on /about and Lyria for a start/end chime on "Hear my day".
+weekly recap on /week and Lyria for a start/end chime on "Hear my day".
 
 Both endpoints degrade gracefully when the caller isn't configured for
 Vertex AI or when `LEVEL_MEDIA_ENABLED=false`. They return
@@ -140,7 +140,7 @@ async def weekly_recap(
 ) -> RecapResponse:
     """Return this week's Veo recap - cached, generating, or kick off generation.
 
-    Three paths, each guaranteed to return in <100ms so /about
+    Three paths, each guaranteed to return in <100ms so /week
     never sits on an open HTTP request:
 
     1. **Cached hit**: return the stored URL with ``cached=true``.
@@ -152,7 +152,7 @@ async def weekly_recap(
        return ``{ready:false, generating:true, started_at:now}``.
 
     ``force=true`` bypasses the cache and blocks synchronously on
-    Veo (30-60s). Used by the /about "Regenerate" button, which
+    Veo (30-60s). Used by the /week "Regenerate" button, which
     shows its own loading state - a UI that explicitly asks for a
     fresh call is expected to wait for it.
     """

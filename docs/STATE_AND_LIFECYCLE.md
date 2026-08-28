@@ -547,7 +547,7 @@ fan-out. Not in scope for the hackathon.
   would drop time-to-first-byte by ~1.5s.
 - **Precompute weekly Veo recap** in the nightly job rather than
   on-demand at `/v1/media/recap` first hit. Users would see the
-  video already ready when they visit /about.
+  video already ready when they visit /week.
 - **Move `profile["_gate_counters"]` to a dedicated
   `gate_counters` KV** so writes don't collide with unrelated
   profile writes. Small win; only matters at extreme concurrency

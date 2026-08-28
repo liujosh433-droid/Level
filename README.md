@@ -25,7 +25,7 @@ in the **Collaborative Partner** track.
 
 - **Gemma 3** as a tier-3 extraction fallback when both AI Studio 3.5
   and Vertex 2.5 return 429. See `agents/base.py::_try_gemma`.
-- **Veo 3** for the weekly recap video on `/about`. Cached per ISO
+- **Veo 3** for the weekly recap video on `/week`. Cached per ISO
   week per user; disable with `LEVEL_MEDIA_ENABLED=false`.
 - **Lyria** for a calm/hopeful/energetic chime around "Hear my day".
 

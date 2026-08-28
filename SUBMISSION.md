@@ -276,11 +276,14 @@ enforces (in order):
   [`agents/invoke.py::_try_gemma`](packages/core/src/level_core/agents/invoke.py);
   triggered by the eligibility list `GEMMA_ELIGIBLE`. Surfaces in
   `/admin/traces` as `fallback_used="gemma-3-4b-it"`.
-- **+0.2 Veo 3** weekly recap endpoint at
+- **+0.2 Veo 3** weekly recap surfaced at
+  [`/week`](apps/web/src/app/(dashboard)/week/page.tsx) backed by
   [`routes/media.py::weekly_recap`](packages/api/src/level_api/routes/media.py).
   Cached per ISO week per user; PII-free prompt is built from category
-  labels + priority content words. Demo-triggerable via `curl` in the
-  video; a public /about surface is intentionally deferred.
+  labels + priority content words. Fire-and-forget: the first GET of the
+  week spawns a background Veo task and returns `reason:"generating"`
+  in <100ms so the page never blocks; the frontend polls every 4s
+  until the tile flips to the finished `<video>`.
 - **+0.2 Lyria** chime for "Hear my day" (calm / hopeful / energetic).
   Endpoint:
   [`routes/media.py::daily_chime`](packages/api/src/level_api/routes/media.py).

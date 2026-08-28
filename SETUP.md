@@ -373,7 +373,7 @@ counts. Both stored in the audit log so `/admin/traces` shows spend.
 
 ## Multimodal recap + chime (Veo 3 + Lyria)
 
-Off by default. The `/about` page renders a "This week's recap"
+Off by default. The `/week` page renders a "This week's recap"
 tile that stays as a friendly placeholder unless you turn media on;
 "Hear my day" plays a Lyria chime intro when it's on.
 

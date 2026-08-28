@@ -1,5 +1,4 @@
 import Image from "next/image";
-import WeeklyRecap from "@/components/WeeklyRecap";
 import styles from "./about.module.css";
 
 export default function AboutPage() {
@@ -29,8 +28,6 @@ export default function AboutPage() {
           </div>
         </div>
       </header>
-
-      <WeeklyRecap />
 
       <section>
         <h2>What Level does</h2>

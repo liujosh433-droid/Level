@@ -9,9 +9,13 @@ import styles from "./WeeklyRecap.module.css";
  * rhythm. Fetches `/v1/media/recap`, which is deterministic +
  * per-ISO-week cached on the backend, so repeat visits are free.
  *
- * Renders one of three states:
- *   - Loading: friendly copy while Veo generates (~30-60s on first hit).
- *   - Ready:   inline <video controls> with an optional Regenerate button.
+ * Renders one of four states:
+ *   - Loading: instant transient state before the first fetch resolves.
+ *   - Generating: backend has a background Veo task in flight; frontend
+ *     polls every POLL_INTERVAL_MS and displays elapsed time. After
+ *     SLOW_HINT_ELAPSED_MS the copy softens to "taking longer than
+ *     usual" so a slow Veo run doesn't feel broken.
+ *   - Ready: inline <video controls> with an optional Regenerate button.
  *   - Not-ready: static placeholder explaining how to turn it on.
  *
  * A Veo outage or LEVEL_MEDIA_ENABLED=false always resolves to
@@ -41,15 +45,29 @@ const REASON_COPY: Record<string, string> = {
     "Veo finished but returned no video. Try again in a moment; the model occasionally returns empty on the free-tier preview.",
 };
 
-// Poll cadence while generation is in flight. Fast enough that the
-// tile flips to a real video within a few seconds of Veo finishing
-// (which itself takes 30-60s), slow enough that we don't hammer
-// the API for a status that only changes once.
-const POLL_INTERVAL_MS = 4000;
-// Overall polling ceiling. Veo previews rarely exceed 90s; anything
-// longer we surface as a soft-fail so the user can retry rather than
-// stare at a spinner forever.
-const POLL_TIMEOUT_MS = 120_000;
+// Poll cadence while generation is in flight. 6s is fast enough
+// that the tile flips within a few seconds of Veo finishing, slow
+// enough to keep the request rate below one per five seconds so a
+// user leaving /week open doesn't churn Cloud Run request slots.
+const POLL_INTERVAL_MS = 6000;
+// Overall polling ceiling. Must match the backend's Veo polling
+// ceiling (VEO_POLL_CEILING_SECONDS) so the frontend gives up at
+// roughly the same moment the background task does - not sooner
+// (leaves the user staring at a "failed" tile while the backend
+// is still working) and not later (leaves the tile pretending to
+// generate after the task has already given up).
+const POLL_TIMEOUT_MS = 300_000;
+// Elapsed threshold past which we swap the "usually 30-90s" copy
+// for a "taking longer than usual" hint. Users tolerate a spinner
+// much better when it acknowledges it's slow.
+const SLOW_HINT_ELAPSED_MS = 90_000;
+
+function elapsedSeconds(startedAt: string | null): number | null {
+  if (!startedAt) return null;
+  const started = Date.parse(startedAt);
+  if (Number.isNaN(started)) return null;
+  return Math.max(0, Math.round((Date.now() - started) / 1000));
+}
 
 function reasonCopy(reason: string | null | undefined): string {
   if (!reason) return REASON_COPY.veo_unavailable;
@@ -95,6 +113,23 @@ export default function WeeklyRecap() {
 
   const fetchRecap = useCallback(
     async (mode: "initial" | "force" | "poll") => {
+      // Poll cycles first check the deadline BEFORE issuing the
+      // HTTP request. If we're past the ceiling, don't fire another
+      // poll - a poll to a backend whose in-flight flag has just
+      // aged out will spawn a fresh Veo task (wasted spend) right
+      // as the tile is about to flip to "unavailable" anyway.
+      if (mode === "poll") {
+        const deadline = pollDeadlineRef.current;
+        if (deadline !== null && Date.now() >= deadline) {
+          clearPoll();
+          setState({
+            kind: "not_ready",
+            data: { ready: false, reason: "veo_unavailable" } as RecapResponse,
+          });
+          return;
+        }
+      }
+
       // Force + initial fetches replace any in-flight request; poll
       // fetches piggy-back on the same slot so a reload during a
       // poll cycle doesn't double up.
@@ -130,18 +165,16 @@ export default function WeeklyRecap() {
         // on the SDK - so we don't need to schedule a poll there.
         if (data.generating || data.reason === "generating") {
           if (mode !== "poll") {
-            pollDeadlineRef.current = Date.now() + POLL_TIMEOUT_MS;
+            // Anchor the poll deadline to the SERVER'S reported
+            // started_at when we have it, so a reload mid-generation
+            // doesn't reset the client-side clock and let the user
+            // wait 2x the intended ceiling. Falls back to Date.now()
+            // when started_at is missing or malformed.
+            const serverStart = data.started_at ? Date.parse(data.started_at) : NaN;
+            const base = Number.isFinite(serverStart) ? serverStart : Date.now();
+            pollDeadlineRef.current = base + POLL_TIMEOUT_MS;
           }
           setState({ kind: "generating", startedAt: data.started_at ?? null });
-          const deadline = pollDeadlineRef.current;
-          if (deadline !== null && Date.now() >= deadline) {
-            clearPoll();
-            setState({
-              kind: "not_ready",
-              data: { ...data, reason: "veo_unavailable" },
-            });
-            return;
-          }
           pollTimerRef.current = setTimeout(() => {
             void fetchRecap("poll");
           }, POLL_INTERVAL_MS);
@@ -204,15 +237,36 @@ export default function WeeklyRecap() {
         </div>
       )}
 
-      {state.kind === "generating" && (
-        <div className={styles.placeholder} role="status" aria-live="polite">
-          <div className={styles.spinner} aria-hidden />
-          <p>
-            Cooking this week&apos;s recap in the background. Veo 3 usually takes 30-60 seconds -
-            feel free to keep exploring; the tile will update on its own when it&apos;s ready.
-          </p>
-        </div>
-      )}
+      {state.kind === "generating" && (() => {
+        const elapsed = elapsedSeconds(state.startedAt);
+        const slow = elapsed !== null && elapsed * 1000 >= SLOW_HINT_ELAPSED_MS;
+        return (
+          <div className={styles.placeholder} role="status" aria-live="polite">
+            <div className={styles.spinner} aria-hidden />
+            <p>
+              {slow ? (
+                <>
+                  Still cooking this week&apos;s recap - Veo is running slower than usual today.
+                  It&apos;ll finish on its own; feel free to come back to <em>/week</em> in a
+                  minute or two.
+                </>
+              ) : (
+                <>
+                  Cooking this week&apos;s recap in the background. Veo usually takes about 30-90
+                  seconds, sometimes longer under load - the tile will update on its own when it&apos;s
+                  ready, no need to wait here.
+                </>
+              )}
+              {elapsed !== null ? (
+                <>
+                  {" "}
+                  <span className={styles.elapsedNote}>Elapsed: {elapsed}s.</span>
+                </>
+              ) : null}
+            </p>
+          </div>
+        );
+      })()}
 
       {state.kind === "ready" && (
         <figure className={styles.videoFrame}>

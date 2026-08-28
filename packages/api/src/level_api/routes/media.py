@@ -22,7 +22,7 @@ import asyncio
 import base64
 import hashlib
 import json
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query
@@ -39,13 +39,21 @@ logger = get_logger(__name__)
 
 MEDIA_CACHE_KEY = "media_cache"
 IN_FLIGHT_KEY = "recap_in_flight"
-# Stale threshold for the in-flight flag. Veo previews land in
-# 30-60s in the happy path, so 5 min covers the polling ceiling
-# (90s) plus a wide slack. If a background task crashes or the
-# Cloud Run instance is torn down mid-generation, the next GET
-# after this window clears the flag and re-attempts rather than
-# waiting forever for a ghost task.
-IN_FLIGHT_MAX_AGE_SECONDS = 300
+# Stale threshold for the in-flight flag. Set to
+# ``VEO_POLL_CEILING_SECONDS + slack`` so the frontend re-poll
+# window can NEVER clear a flag while a legit background task is
+# still running (that would spawn a duplicate Veo call). Only
+# crashed tasks or torn-down Cloud Run instances should ever
+# trigger the stale path.
+IN_FLIGHT_MAX_AGE_SECONDS = 600
+# How long to keep polling Veo's long-running operation before
+# giving up. Veo 3.1 Fast usually lands in 30-90s but occasional
+# stragglers push into the 3-4 minute range under load; 300s
+# gives us enough headroom to catch nearly all of them without
+# holding the async task open indefinitely. The task itself is
+# cheap while it waits (an asyncio.sleep loop), the cost lives
+# in the Veo call at the far end.
+VEO_POLL_CEILING_SECONDS = 300
 
 
 class RecapResponse(BaseModel):
@@ -207,7 +215,12 @@ async def weekly_recap(
     if in_flight.get("week_start") == week_start_iso:
         started_at = _parse_iso_datetime(in_flight.get("started_at"))
         if started_at is not None:
-            age = (datetime.utcnow() - started_at).total_seconds()
+            # ``started_at`` is tz-aware because we serialize with
+            # ``datetime.now(timezone.utc).isoformat()`` below;
+            # comparing against a tz-aware "now" avoids the naive/
+            # aware TypeError that would 500 the endpoint on any
+            # subsequent GET.
+            age = (datetime.now(timezone.utc) - started_at).total_seconds()
             if age < IN_FLIGHT_MAX_AGE_SECONDS:
                 return RecapResponse(
                     ready=False,
@@ -218,7 +231,12 @@ async def weekly_recap(
                 )
         # Stale or unparseable - fall through to kick a fresh task.
 
-    started_at_iso = datetime.utcnow().isoformat()
+    # Tz-aware ISO string so the frontend can Date.parse() it
+    # unambiguously as UTC and compute elapsed seconds for the
+    # "still generating..." hint. A naive datetime.utcnow() would
+    # be interpreted as local time by JS Date parsers, throwing
+    # the elapsed count off by the client's timezone offset.
+    started_at_iso = datetime.now(timezone.utc).isoformat()
     cache[IN_FLIGHT_KEY] = {
         "week_start": week_start_iso,
         "started_at": started_at_iso,
@@ -249,17 +267,25 @@ async def weekly_recap(
 
 
 def _parse_iso_datetime(value: Any) -> datetime | None:
-    """Best-effort ISO parser for the in-flight timestamp.
+    """Best-effort tz-aware ISO parser for the in-flight timestamp.
 
     Kept lenient because a malformed value in the profile blob
     should degrade to "treat as stale" rather than 500 the caller.
+
+    Naive ISO strings (from the pre-timezone version of this
+    module) are treated as UTC rather than local time - anything
+    written by the old code path was ``datetime.utcnow()``, which
+    is UTC in fact if not in tzinfo.
     """
     if not isinstance(value, str) or not value:
         return None
     try:
-        return datetime.fromisoformat(value)
+        parsed = datetime.fromisoformat(value)
     except ValueError:
         return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 async def _run_recap_in_background(
@@ -458,11 +484,15 @@ async def _generate_veo(*, prompt: str, model: str) -> dict[str, str] | None:
         op = await asyncio.to_thread(
             client.models.generate_videos, model=model, prompt=prompt
         )
-        # Poll for completion up to 90s; Veo 3 previews usually return
-        # in 30-60s. Anything longer, we skip and let the next call
-        # retry - the cache means the wait only lands once per user
-        # per week.
-        for _ in range(90):
+        # Poll for completion up to VEO_POLL_CEILING_SECONDS. Veo
+        # 3.1 Fast typically lands in 30-90s but stragglers under
+        # load push into 3-4 min; a shorter ceiling was silently
+        # aborting mid-generation and causing the frontend to
+        # re-poll into a fresh background task, doubling the cost
+        # for no benefit. The stale-flag guard on the in-flight
+        # key uses this same ceiling so a re-poll can't spawn a
+        # duplicate while a legit task is still running.
+        for _ in range(VEO_POLL_CEILING_SECONDS):
             if getattr(op, "done", False):
                 break
             await asyncio.sleep(1.0)

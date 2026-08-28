@@ -98,6 +98,12 @@
   text-transform: uppercase;
 }
 
+.elapsedNote {
+  color: var(--ink-soft, #55707a);
+  font-variant-numeric: tabular-nums;
+  opacity: 0.8;
+}
+
 .spinner {
   width: 22px;
   height: 22px;

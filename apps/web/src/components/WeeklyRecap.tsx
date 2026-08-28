@@ -178,7 +178,7 @@ export default function WeeklyRecap() {
     <section className={styles.wrap} aria-label="Weekly recap video">
       <header className={styles.header}>
         <div>
-          <h2 className={styles.title}>This week's recap</h2>
+          <h2 className={styles.title}>This week&apos;s recap</h2>
           <p className={styles.subtitle}>
             A 15-second cinematic loop of your week - generated once, cached per ISO week.
             Category labels only; no names or event bodies leave your account for the video prompt.
@@ -199,7 +199,7 @@ export default function WeeklyRecap() {
         <div className={styles.placeholder} role="status" aria-live="polite">
           <div className={styles.spinner} aria-hidden />
           <p>
-            {state.force ? "Regenerating" : "Loading"} this week's recap...
+            {state.force ? "Regenerating" : "Loading"} this week&apos;s recap...
           </p>
         </div>
       )}
@@ -208,8 +208,8 @@ export default function WeeklyRecap() {
         <div className={styles.placeholder} role="status" aria-live="polite">
           <div className={styles.spinner} aria-hidden />
           <p>
-            Cooking this week's recap in the background. Veo 3 usually takes 30-60 seconds -
-            feel free to keep exploring; the tile will update on its own when it's ready.
+            Cooking this week&apos;s recap in the background. Veo 3 usually takes 30-60 seconds -
+            feel free to keep exploring; the tile will update on its own when it&apos;s ready.
           </p>
         </div>
       )}

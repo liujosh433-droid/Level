@@ -19,6 +19,7 @@ Cost control:
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 from datetime import date, datetime, timedelta
@@ -168,32 +169,42 @@ async def weekly_recap(
     prompt = _prompt_recap(highlights)
 
     result = await _generate_veo(prompt=prompt, model=settings.level_model_veo)
-    if not result:
+    if not result or not result.get("video_url"):
         return RecapResponse(
             ready=False,
-            reason="veo_unavailable",
+            reason=(result or {}).get("reason") or "veo_unavailable",
             week_start=week_start_iso,
         )
 
-    cache["recap"] = {
-        "week_start": week_start_iso,
-        "prompt_hash": hashlib.sha256(prompt.encode()).hexdigest()[:16],
-        "video_url": result.get("video_url"),
-        "poster_url": result.get("poster_url"),
-        "model": settings.level_model_veo,
-        "generated_at": datetime.utcnow().isoformat(),
-    }
-    await _write_cache(store, cache)
+    video_url = result["video_url"]
+    poster_url = result.get("poster_url") or None
+    # Data URLs (inline base64 bytes) can be multi-MB - too big for
+    # the profile doc (Firestore caps at 1 MB per document, and even
+    # on local JSON we don't want to keep replaying that blob into
+    # every request). Only cache https:// / gs:// URIs; the caller
+    # still gets the video in the response, they just re-generate
+    # on the next fetch.
+    if not video_url.startswith("data:"):
+        cache["recap"] = {
+            "week_start": week_start_iso,
+            "prompt_hash": hashlib.sha256(prompt.encode()).hexdigest()[:16],
+            "video_url": video_url,
+            "poster_url": poster_url,
+            "model": settings.level_model_veo,
+            "generated_at": datetime.utcnow().isoformat(),
+        }
+        await _write_cache(store, cache)
     logger.info(
         "media.veo.generated",
         user=store.user_id,
         week=week_start_iso,
         model=settings.level_model_veo,
+        cached_in_profile=not video_url.startswith("data:"),
     )
     return RecapResponse(
         ready=True,
-        video_url=result.get("video_url"),
-        poster_url=result.get("poster_url"),
+        video_url=video_url,
+        poster_url=poster_url,
         week_start=week_start_iso,
         model=settings.level_model_veo,
         cached=False,
@@ -259,7 +270,24 @@ async def daily_chime(
 
 
 async def _generate_veo(*, prompt: str, model: str) -> dict[str, str] | None:
-    """Call Veo 3 on Vertex. Returns None on any failure."""
+    """Call Veo 3 on Vertex and normalize the response to a playable URL.
+
+    The google-genai SDK evolved twice for Veo: an older shape exposed
+    ``video_uri``/``thumbnail_uri`` directly on the ``GeneratedVideo``
+    item, and the current shape wraps them in a nested ``video`` /
+    ``thumbnail`` object with ``uri`` + ``video_bytes`` fields. We
+    duck-type both here so a routine SDK bump doesn't silently break
+    the recap.
+
+    Returns:
+      ``{"video_url": ..., "poster_url": ..., "reason": ...}`` with
+      ``video_url`` set on success. Falls back to a ``data:video/mp4``
+      URL when the SDK returned inline bytes instead of a GCS URI (no
+      ``output_gcs_uri`` was configured). Returns ``None`` on any hard
+      failure; a well-formed response with no usable payload returns
+      ``{"reason": "veo_no_output"}`` so the caller can surface a
+      more actionable error than "veo_unavailable".
+    """
     try:
         from google import genai
         from google.genai import types  # noqa: F401 - kept for future config
@@ -281,9 +309,11 @@ async def _generate_veo(*, prompt: str, model: str) -> dict[str, str] | None:
         op = await asyncio.to_thread(
             client.models.generate_videos, model=model, prompt=prompt
         )
-        # Poll for completion up to 60s; Veo previews usually return in
-        # 20-40s. Anything longer, we skip and let the next call retry.
-        for _ in range(60):
+        # Poll for completion up to 90s; Veo 3 previews usually return
+        # in 30-60s. Anything longer, we skip and let the next call
+        # retry - the cache means the wait only lands once per user
+        # per week.
+        for _ in range(90):
             if getattr(op, "done", False):
                 break
             await asyncio.sleep(1.0)
@@ -291,11 +321,38 @@ async def _generate_veo(*, prompt: str, model: str) -> dict[str, str] | None:
         response = getattr(op, "response", None) or {}
         videos = getattr(response, "generated_videos", None) or []
         if not videos:
-            return None
-        return {
-            "video_url": getattr(videos[0], "video_uri", None) or "",
-            "poster_url": getattr(videos[0], "thumbnail_uri", None) or "",
-        }
+            logger.warning("media.veo.no_videos")
+            return {"reason": "veo_no_output"}
+        first = videos[0]
+        # New SDK: first.video is a Video object with .uri + .video_bytes.
+        # Old SDK: first.video_uri / first.thumbnail_uri live directly.
+        video_obj = getattr(first, "video", None) or first
+        thumb_obj = getattr(first, "thumbnail", None) or first
+        video_url = (
+            getattr(video_obj, "uri", None)
+            or getattr(first, "video_uri", None)
+            or ""
+        )
+        poster_url = (
+            getattr(thumb_obj, "uri", None)
+            or getattr(first, "thumbnail_uri", None)
+            or ""
+        )
+        if not video_url:
+            # No GCS URI - the SDK returned inline bytes. Wrap them as
+            # a data URL so the browser can still play the clip; the
+            # caller decides whether to cache it (data URLs are too
+            # big for the profile doc).
+            raw = getattr(video_obj, "video_bytes", None)
+            if isinstance(raw, bytes):
+                b64 = base64.b64encode(raw).decode("ascii")
+                video_url = f"data:video/mp4;base64,{b64}"
+            elif isinstance(raw, str) and raw:
+                video_url = f"data:video/mp4;base64,{raw}"
+        if not video_url:
+            logger.warning("media.veo.no_video_url")
+            return {"reason": "veo_no_output"}
+        return {"video_url": video_url, "poster_url": poster_url}
     except Exception as err:  # noqa: BLE001 - media must never break chat
         logger.warning("media.veo.failed", err=str(err)[:200])
         return None

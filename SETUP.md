@@ -371,6 +371,37 @@ agents/gate.py drops non-chat AI calls until midnight PT.
 - `LEVEL_USER_RATE_PER_HOUR` / `LEVEL_USER_RATE_PER_DAY` cap raw call
 counts. Both stored in the audit log so `/admin/traces` shows spend.
 
+## Multimodal recap + chime (Veo 3 + Lyria)
+
+Off by default. The `/about` page renders a "This week's recap"
+tile that stays as a friendly placeholder unless you turn media on;
+"Hear my day" plays a Lyria chime intro when it's on.
+
+```bash
+LEVEL_MEDIA_ENABLED=true
+LEVEL_MODEL_VEO=veo-3.0-generate-preview       # default
+LEVEL_MODEL_LYRIA=lyria-3-clip-preview         # default
+```
+
+To actually reach the models you also need:
+
+- `GOOGLE_CLOUD_PROJECT` set and Vertex AI enabled.
+- Veo 3 and Lyria 3 access on that project (both are preview
+  gates — check `gcloud ai models list --region=<region>` and
+  request access in the Vertex console if needed).
+- Lyria only serves from region `global`; the code hardcodes this,
+  so you don't need to change `GOOGLE_CLOUD_REGION`.
+
+Behavior when on but the model is unavailable (no quota, no access,
+wrong region): the endpoint returns `{ready: false, reason: "..."}`,
+and the UI shows the placeholder with a plain-English explanation.
+It never breaks the page.
+
+Cost: Veo 3 preview is ~$1-4 per 15-second clip depending on region;
+the endpoint caches per user per ISO week so a judge clicking around
+only ever pays for one clip a week. Lyria clips are cached at the
+app level per mood (three total).
+
 ## Regenerating the architecture diagram
 
 ```bash

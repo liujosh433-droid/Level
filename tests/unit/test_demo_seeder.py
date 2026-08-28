@@ -863,3 +863,108 @@ def test_email_send_short_circuits_for_demo_user(monkeypatch) -> None:  # type: 
     assert payload["notice"].startswith("Demo mode")
     # Token cleared after preview so a duplicate send is idempotent
     assert token not in email_routes._pending_drafts
+
+
+def test_weekly_recap_disabled_by_default(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The default deployment ships with LEVEL_MEDIA_ENABLED unset,
+    so /v1/media/recap must return a well-formed placeholder response
+    rather than trying to reach Vertex. The frontend renders the
+    reason verbatim into the /about tile so a broken 500 here would
+    be immediately visible to judges."""
+    monkeypatch.delenv("LEVEL_MEDIA_ENABLED", raising=False)
+    client = _make_client("local", monkeypatch)
+
+    login = client.post("/v1/auth/demo", json={"scenario": "solo"})
+    assert login.status_code == 200
+
+    r = client.get("/v1/media/recap")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ready"] is False
+    assert body["reason"] == "media_disabled"
+    assert body["video_url"] is None
+    # week_start is always present so the UI can label the tile even
+    # when generation is disabled.
+    assert body["week_start"], "week_start should be filled even when disabled"
+
+
+def test_weekly_recap_returns_cache_without_calling_veo(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Once /v1/media/recap has stored a video URL for the current
+    ISO week, repeat calls must return the cached blob *and never*
+    re-invoke the Veo bridge. Veo is $$$ and slow (30-60s) so a
+    caching regression would show up as a demo latency spike and a
+    surprise bill; both are worse than the feature being off."""
+    from level_api.routes import media as media_routes
+
+    monkeypatch.setenv("LEVEL_MEDIA_ENABLED", "true")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-project")
+    client = _make_client("local", monkeypatch)
+
+    login = client.post("/v1/auth/demo", json={"scenario": "solo"})
+    assert login.status_code == 200
+
+    calls = {"veo": 0}
+
+    async def fake_veo(*, prompt: str, model: str) -> dict[str, str]:
+        calls["veo"] += 1
+        return {
+            "video_url": "https://example.test/veo/clip.mp4",
+            "poster_url": "https://example.test/veo/poster.jpg",
+        }
+
+    monkeypatch.setattr(media_routes, "_generate_veo", fake_veo)
+
+    r1 = client.get("/v1/media/recap")
+    assert r1.status_code == 200, r1.text
+    b1 = r1.json()
+    assert b1["ready"] is True
+    assert b1["video_url"] == "https://example.test/veo/clip.mp4"
+    assert b1["cached"] is False
+    assert calls["veo"] == 1
+
+    r2 = client.get("/v1/media/recap")
+    assert r2.status_code == 200
+    b2 = r2.json()
+    assert b2["ready"] is True
+    assert b2["video_url"] == "https://example.test/veo/clip.mp4"
+    assert b2["cached"] is True
+    assert calls["veo"] == 1, "second call must not hit Veo"
+
+    r3 = client.get("/v1/media/recap?force=true")
+    assert r3.status_code == 200
+    assert calls["veo"] == 2, "force=true must re-invoke Veo"
+
+
+def test_weekly_recap_does_not_cache_data_urls(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """When Veo returns inline bytes (no output_gcs_uri configured),
+    the bridge wraps them as a data:video/mp4 URL. Those blobs are
+    multi-MB and blow past the Firestore 1 MB doc cap, so the caching
+    branch must skip them. Regression test in case someone naively
+    extends the cache to "any non-empty video_url"."""
+    from level_api.routes import media as media_routes
+
+    monkeypatch.setenv("LEVEL_MEDIA_ENABLED", "true")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-project")
+    client = _make_client("local", monkeypatch)
+
+    login = client.post("/v1/auth/demo", json={"scenario": "solo"})
+    assert login.status_code == 200
+
+    async def fake_veo(*, prompt: str, model: str) -> dict[str, str]:
+        return {"video_url": "data:video/mp4;base64,AAAA", "poster_url": ""}
+
+    monkeypatch.setattr(media_routes, "_generate_veo", fake_veo)
+
+    r = client.get("/v1/media/recap")
+    assert r.status_code == 200
+    assert r.json()["ready"] is True
+
+    # Second call must re-invoke the bridge because we intentionally
+    # didn't cache the data URL. We can't peek at the store from
+    # here without more plumbing, so exercise the observable
+    # behavior: a plain (no force) call still lands as cached=False.
+    r2 = client.get("/v1/media/recap")
+    assert r2.status_code == 200
+    assert r2.json()["cached"] is False, (
+        "data-URL responses must not populate the profile cache"
+    )

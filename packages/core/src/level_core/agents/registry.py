@@ -146,11 +146,14 @@ register(
 
 register(
     AgentDescriptor(
+        # Runtime spec in ``role.py::run`` uses model="pro"; this
+        # descriptor must match or ``/v1/admin/agents`` reports a
+        # tier the code never actually invokes.
         name="RoleAgent",
         module="level_core.agents.role",
-        model="flash",
+        model="pro",
         safety_class=SafetyClass.EXTRACTOR,
-        cost_tier=CostTier.CHEAP,
+        cost_tier=CostTier.STANDARD,
         schema="ProposedCareRoster",
         description="Proposes who the caregiver looks after based on names in events.",
     )
@@ -237,11 +240,14 @@ register(
 
 register(
     AgentDescriptor(
+        # Runtime spec in ``email.py::run`` uses model="flash";
+        # the descriptor mirrors that so /admin/agents doesn't
+        # misrepresent the actual tier judges see.
         name="EmailAgent",
         module="level_core.agents.email",
-        model="pro",
+        model="flash",
         safety_class=SafetyClass.GENERATOR,
-        cost_tier=CostTier.STANDARD,
+        cost_tier=CostTier.CHEAP,
         max_turns=2,
         schema="DraftedEmail",
         description="Drafts an editable email to a saved contact. Never sends.",
@@ -250,12 +256,15 @@ register(
 
 register(
     AgentDescriptor(
+        # Runtime spec in ``summary.py::run`` uses model="flash"
+        # and max_turns=1 (see docstring there for the rationale
+        # around the deterministic ``_fallback_summary``).
         name="SummaryAgent",
         module="level_core.agents.summary",
-        model="pro",
+        model="flash",
         safety_class=SafetyClass.GENERATOR,
-        cost_tier=CostTier.STANDARD,
-        max_turns=2,
+        cost_tier=CostTier.CHEAP,
+        max_turns=1,
         schema="DaySummary",
         description="Composes the 'Hear my day' spoken summary from today's agenda + priorities.",
     )

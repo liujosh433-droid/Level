@@ -167,7 +167,16 @@ async def google_callback(
 @router.post("/logout")
 async def logout(response: Response) -> dict[str, bool]:
     settings = get_settings()
-    response.delete_cookie(SESSION_COOKIE_NAME, path="/")
+    # Browsers require matching secure/samesite/path to remove a
+    # cookie. The session cookie was set with these flags in the
+    # OAuth + demo paths, so mirror them here or the delete silently
+    # no-ops on HTTPS (Cloud Run).
+    response.delete_cookie(
+        SESSION_COOKIE_NAME,
+        path="/",
+        secure=not settings.is_local,
+        samesite="lax",
+    )
     return {"ok": True, "env": settings.level_env == "cloud"}
 
 

@@ -224,6 +224,9 @@ function streamingSupported(): boolean {
 
 function feedbackTargetFromResult(result: ChatResult): Message["feedback"] | undefined {
   const auditId = result?.audit_id || undefined;
+  // Structured artifacts get the tightest label ("EmailAgent",
+  // "PriorityAgent", …) because thumbs-down on a draft email is
+  // qualitatively different from thumbs-down on a router reply.
   if (result?.email_draft) {
     return {
       agent: "EmailAgent",
@@ -261,6 +264,20 @@ function feedbackTargetFromResult(result: ChatResult): Message["feedback"] | und
       agent: "BookAgent",
       field: "booking.title",
       value: (result.reply || "").slice(0, 200),
+      auditId,
+    };
+  }
+  // Generic reply — router / clarifying-question / find-time /
+  // summary. Attach a feedback control anyway so every AI turn is
+  // trainable. Chit-chat and other fast-path bubbles do NOT have an
+  // audit_id (no LLM was called), so we only attach when we have one
+  // to associate the feedback with.
+  const reply = (result?.reply || "").trim();
+  if (auditId && reply) {
+    return {
+      agent: result?.path === "router" ? "ChatRouterAgent" : "ChatReplyAgent",
+      field: "reply.text",
+      value: reply.slice(0, 200),
       auditId,
     };
   }
@@ -509,6 +526,10 @@ export default function Chat({
   const [activeHints, setActiveHints] = useState<string[] | null>(null);
   const threadRef = useRef<HTMLDivElement | null>(null);
   const activeEventSource = useRef<EventSource | null>(null);
+  // listenOnce returns a stop function; we hold it here so the Stop
+  // button can actually terminate the SpeechRecognition session
+  // instead of leaving it running until browser timeout.
+  const activeSttStop = useRef<null | (() => void)>(null);
 
   const currentHints = activeHints ?? busyHints;
 
@@ -613,6 +634,23 @@ export default function Chat({
       const es = new EventSource(url, { withCredentials: true });
       activeEventSource.current = es;
       let final: ChatResult | null = null;
+      // `done` fires as a normal `message` event; browsers also fire
+      // `onerror` when the caller closes the connection cleanly.
+      // Without this guard, a successful stream finalizes AND then
+      // falls back to POST — the second call double-charges the rate
+      // limiter and calls `onFinalize` twice for the same reply.
+      let settled = false;
+      const settle = (kind: "ok" | "err") => {
+        if (settled) return;
+        settled = true;
+        es.close();
+        activeEventSource.current = null;
+        if (kind === "ok" && final) {
+          onFinalize(final);
+        } else if (kind === "err") {
+          onError();
+        }
+      };
 
       es.addEventListener("delta", (evt) => {
         try {
@@ -637,19 +675,14 @@ export default function Chat({
         } catch {
           final = null;
         }
-        es.close();
-        activeEventSource.current = null;
-        if (final) {
-          onFinalize(final);
-        } else {
-          onError();
-        }
+        settle(final ? "ok" : "err");
       });
 
       es.onerror = () => {
-        es.close();
-        activeEventSource.current = null;
-        onError();
+        // A successful `done` closes the socket, which browsers report
+        // as an error event; settle() is a no-op once we've already
+        // finalized.
+        settle("err");
       };
     },
     [],
@@ -768,21 +801,29 @@ export default function Chat({
       return;
     }
     if (listening) {
+      // Actually stop the underlying SpeechRecognition; otherwise it
+      // keeps buffering audio until the browser's own timeout and can
+      // finalize a transcript AFTER the user pressed Stop.
+      activeSttStop.current?.();
+      activeSttStop.current = null;
       setListening(false);
       return;
     }
     setError(null);
     setListening(true);
-    listenOnce(
+    const stop = listenOnce(
       (text) => {
+        activeSttStop.current = null;
         setListening(false);
         setDraft((cur) => (cur.trim() ? `${cur.trim()} ${text}` : text));
       },
       () => {
+        activeSttStop.current = null;
         setListening(false);
         setError("Couldn't hear that. Try again or type instead.");
       },
     );
+    activeSttStop.current = stop;
   }
 
   async function speakDay() {

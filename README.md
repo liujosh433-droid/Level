@@ -40,7 +40,9 @@ The mermaid source is at [`docs/architecture.mmd`](docs/architecture.mmd).
 
 ## What's inside
 
-- **11 registered agents**, all discoverable via
+- **12 registered agents** (ChatRouter, Activity, Role, Usual,
+  Priority, Reminder, Book, SlotWindow, PersonEdit, Email, Summary,
+  ADKPlanner), all discoverable via
   `packages/core/src/level_core/agents/registry.py` and
   `GET /v1/admin/agents`.
 - **Model Armor** prompt-injection prefilter runs BEFORE every LLM call
@@ -125,8 +127,11 @@ see how Level splits pickup duty across two adults.
 - `LEVEL_ENV=local` writes state to `.level/local_store/`.
 - **Email sending short-circuits to a preview** so you never
   accidentally email anyone during a demo.
-- Demo mode is disabled entirely when `LEVEL_ENV=cloud` so a probe
-  can't spawn synthetic users against the deployed API.
+- Demo mode is off by default when `LEVEL_ENV=cloud` so a probe can't
+  spawn synthetic users against the deployed API. Set
+  `LEVEL_DEMO_IN_CLOUD=true` to expose the hosted-demo entrypoint for
+  judges — that path enforces a fixed slot pool, per-IP rate limit,
+  and per-user cost cap. See SETUP.md § Hosted demo in cloud.
 
 ### Skipping the key: what you lose
 
@@ -187,6 +192,8 @@ make test-e2e-web  # Playwright smoke against local dev
 ```
 
 Coverage target: 85% on `packages/core`, 75% on `packages/api`.
+Run `make test-cov` to enforce the lower bar (75%) locally; the target
+uses `pytest --cov` with `--cov-fail-under=75`.
 
 ## Hackathon submission
 

@@ -31,7 +31,7 @@ by Gmail's own idempotency handling.
 from __future__ import annotations
 
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException
@@ -92,8 +92,30 @@ def _is_profile_draft_valid(
         expiry = datetime.fromisoformat(expires_at)
     except ValueError:
         return True
-    now = datetime.now(expiry.tzinfo) if expiry.tzinfo else datetime.utcnow()
+    now = datetime.now(expiry.tzinfo) if expiry.tzinfo else datetime.now(UTC).replace(tzinfo=None)
     return now < expiry
+
+
+def _expected_recipient(
+    in_memory_pending: dict[str, Any] | None, profile_draft: Any
+) -> str | None:
+    """Return the recipient the draft was originally created for, or None.
+
+    The API is authoritative on the recipient: allowing the client to
+    override ``to`` in POST /send would let a compromised UI, XSS, or
+    replay attack mail an arbitrary address with a valid token. We prefer
+    the Firestore-persisted draft over the in-memory fast path since it's
+    authoritative across instance restarts.
+    """
+    if isinstance(profile_draft, dict):
+        recipient = profile_draft.get("to")
+        if isinstance(recipient, str) and recipient.strip():
+            return recipient.strip()
+    if isinstance(in_memory_pending, dict):
+        recipient = in_memory_pending.get("to")
+        if isinstance(recipient, str) and recipient.strip():
+            return recipient.strip()
+    return None
 
 
 @router.post("/draft")
@@ -151,6 +173,39 @@ async def send(
         )
         raise HTTPException(status_code=400, detail="unknown_confirmation_token")
 
+    # Human-in-the-loop guardrail: the drafted recipient is bound to
+    # the confirmation token. A modified client cannot swap the "to"
+    # while keeping a valid token — the send must go to the address the
+    # draft was created for. Compare against the authoritative source
+    # (Firestore) when present, falling back to the in-memory record.
+    expected_to = _expected_recipient(
+        in_memory_pending,
+        profile_draft if profile_valid else None,
+    )
+    if expected_to is None:
+        # Draft found but no recorded recipient — refuse rather than
+        # trust the client-supplied ``to``. Logged so we can find
+        # legacy drafts to reseed.
+        logger.warning(
+            "email.send.missing_expected_to",
+            user=store.user_id,
+            token_prefix=body.confirmation_token[:8],
+        )
+        raise HTTPException(status_code=400, detail="draft_recipient_missing")
+    if (body.to or "").strip().lower() != expected_to.lower():
+        logger.warning(
+            "email.send.recipient_mismatch",
+            user=store.user_id,
+            token_prefix=body.confirmation_token[:8],
+            expected_prefix=expected_to[:32],
+            supplied_prefix=(body.to or "")[:32],
+        )
+        raise HTTPException(status_code=400, detail="recipient_mismatch")
+    # Downstream Gmail send is always addressed to the server-side
+    # value from here on. The client-supplied ``to`` is used only for
+    # this equality check.
+    to_address = expected_to
+
     # Demo-mode short-circuit. Two behaviors depending on config:
     #
     # 1. **Real send** (all three ``LEVEL_DEMO_SEND_REAL_EMAILS`` /
@@ -195,9 +250,10 @@ async def send(
                     user=store.user_id,
                     intercept_to=intercept_to[:64],
                 )
+                # Never leak upstream error class names to the client;
+                # log the class server-side, return a generic 502.
                 raise HTTPException(
-                    status_code=502,
-                    detail=f"gmail_send_failed: {exc.__class__.__name__}",
+                    status_code=502, detail="gmail_send_failed"
                 ) from exc
 
             _pending_drafts.pop(body.confirmation_token, None)
@@ -208,7 +264,7 @@ async def send(
             logger.info(
                 "email.send.demo_real_send_ok",
                 user=store.user_id,
-                drafted_to=body.to[:64],
+                drafted_to=to_address[:64],
                 intercept_to=intercept_to[:64],
                 message_id=sent.message_id,
             )
@@ -217,18 +273,18 @@ async def send(
                 "thread_id": sent.thread_id,
                 "demo": True,
                 "demo_real_send": True,
-                "drafted_to": body.to,
+                "drafted_to": to_address,
                 "delivered_to": intercept_to,
                 "notice": (
                     "Demo real-send mode: sent to intercept address "
-                    f"({intercept_to}) instead of {body.to}."
+                    f"({intercept_to}) instead of {to_address}."
                 ),
             }
 
         logger.info(
             "email.send.demo_preview",
             user=store.user_id,
-            to=body.to[:64],
+            to=to_address[:64],
         )
         _pending_drafts.pop(body.confirmation_token, None)
         if profile_valid:
@@ -239,6 +295,7 @@ async def send(
             "message_id": f"demo-{x_idempotency_key[:12]}",
             "thread_id": f"demo-{x_idempotency_key[:12]}",
             "demo": True,
+            "drafted_to": to_address,
             "notice": "Demo mode: draft was NOT actually emailed.",
         }
 
@@ -248,7 +305,7 @@ async def send(
     try:
         sent = await send_email(
             store,
-            to=body.to,
+            to=to_address,
             subject=body.subject,
             body=body.body,
             idempotency_key=x_idempotency_key,

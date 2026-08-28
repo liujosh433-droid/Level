@@ -7,7 +7,9 @@
 *.tfstate.*
 *.tfstate.backup
 .terraform/
-.terraform.lock.hcl
+# .terraform.lock.hcl is intentionally checked in — Terraform's
+# reproducibility contract requires the lock file to be version-
+# controlled so every apply pins the same provider versions.
 service-account*.json
 *.pem
 

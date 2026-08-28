@@ -1,7 +1,7 @@
 """FastAPI app for Level.
 
-Routes are namespaced under /v1. Every mutating route requires the signed
-session cookie (see deps.require_user).
+Routes are namespaced under /v1. Every mutating route requires the
+signed session cookie (see deps.get_current_user_id / get_user_store).
 """
 
 from __future__ import annotations
@@ -47,7 +47,19 @@ def create_app() -> FastAPI:
         openapi_url="/openapi.json" if settings.is_local else None,
     )
 
-    origins = ["*"] if settings.is_local else [settings.level_web_app_url]
+    # CORS with credentials (session cookie) requires an EXACT
+    # origin allowlist — ``*`` combined with ``allow_credentials=True``
+    # is technically invalid per the spec and browsers are increasingly
+    # strict about rejecting it. Locally we allow both Next.js dev
+    # server ports (Chrome dev tools + Playwright) and the loopback
+    # form some users prefer; cloud pins to the configured web URL.
+    if settings.is_local:
+        origins = [
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+        ]
+    else:
+        origins = [settings.level_web_app_url]
     app.add_middleware(
         CORSMiddleware,
         allow_origins=origins,

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends
+from level_core.agents.gate import GATE_COUNTER_KEY
 from level_core.calendar.enrich import enrich_agenda
 from level_core.calendar.sync import ensure_watch, refresh_agenda
 from level_core.storage.base import UserStore
@@ -25,7 +26,13 @@ async def status(store: UserStore = Depends(get_user_store)) -> dict[str, Any]:
     tokens = await store.tokens.read() or {}
     profile = await store.profile.read() or {}
     sync = await store.calendar_sync.read() or {}
-    audit_count = len(await store.ai_audit.list())
+    # Previously this loaded the entire ai_audit collection just to
+    # take its length — a full-scan Firestore read on every Sources
+    # page poll. The gate keeps a rolling day counter under
+    # ``profile["_gate_counters"]``; use that O(1) value here so the
+    # endpoint scales with users, not audit history.
+    counters = profile.get(GATE_COUNTER_KEY) or {}
+    ai_calls_today = int(counters.get("day_calls", 0)) if isinstance(counters, dict) else 0
     return {
         "google_connected": bool(tokens.get("access_token")),
         "email": tokens.get("email"),
@@ -36,7 +43,10 @@ async def status(store: UserStore = Depends(get_user_store)) -> dict[str, Any]:
         "days_back": profile.get("calendar_window_days_back"),
         "days_forward": profile.get("calendar_window_days_forward"),
         "watch": sync.get("watch_channel"),
-        "ai_calls_total": audit_count,
+        # Renamed to reflect that this is a rolling day count (rows
+        # older than the current UTC day roll off). The prior
+        # ``ai_calls_total`` was a lifetime count that scaled unboundedly.
+        "ai_calls_today": ai_calls_today,
     }
 
 

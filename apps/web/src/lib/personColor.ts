@@ -12,8 +12,6 @@ export const PALETTE = [
   { bg: "rgba(200, 87, 136, 0.16)",  border: "rgba(200, 87, 136, 0.55)",  ink: "#8a3468" }, // rose    335°
 ] as const;
 
-const NEUTRAL = { bg: "rgba(90, 115, 128, 0.10)", border: "rgba(90, 115, 128, 0.35)", ink: "#556974" };
-
 export type PersonColor = { bg: string; border: string; ink: string };
 
 /**
@@ -28,13 +26,4 @@ export function buildPersonColorMap(keys: readonly string[]): Map<string, Person
     map.set(k, PALETTE[i % PALETTE.length]);
   });
   return map;
-}
-
-/** Fallback for callers that don't have the full people list. */
-export function personColor(
-  key: string | null | undefined,
-  map?: Map<string, PersonColor>,
-): PersonColor {
-  if (!key) return NEUTRAL;
-  return map?.get(key) ?? NEUTRAL;
 }

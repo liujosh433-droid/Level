@@ -101,7 +101,11 @@ def _until_utc() -> str:
 
 
 def _stamp() -> str:
-    return datetime.now(TZ).strftime("%Y%m%dT%H%M%SZ")
+    # DTSTAMP must be UTC per RFC 5545 §3.8.7.2; the trailing 'Z' is
+    # the UTC sentinel. Previously this formatted local time but
+    # appended 'Z', mislabelling every fixture as UTC. Now we
+    # convert to UTC before formatting.
+    return datetime.now(TZ).astimezone(ZoneInfo("UTC")).strftime("%Y%m%dT%H%M%SZ")
 
 
 def _fold(line: str) -> str:

@@ -58,6 +58,7 @@ class _UserCircuit:
     state: CircuitState = CircuitState.CLOSED
     failures: deque[float] = field(default_factory=deque)
     opened_at: float = 0.0
+    last_touch: float = 0.0
 
     def _prune(self, now: float, window_s: float) -> None:
         while self.failures and self.failures[0] < now - window_s:
@@ -70,7 +71,16 @@ class CircuitBreaker:
     Defaults tuned for a caregiver-scale workload: 5 failures in 60s
     opens the circuit for 30s. Half-open probe lets us reprobe on the
     next real call.
+
+    Idle-user eviction: a closed circuit with zero recent failures and
+    no touch in ``idle_ttl_seconds`` is dropped. Previously the users
+    dict grew forever on long-running Cloud Run instances. Eviction is
+    safe because a fresh CLOSED circuit is indistinguishable from a
+    never-created one.
     """
+
+    _DEFAULT_IDLE_TTL_S = 3600.0
+    _MAX_EVICT_PER_TOUCH = 128
 
     def __init__(
         self,
@@ -78,18 +88,44 @@ class CircuitBreaker:
         failure_threshold: int = 5,
         window_seconds: float = 60.0,
         open_seconds: float = 30.0,
+        idle_ttl_seconds: float | None = None,
     ) -> None:
         self._threshold = failure_threshold
         self._window = window_seconds
         self._open_s = open_seconds
+        self._idle_ttl = float(
+            idle_ttl_seconds
+            if idle_ttl_seconds is not None
+            else self._DEFAULT_IDLE_TTL_S
+        )
         self._users: dict[str, _UserCircuit] = {}
 
     def _get(self, user_id: str) -> _UserCircuit:
+        now = time.monotonic()
+        self._evict_idle(now)
         c = self._users.get(user_id)
         if c is None:
-            c = _UserCircuit()
+            c = _UserCircuit(last_touch=now)
             self._users[user_id] = c
+        else:
+            c.last_touch = now
         return c
+
+    def _evict_idle(self, now: float) -> None:
+        if not self._users:
+            return
+        cutoff = now - self._idle_ttl
+        dropped = 0
+        for uid, c in list(self._users.items()):
+            if (
+                c.state == CircuitState.CLOSED
+                and not c.failures
+                and c.last_touch < cutoff
+            ):
+                self._users.pop(uid, None)
+                dropped += 1
+                if dropped >= self._MAX_EVICT_PER_TOUCH:
+                    break
 
     def state(self, user_id: str) -> CircuitState:
         circuit = self._get(user_id)

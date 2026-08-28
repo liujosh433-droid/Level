@@ -562,7 +562,7 @@ def _to_cached_event(
         level_reason=private.get("level_reason"),
         etag=item.get("etag"),
         activity_type=activity,
-        classified_at=datetime.utcnow() if activity else None,
+        classified_at=datetime.now(UTC) if activity else None,
     )
 
 
@@ -676,17 +676,96 @@ async def _rebuild_daily_agenda(
         await store.daily_agenda.delete_many(stale)
 
 
-async def ensure_watch(store: UserStore, *, calendar_id: str = "primary") -> bool:
-    """Register a push channel if LEVEL_PUBLIC_API_URL is https."""
+WATCH_RENEWAL_MARGIN = timedelta(days=2)
+
+
+def _watch_expires_at(watch: dict[str, Any] | None) -> datetime | None:
+    """Parse the Google-returned expiration into an aware datetime.
+
+    Google returns milliseconds since epoch as a string. We accept
+    ints as a defensive fallback for records written by older code.
+    Returns None when the field is missing or unparseable — treat as
+    "unknown" (renew).
+    """
+    if not isinstance(watch, dict):
+        return None
+    raw = watch.get("expiration")
+    if raw is None:
+        return None
+    try:
+        ms = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if ms <= 0:
+        return None
+    return datetime.fromtimestamp(ms / 1000.0, tz=UTC)
+
+
+async def _stop_watch(service: Any, channel: dict[str, Any]) -> None:
+    """Best-effort stop of an existing push channel.
+
+    Google requires both channel id + resource id. We call this before
+    registering a replacement so a renewal doesn't leak a growing set
+    of active channels. Failures are logged but not raised — a stale
+    channel is much cheaper than a failed renewal.
+    """
+    channel_id = channel.get("id")
+    resource_id = channel.get("resource_id")
+    if not channel_id or not resource_id:
+        return
+    try:
+        stop_req = await asyncio.to_thread(
+            service.channels().stop,
+            body={"id": channel_id, "resourceId": resource_id},
+        )
+        await asyncio.to_thread(stop_req.execute)
+    except Exception as exc:  # noqa: BLE001 - stop is advisory
+        logger.info(
+            "calendar.watch.stop_failed",
+            channel_id=channel_id,
+            error=str(exc)[:200],
+        )
+
+
+async def ensure_watch(
+    store: UserStore, *, calendar_id: str = "primary", force: bool = False
+) -> bool:
+    """Register (or renew) a Google Calendar push channel.
+
+    Skips when ``LEVEL_PUBLIC_API_URL`` isn't HTTPS (local dev, or a
+    misconfigured cloud env where Google won't accept an HTTP hook).
+    When a healthy channel already exists and has more than
+    ``WATCH_RENEWAL_MARGIN`` left before it expires, we return False —
+    the caller can distinguish "no change" from "registered" via that
+    return value. Passing ``force=True`` skips the freshness check.
+
+    The webhook URL includes the store's user_id as a query parameter
+    so ``routes/calendar.py`` can resolve the user from an unauthenticated
+    Google POST; without it the handler 400s and every push is lost.
+    """
     settings = get_settings()
     if not settings.level_public_api_url.startswith("https://"):
         logger.info("calendar.watch.skipped", reason="no_public_https_url")
         return False
 
+    state = await store.calendar_sync.read() or {}
+    existing = state.get("watch_channel") if isinstance(state, dict) else None
+    if isinstance(existing, dict) and not force:
+        expires_at = _watch_expires_at(existing)
+        if expires_at is not None and expires_at - datetime.now(UTC) > WATCH_RENEWAL_MARGIN:
+            logger.info(
+                "calendar.watch.fresh",
+                expires_at=expires_at.isoformat(),
+            )
+            return False
+
     service = await build_calendar_client(store)
     channel_id = f"level-{uuid.uuid4().hex[:12]}"
     channel_token = secrets.token_urlsafe(24)
-    webhook_url = f"{settings.level_public_api_url.rstrip('/')}/v1/calendar/webhook"
+    webhook_url = (
+        f"{settings.level_public_api_url.rstrip('/')}"
+        f"/v1/calendar/webhook?uid={store.user_id}"
+    )
 
     body = {
         "id": channel_id,
@@ -706,4 +785,9 @@ async def ensure_watch(store: UserStore, *, calendar_id: str = "primary") -> boo
             "token": channel_token,
         }
     )
+
+    # Stop the previous channel AFTER the new one is registered so a
+    # transient hiccup can't leave us with zero live watchers.
+    if isinstance(existing, dict) and existing.get("id") != channel_id:
+        await _stop_watch(service, existing)
     return True

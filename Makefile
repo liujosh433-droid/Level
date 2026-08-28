@@ -1,5 +1,5 @@
 .PHONY: help install dev api web test test-unit test-security test-e2e test-e2e-web \
-        lint format tf-init tf-plan tf-apply deploy-api deploy-jobs \
+        test-cov lint format tf-init tf-plan tf-apply deploy-api deploy-jobs deploy-web \
         diagram clean
 
 # Prefer a locally-bundled uv at .tools/uv (not committed to the repo)
@@ -30,6 +30,7 @@ help:
 	@echo "  make tf-init/plan/apply    terraform in infra/terraform"
 	@echo "  make deploy-api      build + deploy FastAPI to Cloud Run"
 	@echo "  make deploy-jobs     build + deploy nightly Cloud Run Job"
+	@echo "  make deploy-web      build + deploy Next.js web to Cloud Run"
 
 install:
 	@command -v $(UV) >/dev/null 2>&1 || { \
@@ -69,6 +70,17 @@ test-e2e:
 test-e2e-web:
 	cd apps/web && npx playwright test
 
+# Coverage matches the README target (85% core / 75% api).
+# --cov-fail-under uses the lower bar so a run that only exercises
+# packages/api still fails when it drops below the API target; boost
+# the flag when running against packages/core specifically.
+test-cov:
+	LEVEL_ENV=local $(UV) run --package level-api pytest tests \
+	  --cov=packages/core/src/level_core \
+	  --cov=packages/api/src/level_api \
+	  --cov-report=term-missing \
+	  --cov-fail-under=75
+
 lint:
 	$(UV) run ruff check $(PY_DIRS)
 	$(UV) run mypy
@@ -90,13 +102,28 @@ tf-plan:
 tf-apply:
 	cd infra/terraform && terraform apply
 
+# Cloud Build submits the REPO ROOT as the build context. Each
+# Dockerfile does `COPY packages/core /app/...` + `COPY packages/api
+# /app/...`, so the previous `packages/api` context would fail those
+# COPYs. The `--config` flag pins the pipeline to a versioned cloudbuild
+# YAML that pushes both a :sha and :latest tag.
 deploy-api:
-	gcloud builds submit --tag $$GOOGLE_CLOUD_REGION-docker.pkg.dev/$$GOOGLE_CLOUD_PROJECT/level/api:latest packages/api
-	gcloud run deploy level-api --image $$GOOGLE_CLOUD_REGION-docker.pkg.dev/$$GOOGLE_CLOUD_PROJECT/level/api:latest --region $$GOOGLE_CLOUD_REGION --allow-unauthenticated
+	gcloud builds submit --config=infra/cloudbuild-api.yaml .
+	gcloud run deploy level-api \
+	  --image $$GOOGLE_CLOUD_REGION-docker.pkg.dev/$$GOOGLE_CLOUD_PROJECT/level/api:latest \
+	  --region $$GOOGLE_CLOUD_REGION
 
 deploy-jobs:
-	gcloud builds submit --tag $$GOOGLE_CLOUD_REGION-docker.pkg.dev/$$GOOGLE_CLOUD_PROJECT/level/jobs:latest packages/jobs
-	gcloud run jobs deploy level-nightly --image $$GOOGLE_CLOUD_REGION-docker.pkg.dev/$$GOOGLE_CLOUD_PROJECT/level/jobs:latest --region $$GOOGLE_CLOUD_REGION
+	gcloud builds submit --config=infra/cloudbuild-jobs.yaml .
+	gcloud run jobs deploy level-nightly \
+	  --image $$GOOGLE_CLOUD_REGION-docker.pkg.dev/$$GOOGLE_CLOUD_PROJECT/level/jobs:latest \
+	  --region $$GOOGLE_CLOUD_REGION
+
+deploy-web:
+	gcloud builds submit --config=infra/cloudbuild-web.yaml .
+	gcloud run deploy level-web \
+	  --image $$GOOGLE_CLOUD_REGION-docker.pkg.dev/$$GOOGLE_CLOUD_PROJECT/level/web:latest \
+	  --region $$GOOGLE_CLOUD_REGION
 
 clean:
 	rm -rf .venv apps/web/node_modules apps/web/.next

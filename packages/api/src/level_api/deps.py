@@ -19,10 +19,3 @@ async def get_current_user_id(
 
 async def get_user_store(user_id: str = Depends(get_current_user_id)) -> UserStore:
     return get_store(user_id)
-
-
-async def optional_user_id(
-    level_session: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
-) -> str | None:
-    session = parse_session_cookie(level_session)
-    return session.user_id if session else None

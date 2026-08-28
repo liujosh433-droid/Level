@@ -11,6 +11,11 @@ locals {
     "cloudtrace.googleapis.com",
     "calendar-json.googleapis.com",
     "gmail.googleapis.com",
+    # Required for the Cloud Scheduler trigger that fires the
+    # nightly Cloud Run Job. Without this the scheduler resource
+    # comes up but never executes; the API surface simply isn't
+    # available on the project.
+    "cloudscheduler.googleapis.com",
   ]
 }
 
@@ -61,16 +66,28 @@ resource "google_project_iam_member" "api_iam" {
 }
 
 resource "google_project_iam_member" "jobs_iam" {
+  # Nightly job doesn't mount any Secret Manager secrets (see
+  # jobs.tf); secretAccessor was left in from a copy of the API SA and
+  # violated least-privilege. Add it back only if a job env var starts
+  # pulling from Secret Manager.
   for_each = toset([
     "roles/datastore.user",
     "roles/aiplatform.user",
     "roles/logging.logWriter",
     "roles/cloudtrace.agent",
-    "roles/secretmanager.secretAccessor",
   ])
   project = var.project_id
   role    = each.key
   member  = "serviceAccount:${google_service_account.jobs.email}"
+}
+
+# Dedicated identity for Cloud Scheduler → Cloud Run Job invocations.
+# Keeps least-privilege tidy: the scheduler only needs run.invoker,
+# while the jobs SA that runs INSIDE the container gets datastore /
+# aiplatform / etc.
+resource "google_service_account" "scheduler" {
+  account_id   = "level-scheduler"
+  display_name = "Level Cloud Scheduler invoker"
 }
 
 resource "google_secret_manager_secret" "session_secret" {

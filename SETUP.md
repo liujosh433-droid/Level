@@ -167,8 +167,13 @@ the fallback function (`voice.summary._fallback_summary`) not by
 Gemini
 - **Email drafting** → a stock template with names/times filled in
 from the event, not an LLM-composed message
-- **Nightly proactive cards, RoleAgent inference, priority ranking**
-→ skipped entirely (they're LLM-only paths)
+- **RoleAgent inference, priority ranking** → skipped entirely
+(they're LLM-only paths)
+- **Nightly proactive cards** → still generated: see
+`packages/core/src/level_core/calendar/proactive.py` — the missing-
+usual detection is deterministic. The rendered body strings come
+from a fixed template in that module rather than an LLM composition,
+so a no-key run still surfaces the cards in the demo.
 
 Use the no-key path only for a smoke test or if you can't reach
 `aistudio.google.com` — it's not the intended demo experience.

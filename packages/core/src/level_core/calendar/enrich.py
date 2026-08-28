@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from level_core.agents.activity import run as activity_run
@@ -40,7 +40,9 @@ class EnrichResult:
     reminders_matched: int
 
 
-async def enrich_agenda(store: UserStore) -> EnrichResult:
+async def enrich_agenda(
+    store: UserStore, *, max_events: int | None = None
+) -> EnrichResult:
     """Classify + person-match + reminder-match in one in-memory sweep.
 
     Previously this made THREE `agenda.list()` reads (one before classify,
@@ -49,12 +51,18 @@ async def enrich_agenda(store: UserStore) -> EnrichResult:
     that's ~3N doc reads on every profile refresh. Now we read once,
     keep the in-memory view up to date as we mutate, and only write the
     events that actually changed.
+
+    ``max_events`` caps how many unseen events are LLM-classified in a
+    single call. The nightly job passes this so a user with hundreds
+    of unclassified events on their first pass doesn't burn all their
+    per-day quota at 03:00; the interactive path leaves it None and
+    relies on the per-user gate as its own ceiling.
     """
     events = await store.agenda.list()
     all_people = await store.people.list()
     reminders = [r for r in await store.reminders.list() if r.status == "active"]
 
-    classified, events = await _classify_unseen(store, events)
+    classified, events = await _classify_unseen(store, events, max_events=max_events)
 
     # A person the user marked "not_me" must NOT keep matching events -
     # their name is exactly what they rejected. Include self even when
@@ -106,16 +114,29 @@ async def enrich_agenda(store: UserStore) -> EnrichResult:
 
 
 async def _classify_unseen(
-    store: UserStore, events: list[CachedEvent]
+    store: UserStore,
+    events: list[CachedEvent],
+    *,
+    max_events: int | None = None,
 ) -> tuple[int, list[CachedEvent]]:
     """Classify unseen events and return (count, updated in-memory events).
 
     Returning the updated list lets the outer `enrich_agenda` skip a
-    redundant `agenda.list()` after this pass.
+    redundant `agenda.list()` after this pass. When ``max_events`` is
+    set the LLM only sees the first N unseen events; the remainder are
+    left for the next enrich pass (usually the next sync).
     """
     unseen = [e for e in events if e.activity_type is None and e.summary]
     if not unseen:
         return 0, events
+    if max_events is not None and max_events > 0 and len(unseen) > max_events:
+        logger.info(
+            "calendar.classify.cap_hit",
+            user=store.user_id,
+            unseen=len(unseen),
+            cap=max_events,
+        )
+        unseen = unseen[:max_events]
 
     ai_by_id: dict[str, ActivityType] = {}
     ai_span_by_id: dict[str, str] = {}
@@ -167,7 +188,7 @@ async def _classify_unseen(
         new_event = e.model_copy(
             update={
                 "activity_type": resolved,
-                "classified_at": datetime.utcnow(),
+                "classified_at": datetime.now(UTC),
             }
         )
         classified.append(new_event)
@@ -249,10 +270,6 @@ def heuristic_activity(summary: str) -> ActivityType | None:
         if any(phrase in lower for phrase in phrases):
             return activity
     return None
-
-
-def _heuristic_activity(summary: str) -> ActivityType | None:
-    return heuristic_activity(summary)
 
 
 def _reminder_matches(reminder: Reminder, event: CachedEvent) -> bool:

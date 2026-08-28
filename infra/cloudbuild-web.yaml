@@ -1,3 +1,11 @@
+substitutions:
+  _REGION: us-central1
+  _REPO: level
+  _IMAGE: web
+  _TAG: ${COMMIT_SHA}
+  # Override this per-deploy with --substitutions when the API URL
+  # differs from the default (e.g. a preview environment).
+  _API_PROXY_TARGET: https://level-api-185318998255.us-central1.run.app
 steps:
   - name: gcr.io/cloud-builders/docker
     args:
@@ -5,12 +13,15 @@ steps:
       - -f
       - apps/web/Dockerfile
       - --build-arg
-      - LEVEL_API_PROXY_TARGET=https://level-api-185318998255.us-central1.run.app
+      - LEVEL_API_PROXY_TARGET=${_API_PROXY_TARGET}
       - -t
-      - us-central1-docker.pkg.dev/project-c31bdcdc-f293-47c2-a4c/level/web:latest
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_IMAGE}:${_TAG}
+      - -t
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_IMAGE}:latest
       - .
 images:
-  - us-central1-docker.pkg.dev/project-c31bdcdc-f293-47c2-a4c/level/web:latest
+  - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_IMAGE}:${_TAG}
+  - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_IMAGE}:latest
 timeout: 1800s
 options:
   logging: CLOUD_LOGGING_ONLY

@@ -24,20 +24,22 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
-from level_core.agents.gate import Charge, GateDecision, check_gate, record_charge
+from level_core.agents.gate import (
+    Charge,
+    GateDecision,
+    Reservation,
+    check_gate,
+    record_charge,
+    release_slot,
+    reserve_slot,
+    settle_cost,
+)
 from level_core.agents.identity import sign as sign_identity
 from level_core.agents.invoke import (
-    GEMMA_ELIGIBLE as _GEMMA_ELIGIBLE,  # re-exported for tests
     LLMUnavailable as _LLMUnavailable,
     QuotaExhausted,
     RawResponse as _RawResponse,
     SafetyBlocked as _SafetyBlocked,
-    _get_gemini_client,
-    _invoke_vertex,
-    _is_quota_error,
-    _parse_retry_after,
-    _try_gemma,
-    _vertex_fallback_model,
     invoke_with_retry as _invoke_with_retry,
 )
 from level_core.agents.model_armor import (
@@ -261,15 +263,44 @@ async def call_agent(
             soft_degraded=True,
         )
 
+    reservation: Reservation | None = None
     if store is not None:
-        gate: GateDecision = await check_gate(store, agent=spec.name)
-        if gate.blocked:
+        reservation = await reserve_slot(store, agent=spec.name)
+        if not reservation.granted:
+            gate: GateDecision = reservation.decision
             logger.warning(
                 "agent.gate_blocked",
                 agent=spec.name,
                 reason=gate.reason,
                 soft_degrade=gate.soft_degrade,
             )
+            # Write a zero-cost audit row so /admin/traces can show
+            # rate-limit / cost-cap denials (mirrors the model-armor
+            # blocked path). Best-effort — the gate must never surface
+            # a Firestore error to a chat caller.
+            try:
+                await store.ai_audit.upsert(
+                    AiAuditEntry(
+                        audit_id=audit_id,
+                        agent=spec.name,
+                        model=_stamp_identity(spec, model_id, ""),
+                        prompt_hash="gate-blocked",
+                        response={"blocked_by_gate": True, "reason": gate.reason},
+                        input_tokens=0,
+                        output_tokens=0,
+                        cost_estimate_usd=0.0,
+                        latency_ms=0,
+                        hallucinated=False,
+                        loop_broken=False,
+                        blocked_by_safety=False,
+                        fallback_used="gate_blocked",
+                        turns_taken=0,
+                        parent_audit_id=parent_audit_id,
+                        trace_id=trace_id,
+                    )
+                )
+            except Exception:  # noqa: BLE001
+                pass
             return AgentResult(
                 value=None,
                 blocked_by_safety=False,
@@ -339,9 +370,19 @@ async def call_agent(
                 retry_after_s=err.retry_after_s,
                 trace_id=trace_id,
             )
+            # Refund the reservation — this call didn't produce a
+            # chargeable response, and a fresh retry after retry_after
+            # shouldn't be penalized in the hour/day counters.
+            if store is not None and reservation is not None:
+                await release_slot(store, reservation)
             raise
         except _SafetyBlocked:
             logger.warning("agent.blocked_by_safety", agent=spec.name, trace_id=trace_id)
+            # Safety-blocked responses don't burn model budget for us
+            # in a useful way — refund so the user isn't rate-limited
+            # by content that never reached the model.
+            if store is not None and reservation is not None:
+                await release_slot(store, reservation)
             return AgentResult(
                 value=None,
                 blocked_by_safety=True,
@@ -361,6 +402,9 @@ async def call_agent(
                 trace_id=trace_id,
                 reason=str(err)[:120],
             )
+            # No LLM was contacted; refund so retries aren't penalized.
+            if store is not None and reservation is not None:
+                await release_slot(store, reservation)
             return AgentResult(
                 value=None,
                 blocked_by_safety=False,
@@ -407,9 +451,17 @@ async def call_agent(
             trace_id=trace_id,
         )
         await store.ai_audit.upsert(entry)
-        await record_charge(
-            store, Charge(cost_usd=cost, when=time.time())
-        )
+        if reservation is not None:
+            # Prepay was booked at reservation time; true up to the
+            # real cost estimate now that we know the token counts.
+            await settle_cost(store, reservation, actual_cost_usd=cost)
+        else:
+            # Store present but no reservation held (shouldn't happen
+            # today; kept as a safety fallback in case the reservation
+            # path is bypassed in a future refactor).
+            await record_charge(
+                store, Charge(cost_usd=cost, when=time.time())
+            )
 
     logger.info(
         "agent.call.done",

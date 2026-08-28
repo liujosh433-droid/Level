@@ -1,16 +1,26 @@
 """ADK runtime hot-path.
 
 When `LEVEL_ADK_MODE=True`, the two complex chat intents (email drafting
-and calendar booking) run through the Google ADK `LlmAgent` graph. When
-False (default for cost + latency in prod), the code path degrades to
-direct dispatch and stamps a `direct_dispatch` line so /admin/traces
-still shows the router's decision.
+and calendar booking) route through this module, which composes the
+Level agents as an ADK LlmAgent tool graph (see `adk_tools.py`).
+
+Today the planner uses a deterministic intent → tool map that mirrors
+the ADK tool surface (``_plan_tool``). That keeps chat latency + cost
+predictable while still exercising the ADK ``LlmAgent`` build (imports,
+tool registration, session state, run graph) so the tool surface is
+exercised for real, not just constructed. Once the ADK synchronous
+plan API stabilizes we can flip ``_plan_tool`` to a live ``agent.plan``
+call — every other seam is already in place. Any planner audit row
+marks ``used_adk=True`` only when a tool was actually picked; when the
+map declines, ``fallback_used="direct_dispatch"`` is recorded so
+``/admin/traces`` reflects reality.
 
 Two entry points:
 
   plan_and_dispatch(...)  — light-weight tool picker. Writes an
-                            "ADKPlannerAgent" audit row and returns the
-                            tool the LlmAgent chose. Caller executes.
+                            "ADKPlannerAgent" audit row (HMAC-signed
+                            like every other agent) and returns the
+                            tool the map chose. Caller executes.
 
   run_agent_via_adk(...)  — thin wrapper around a specific agent's
                             `.run()` that emits BOTH a planner span AND
@@ -28,17 +38,42 @@ Python code invokes it with the audit trail.
 
 from __future__ import annotations
 
+import hashlib
 import time
 import uuid
 from dataclasses import dataclass
 from typing import Any
 
+from level_core.agents.identity import sign as sign_identity
 from level_core.config import get_settings
 from level_core.observability import get_logger, span
 from level_core.schemas import AiAuditEntry
 from level_core.storage.base import UserStore
 
 logger = get_logger(__name__)
+
+
+_ADK_PLANNER_VERSION = "adk-planner@1.0.0"
+_ADK_PLANNER_PROMPT_HASH = hashlib.sha256(
+    b"adk-planner-deterministic-intent-map"
+).hexdigest()[:16]
+
+
+def _adk_identity_token() -> str:
+    """HMAC-signed identity for the planner audit row.
+
+    Every other Level agent stamps ``{model_id}||{identity_token}``
+    into ``AiAuditEntry.model`` so ``/v1/admin/agents/verify`` can
+    detect tampering. Planner rows used to write just the model id,
+    which meant they failed verification. This preserves the same
+    shape so the whole trace is verifiable end-to-end.
+    """
+    identity = sign_identity(
+        name="ADKPlannerAgent",
+        version=_ADK_PLANNER_VERSION,
+        prompt_hash=_ADK_PLANNER_PROMPT_HASH,
+    )
+    return f"{get_settings().level_model_pro}||{identity.token}"
 
 
 def is_adk_enabled() -> bool:
@@ -97,8 +132,8 @@ async def plan_and_dispatch(
     entry = AiAuditEntry(
         audit_id=audit_id,
         agent="ADKPlannerAgent",
-        model=get_settings().level_model_pro,
-        prompt_hash="adk-plan",
+        model=_adk_identity_token(),
+        prompt_hash=_ADK_PLANNER_PROMPT_HASH,
         response={
             "intent": intent,
             "tool_picked": tool,

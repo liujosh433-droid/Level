@@ -144,6 +144,11 @@ class Settings(BaseSettings):
     level_session_secret: str = "change-me-to-a-long-random-string"
 
     level_otel_exporter: Literal["console", "cloud"] = "console"
+    # Admin/trace endpoints are session-gated (see routes/admin.py) but
+    # we keep an explicit feature flag so operators can shrink the
+    # public API surface further. Default is True locally for the
+    # demo video; validated below to require an explicit opt-in when
+    # deploying to cloud.
     level_admin_traces_enabled: bool = True
 
     calendar_tz: str = "America/Los_Angeles"

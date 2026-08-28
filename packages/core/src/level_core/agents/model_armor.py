@@ -60,8 +60,19 @@ _BLOCK_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         re.compile(r"\b(?:developer|dev|god|admin|jailbreak)\s+mode\b", re.I),
     ),
     (
+        # Only block when the caregiver is asking Level to REVEAL or
+        # EXFILTRATE a credential — that's the actual injection signal.
+        # A bare mention like "reset the school portal password" or
+        # "add the wifi password to the fridge magnets" is legitimate
+        # caregiver work and should never trip the guard.
         "credential_fish",
-        re.compile(r"\b(?:api\s*key|access[_\s]token|refresh\s+token|password|secret)\b", re.I),
+        re.compile(
+            r"\b(?:reveal|show|print|leak|dump|send|share|list|output|paste)\s+"
+            r"(?:the\s+|your\s+|my\s+|all\s+)?"
+            r"(?:api\s*key|access[_\s]token|refresh\s+token|bearer\s+token|secret\s+key)"
+            r"s?\b",
+            re.I,
+        ),
     ),
     (
         "exec_arbitrary",
@@ -73,6 +84,17 @@ _FLAG_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("role_swap", re.compile(r"\b(?:pretend|role[- ]?play|act as)\s+(?:you\s+are|a|an)\b", re.I)),
     ("delimiter_break", re.compile(r"</?(?:user_input|context|system)>", re.I)),
     ("all_caps_shout", re.compile(r"[A-Z]{20,}")),
+    # Softer credential mention — the caregiver said "password" or
+    # "api key" without asking us to reveal one. Log it (so an audit
+    # log shows the incident) but never block the LLM call.
+    (
+        "credential_mention",
+        re.compile(
+            r"\b(?:api\s*key|access[_\s]token|refresh\s+token|bearer\s+token|"
+            r"secret\s+key|password|passphrase)\b",
+            re.I,
+        ),
+    ),
 )
 
 

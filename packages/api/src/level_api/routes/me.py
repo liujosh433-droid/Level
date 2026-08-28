@@ -7,6 +7,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Response
 from level_core.auth.sessions import SESSION_COOKIE_NAME
 from level_core.auth.tokens import clear_tokens
+from level_core.config import get_settings
 from level_core.demo.seeder import is_demo_user
 from level_core.schemas import CareRelation
 from level_core.storage.base import UserStore
@@ -150,5 +151,13 @@ async def delete_me(
     await store.calendar_sync.write({})
     await store.profile.write({})
     await clear_tokens(store)
-    response.delete_cookie(SESSION_COOKIE_NAME, path="/")
+    # Match the flags used to set the cookie (see auth.py) so browsers
+    # actually drop it on HTTPS.
+    settings = get_settings()
+    response.delete_cookie(
+        SESSION_COOKIE_NAME,
+        path="/",
+        secure=not settings.is_local,
+        samesite="lax",
+    )
     return {"status": "wiped", "user_id": user_id}

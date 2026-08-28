@@ -30,6 +30,7 @@ from level_core.schemas import (
 from level_core.storage.base import UserStore
 from level_core.storage.care_store import (
     ensure_self_person,
+    new_id,
     propose_person,
     propose_usual,
     record_negative,
@@ -437,8 +438,12 @@ async def delete_priority(
 async def add_priority_direct(
     body: DirectPriorityAdd, store: UserStore = Depends(get_user_store)
 ) -> dict[str, Any]:
+    # ``prio_{user_id[:6]}`` used to be shared across every priority
+    # for a given user, so a second add would upsert on top of the
+    # first — silently overwriting the previous entry. Mint a fresh
+    # unique id per row instead.
     prio = Priority(
-        priority_id=f"prio_{store.user_id[:6]}",
+        priority_id=f"prio_{new_id('p')}",
         text=body.text.strip(),
         weight=body.weight,
         activity_types=body.activity_types,

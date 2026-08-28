@@ -14,7 +14,7 @@ inline from an HTTP request handler when needed.
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -170,7 +170,7 @@ async def regenerate_proactive_cards(
                 "person_id": g.person_id,
                 "person_name": display_name,
                 "text": body_text,
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.now(UTC).isoformat(),
             }
         )
 
@@ -182,7 +182,7 @@ async def regenerate_proactive_cards(
         **{
             PROACTIVE_CARDS_KEY: {
                 "week_start": week_start.isoformat(),
-                "generated_at": datetime.utcnow().isoformat(),
+                "generated_at": datetime.now(UTC).isoformat(),
                 "cards": cards,
             }
         }

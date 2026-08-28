@@ -14,8 +14,8 @@ export default function HomePage() {
     let cancelled = false;
     void resolveHomeDestination().then(({ dest }) => {
       if (cancelled) return;
-      if (dest === "/today") {
-        router.replace(dest);
+      if (dest === "today") {
+        router.replace("/today");
         return;
       }
       setChecking(false);

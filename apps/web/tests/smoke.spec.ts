@@ -2,8 +2,14 @@ import { test, expect } from "@playwright/test";
 
 test("landing loads with hero", async ({ page }) => {
   await page.goto("/");
-  await expect(page.getByRole("heading", { level: 1 })).toContainText("calm second set of hands");
-  await expect(page.getByRole("link", { name: "Open the dashboard" })).toBeVisible();
+  // Landing headline is the primary hero copy on app/page.tsx.
+  // Update this string when the marketing copy changes there.
+  await expect(page.getByRole("heading", { level: 1 })).toContainText(
+    "Steady when everything else isn"
+  );
+  await expect(
+    page.getByRole("button", { name: /Get Started/i })
+  ).toBeVisible();
 });
 
 test("today page renders empty state when not connected", async ({ page }) => {

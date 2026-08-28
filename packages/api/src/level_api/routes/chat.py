@@ -100,13 +100,20 @@ class ChatTurn(BaseModel):
     text: str
 
 
+MAX_CHAT_MESSAGE_CHARS = 4000
+
+
 class ChatBody(BaseModel):
-    message: str
+    # Bound the request body up front so oversized messages get a
+    # 422 before touching the rate limiter, router, or Firestore.
+    # 4k characters is well above any realistic caregiver utterance
+    # (typical is under 200) and matches the CHAT_MESSAGE limit
+    # applied to the SSE ``message`` query param below.
+    message: str = Field(min_length=1, max_length=MAX_CHAT_MESSAGE_CHARS)
     # Client attaches recent turns (excluding the current message) so the
     # router and downstream extractors can resolve pronouns / partial info
     # like "Tuesday 7:45am" after an earlier "put the drop-off back".
     history: list[ChatTurn] = Field(default_factory=list, max_length=20)
-    include_profile: bool = False
 
 
 MAX_HISTORY_TURNS = 8
@@ -134,6 +141,22 @@ def _prepare_history(history: list[ChatTurn] | None) -> list[dict[str, str]]:
     return out
 
 
+def _validate_chat_message(raw: str) -> str:
+    """Trim and enforce the size cap on a chat message.
+
+    Shared by POST /chat and GET /chat/stream so both entrypoints
+    apply the same bounds. Raises 400 on empty-after-strip and 413
+    on oversize — the payload-too-large status is appropriate here
+    since the body sailed past FastAPI's Pydantic validation.
+    """
+    message = (raw or "").strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="empty_message")
+    if len(message) > MAX_CHAT_MESSAGE_CHARS:
+        raise HTTPException(status_code=413, detail="message_too_large")
+    return message
+
+
 @router.post("/chat")
 async def chat(body: ChatBody, store: UserStore = Depends(get_user_store)) -> dict[str, Any]:
     # Per-user token-bucket check sits BEFORE the LLM gate and before
@@ -141,7 +164,8 @@ async def chat(body: ChatBody, store: UserStore = Depends(get_user_store)) -> di
     # runaway client can't hammer the endpoint. Raises 429 with
     # Retry-After when the bucket is dry.
     chat_rate_limit_gate(store.user_id)
-    return await _handle_message(store, body.message, _prepare_history(body.history))
+    message = _validate_chat_message(body.message)
+    return await _handle_message(store, message, _prepare_history(body.history))
 
 
 @router.get("/chat/stream")
@@ -153,10 +177,13 @@ async def chat_stream(
     POST /v1/chat receives via the request body.
     """
     chat_rate_limit_gate(store.user_id)
+    message = _validate_chat_message(message)
+
+    validated_message = message
 
     async def event_source() -> AsyncIterator[dict[str, Any]]:
         history = await _history_from_store(store)
-        result = await _handle_message(store, message, history)
+        result = await _handle_message(store, validated_message, history)
         for chunk in _chunk(result["reply"], size=64):
             yield {"event": "delta", "data": json.dumps({"text": chunk})}
             await asyncio.sleep(0.02)
@@ -2154,10 +2181,14 @@ async def _finalize_cal_change(
             event_id=event_id,
             err=str(err),
         )
+        # Never surface upstream exception text — it can leak internal
+        # identifiers, request ids, or credential-adjacent hints. Log
+        # the full trace server-side (above) and return a generic
+        # message the user can act on.
         verb = {"create": "booking", "move": "move", "delete": "delete"}[action]
         return await _ack_no_agent(
             store,
-            f"Google didn\u2019t accept the {verb} ({err}). Try again in a moment?",
+            f"Google didn\u2019t accept the {verb}. Try again in a moment?",
         )
 
     asyncio.create_task(_refresh_after_book(store))
@@ -3126,7 +3157,7 @@ async def _write_reply(store: UserStore, text: str) -> None:
         turn_id=new_id("tout"),
         role=ChatRole.ASSISTANT,
         text=text,
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(UTC),
     )
     await store.chat_turns.upsert(reply)
 

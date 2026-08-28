@@ -6,7 +6,7 @@ import asyncio
 import inspect
 import json
 import shutil
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Generic, TypeVar
 
@@ -100,7 +100,7 @@ class LocalRepo(Generic[T]):
 
             updated = item.model_copy(update={"version": getattr(item, "version", 1)})
             if hasattr(updated, "updated_at"):
-                updated = updated.model_copy(update={"updated_at": datetime.utcnow()})
+                updated = updated.model_copy(update={"updated_at": datetime.now(UTC)})
 
             payload = json.loads(updated.model_dump_json())
             for i, row in enumerate(rows):
@@ -122,7 +122,7 @@ class LocalRepo(Generic[T]):
         async with self._lock():
             rows = self._load_unlocked()
             index = {row.get(self._id_field): i for i, row in enumerate(rows)}
-            now = datetime.utcnow()
+            now = datetime.now(UTC)
             for item in items:
                 id_ = getattr(item, self._id_field)
                 updated = item.model_copy(update={"version": getattr(item, "version", 1)})

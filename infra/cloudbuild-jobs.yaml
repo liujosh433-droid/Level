@@ -1,3 +1,8 @@
+substitutions:
+  _REGION: us-central1
+  _REPO: level
+  _IMAGE: jobs
+  _TAG: ${COMMIT_SHA}
 steps:
   - name: gcr.io/cloud-builders/docker
     args:
@@ -5,10 +10,13 @@ steps:
       - -f
       - packages/jobs/Dockerfile
       - -t
-      - us-central1-docker.pkg.dev/project-c31bdcdc-f293-47c2-a4c/level/jobs:latest
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_IMAGE}:${_TAG}
+      - -t
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_IMAGE}:latest
       - .
 images:
-  - us-central1-docker.pkg.dev/project-c31bdcdc-f293-47c2-a4c/level/jobs:latest
+  - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_IMAGE}:${_TAG}
+  - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_IMAGE}:latest
 timeout: 1800s
 options:
   logging: CLOUD_LOGGING_ONLY

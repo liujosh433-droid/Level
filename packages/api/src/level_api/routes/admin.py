@@ -7,7 +7,7 @@ Cloud-Trace-style tree without needing a separate spans store.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -18,38 +18,50 @@ from level_core.calendar.circuit_breaker import circuit_stats
 from level_core.config import get_settings
 from level_core.storage.base import UserStore
 
-from level_api.deps import get_user_store
+from level_api.deps import get_current_user_id, get_user_store
 from level_api.rate_limit import rate_limit_stats
 from level_api.routes._fast_path_registry import to_dict as fast_paths_snapshot
 
 router = APIRouter()
 
 
-def _require_admin() -> None:
+def _require_admin_enabled() -> None:
+    """Feature-flag gate. Layered ON TOP of session auth, never in place of it.
+
+    Every /v1/admin/* route requires a valid session cookie via
+    ``Depends(get_user_store)`` or ``Depends(get_current_user_id)``.
+    This helper hides the whole admin surface when the operator has
+    disabled tracing (e.g. to shrink the public API surface further).
+    """
     if not get_settings().level_admin_traces_enabled:
         raise HTTPException(status_code=404, detail="disabled")
 
 
 @router.get("/agents")
-async def list_agents() -> dict[str, Any]:
+async def list_agents(
+    _user_id: str = Depends(get_current_user_id),
+) -> dict[str, Any]:
     """Live snapshot of the Agent Registry.
 
     Every LLM the system talks to appears here with its safety class,
     cost tier, schema, version, and prompt hash. Compare against
     `level_core.agents.*` modules to catch drift.
     """
-    _require_admin()
+    _require_admin_enabled()
     return {"agents": registry_snapshot()}
 
 
 @router.get("/agents/verify")
-async def verify_agent_identity(token: str) -> dict[str, Any]:
+async def verify_agent_identity(
+    token: str,
+    _user_id: str = Depends(get_current_user_id),
+) -> dict[str, Any]:
     """Verify a stamped identity token from an audit row.
 
     Grader script can pull `model` from any audit row, split on `||`,
     and hit this endpoint. Returns `verified=False` on tamper.
     """
-    _require_admin()
+    _require_admin_enabled()
     identity = verify_identity(token)
     if identity is None:
         return {"verified": False}
@@ -62,7 +74,9 @@ async def verify_agent_identity(token: str) -> dict[str, Any]:
 
 
 @router.get("/intents")
-async def list_intents() -> dict[str, Any]:
+async def list_intents(
+    _user_id: str = Depends(get_current_user_id),
+) -> dict[str, Any]:
     """Every deterministic chat intent Level handles without the router LLM.
 
     Complements /agents (which lists LLM agents) with the FAST side of
@@ -73,7 +87,7 @@ async def list_intents() -> dict[str, Any]:
     automatically. Chit-chat and priority intents at the top of the
     list ensure common inputs don't wake the LLM.
     """
-    _require_admin()
+    _require_admin_enabled()
     # Importing chat.py at request time ensures the fast-path
     # register(...) calls (which run at import time) have populated
     # the registry. Circular-safe: admin doesn't import chat directly.
@@ -82,33 +96,39 @@ async def list_intents() -> dict[str, Any]:
 
 
 @router.get("/router_cache")
-async def router_cache() -> dict[str, Any]:
+async def router_cache(
+    _user_id: str = Depends(get_current_user_id),
+) -> dict[str, Any]:
     """Router-decision LRU cache stats.
 
     Shows hit/miss counts + hit-rate so the demo video can prove the
     cache is doing work. Every hit here is a Gemini Flash call NOT
     made — direct cost savings and 429 pressure relief.
     """
-    _require_admin()
+    _require_admin_enabled()
     return router_cache_stats()
 
 
 @router.get("/rate_limit")
-async def rate_limit_snapshot() -> dict[str, Any]:
+async def rate_limit_snapshot(
+    _user_id: str = Depends(get_current_user_id),
+) -> dict[str, Any]:
     """Chat HTTP-layer token-bucket stats."""
-    _require_admin()
+    _require_admin_enabled()
     return rate_limit_stats()
 
 
 @router.get("/calendar_circuit")
-async def calendar_circuit() -> dict[str, Any]:
+async def calendar_circuit(
+    _user_id: str = Depends(get_current_user_id),
+) -> dict[str, Any]:
     """Per-user circuit-breaker state for Google Calendar calls.
 
     Shows which users' Google backends we\u2019ve stopped hammering,
     when the circuit will half-open, and how many failures accumulated
     in the sliding window.
     """
-    _require_admin()
+    _require_admin_enabled()
     return circuit_stats()
 
 
@@ -123,12 +143,36 @@ async def traces(
     the root via parent_audit_id. Depth is capped to keep the payload
     predictable — Level agents don't nest > 3 today.
     """
-    _require_admin()
-    entries = [a.model_dump(mode="json") for a in await store.ai_audit.list()]
-    entries.sort(key=lambda a: a["created_at"], reverse=True)
-    trimmed = entries[:limit]
+    _require_admin_enabled()
+    # Cap at a hard ceiling so the endpoint is bounded even if a caller
+    # passes limit=100000. Backend fetches at most `fetch_cap` rows so
+    # we don't scan the entire audit collection on every poll.
+    hard_cap = 500
+    fetch_cap = max(1, min(int(limit), hard_cap))
+    latest = await _list_latest_audit(store, fetch_cap)
+    entries = [a.model_dump(mode="json") for a in latest]
 
-    return {"traces": trimmed, "grouped": _group_by_trace(trimmed)}
+    return {"traces": entries, "grouped": _group_by_trace(entries)}
+
+
+async def _list_latest_audit(store: UserStore, limit: int) -> list[Any]:
+    """Fetch the newest `limit` audit rows, using an ordered query when available.
+
+    The Firestore backend exposes a bounded query helper on the base repo
+    (``list_latest`` if implemented); we fall back to the full-scan
+    ``list()`` only if the store hasn't opted into pagination yet. Either
+    way the ceiling in the caller keeps the payload bounded.
+    """
+    latest_fn = getattr(store.ai_audit, "list_latest", None)
+    if callable(latest_fn):
+        try:
+            return await latest_fn(limit=limit, order_by="created_at", desc=True)
+        except TypeError:
+            # Backend implements list_latest(limit) without kwargs.
+            return await latest_fn(limit)
+    rows = await store.ai_audit.list()
+    rows.sort(key=lambda r: getattr(r, "created_at", ""), reverse=True)
+    return rows[:limit]
 
 
 def _group_by_trace(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -177,7 +221,7 @@ def _group_by_trace(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
 @router.get("/store")
 async def store_snapshot(store: UserStore = Depends(get_user_store)) -> dict[str, Any]:
     """Live per-user JSON the demo inspector diffs as Level writes."""
-    _require_admin()
+    _require_admin_enabled()
     profile = dict(await store.profile.read() or {})
     agenda = await store.agenda.list()
     agenda.sort(key=lambda e: e.time.start, reverse=True)
@@ -198,7 +242,7 @@ async def store_snapshot(store: UserStore = Depends(get_user_store)) -> dict[str
 
     return {
         "user_id": store.user_id,
-        "fetched_at": datetime.utcnow().isoformat() + "Z",
+        "fetched_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "profile": {
             "email": profile.get("email"),
             "tz": profile.get("tz"),

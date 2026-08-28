@@ -1,5 +1,16 @@
 rules_version = '2';
 
+// Rules cover the direct-Firestore client surface (rules bypass the
+// FastAPI session guard). Every Level backend today goes through the
+// Admin SDK, so these rules are defense-in-depth: they make sure that
+// if a Firebase client is ever wired up authed as a Firestore user,
+// it can only READ non-secret collections, and cannot WRITE anywhere.
+//
+// Client writes are explicitly denied — the API is the single source
+// of writes so every mutation runs through the same
+// auditing/idempotency/gating code. The Admin SDK ignores rules and
+// keeps working from the server.
+
 service cloud.firestore {
   match /databases/{database}/documents {
 
@@ -8,23 +19,30 @@ service cloud.firestore {
     }
 
     match /users/{uid} {
+      // User doc itself contains no secrets today, but keep the
+      // write closed so schema evolution goes through the API.
       allow read: if isOwner(uid);
       allow write: if false;
 
       match /care_people/{docId} {
-        allow read, write: if isOwner(uid);
+        allow read: if isOwner(uid);
+        allow write: if false;
       }
       match /usuals/{docId} {
-        allow read, write: if isOwner(uid);
+        allow read: if isOwner(uid);
+        allow write: if false;
       }
       match /priorities/{docId} {
-        allow read, write: if isOwner(uid);
+        allow read: if isOwner(uid);
+        allow write: if false;
       }
       match /reminders/{docId} {
-        allow read, write: if isOwner(uid);
+        allow read: if isOwner(uid);
+        allow write: if false;
       }
       match /contacts/{docId} {
-        allow read, write: if isOwner(uid);
+        allow read: if isOwner(uid);
+        allow write: if false;
       }
       match /agenda_cache/{docId} {
         allow read: if isOwner(uid);
@@ -39,14 +57,20 @@ service cloud.firestore {
         allow write: if false;
       }
       match /negatives/{docId} {
-        allow read, write: if isOwner(uid);
+        allow read: if isOwner(uid);
+        allow write: if false;
       }
       match /ai_audit/{docId} {
         allow read: if isOwner(uid);
         allow write: if false;
       }
+      // state/* holds OAuth tokens (state/google_oauth), gate
+      // counters, calendar sync cursors, and pending confirmation
+      // tokens. Absolutely no client access — reads leak refresh
+      // tokens; writes could re-anchor a poisoned pending draft or
+      // reset the rate/cost counters.
       match /state/{docId} {
-        allow read: if isOwner(uid);
+        allow read: if false;
         allow write: if false;
       }
     }

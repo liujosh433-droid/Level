@@ -53,12 +53,13 @@ def find_candidate_slots(
     starts_at = starts_at or datetime.now(UTC)
     tz = tz or resolve_tz()
 
-    busy = sorted(
-        [
-            (e.time.start.astimezone(UTC), e.time.end.astimezone(UTC))
-            for e in events
-        ]
-    )
+    # Pre-index every event by (start_utc, end_utc, event_id) once so
+    # the per-slot overlap check is O(log N + k) instead of O(N). k is
+    # the number of overlapping events — small in practice, unbounded
+    # in the worst case (all-day event that spans everything), which
+    # is why we still return every overlapping id rather than short-
+    # circuiting on the first hit.
+    busy_index = _build_busy_index(events)
 
     slots: list[CandidateSlot] = []
     duration = timedelta(minutes=duration_minutes)
@@ -74,7 +75,7 @@ def find_candidate_slots(
             slot_end = slot_start + duration
             utc_start = slot_start.astimezone(UTC)
             utc_end = slot_end.astimezone(UTC)
-            conflicts = _overlap_ids(busy, utc_start, utc_end, events)
+            conflicts = _overlapping_event_ids(busy_index, utc_start, utc_end)
             slots.append(
                 CandidateSlot(
                     start=utc_start,
@@ -88,18 +89,80 @@ def find_candidate_slots(
     return slots
 
 
-def _overlap_ids(
-    busy: list[tuple[datetime, datetime]],
-    slot_start: datetime,
-    slot_end: datetime,
-    events: list[CachedEvent],
-) -> list[str]:
-    ids: list[str] = []
+@dataclass
+class _BusyIndex:
+    """Sorted-by-start event index used for O(log N + k) overlap lookup.
+
+    ``starts`` mirrors ``entries`` and is populated from
+    ``entries[i][0]`` so we can bisect against a plain list of times
+    without wrapping bisect_right in a key function. ``max_end_prefix``
+    is the running-max end time across entries[:i+1]; used to prune the
+    scan even when many events have earlier start times but shorter
+    end times.
+    """
+
+    entries: list[tuple[datetime, datetime, str]]
+    starts: list[datetime]
+    max_end_prefix: list[datetime]
+
+
+def _build_busy_index(events: list[CachedEvent]) -> _BusyIndex:
+    normalized: list[tuple[datetime, datetime, str]] = []
     for e in events:
-        s = e.time.start.astimezone(UTC)
-        t = e.time.end.astimezone(UTC)
-        if s < slot_end and t > slot_start:
-            ids.append(e.event_id)
+        try:
+            s = e.time.start.astimezone(UTC)
+            t = e.time.end.astimezone(UTC)
+        except Exception:  # noqa: BLE001 - malformed timestamps shouldn't crash scheduling
+            continue
+        if t <= s:
+            continue
+        normalized.append((s, t, e.event_id))
+    normalized.sort(key=lambda x: x[0])
+    starts = [e[0] for e in normalized]
+    max_end_prefix: list[datetime] = []
+    running_max: datetime | None = None
+    for _, end, _id in normalized:
+        running_max = end if running_max is None else max(running_max, end)
+        max_end_prefix.append(running_max)
+    return _BusyIndex(
+        entries=normalized, starts=starts, max_end_prefix=max_end_prefix
+    )
+
+
+def _overlapping_event_ids(
+    index: _BusyIndex, slot_start: datetime, slot_end: datetime
+) -> list[str]:
+    """Return the ids of events overlapping [slot_start, slot_end).
+
+    Half-open interval matches the previous implementation (an event
+    that ends at slot_start does NOT conflict). Because entries are
+    sorted by start we can:
+
+      * upper-bound the scan at entries whose start < slot_end
+      * skip entire prefixes when max_end_prefix[i] <= slot_start —
+        no earlier event could still be active by then.
+    """
+    import bisect
+
+    # entries[:cutoff] are the events that started before slot_end;
+    # every event past cutoff starts at or after slot_end and cannot
+    # overlap.
+    cutoff = bisect.bisect_left(index.starts, slot_end)
+    if cutoff == 0:
+        return []
+    # Prune when even the deepest end time before ``cutoff`` is
+    # already <= slot_start — no overlap possible in the prefix.
+    if index.max_end_prefix[cutoff - 1] <= slot_start:
+        return []
+
+    ids: list[str] = []
+    for i in range(cutoff):
+        s, t, event_id = index.entries[i]
+        if t <= slot_start:
+            continue
+        if s >= slot_end:
+            continue
+        ids.append(event_id)
     return ids
 
 

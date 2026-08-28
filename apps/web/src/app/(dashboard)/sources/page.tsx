@@ -148,8 +148,8 @@ export default function SourcesPage() {
       <section className="card">
         <h2>AI calls today</h2>
         <p className={styles.meta}>
-          Total Gemini calls in this account&apos;s log:{" "}
-          <strong>{status?.ai_calls_total ?? 0}</strong>. See the live trace under{" "}
+          Gemini calls counted so far in this UTC day:{" "}
+          <strong>{status?.ai_calls_today ?? 0}</strong>. See the live trace under{" "}
           <a href="/admin/traces">Admin - traces</a>.
         </p>
       </section>

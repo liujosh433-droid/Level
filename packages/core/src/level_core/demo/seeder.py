@@ -34,7 +34,7 @@ the session cookie persists and the seeder only fires on explicit
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
 from level_core.calendar.proactive import regenerate_proactive_cards
@@ -441,6 +441,6 @@ async def _write_profile(store: UserStore, scenario: ScenarioConfig) -> None:
         calendar_window_days_forward=28,
         **{
             PROFILE_DEMO_KEY: scenario.id,
-            PROFILE_DEMO_SEEDED_AT_KEY: datetime.utcnow().isoformat(),
+            PROFILE_DEMO_SEEDED_AT_KEY: datetime.now(UTC).isoformat(),
         },
     )

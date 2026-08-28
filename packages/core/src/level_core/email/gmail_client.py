@@ -28,12 +28,27 @@ async def send_email(
     body: str,
     idempotency_key: str,
 ) -> SentEmail:
+    """Send an email via the user's Gmail account.
+
+    ``idempotency_key`` is used to stamp the outgoing MIME message
+    with a ``Message-Id`` header so a retry from the same caller
+    lands as the same thread instead of a duplicate. The
+    HTTP-level idempotency guard in ``routes/email.py`` still
+    protects the endpoint; this header protects the recipient's
+    inbox from seeing the same draft twice when a transient network
+    error causes a resend.
+    """
     subject = sanitize_email_text(subject)[:200]
     body = sanitize_email_text(body)
 
     msg = EmailMessage()
     msg["To"] = to
     msg["Subject"] = subject
+    if idempotency_key:
+        # RFC 5322 Message-Id needs an "id-left@id-right" form. We
+        # scope with a stable ``level.local`` label so the recipient's
+        # MUA can dedupe cleanly across retries.
+        msg["Message-Id"] = f"<{idempotency_key}@level.local>"
     msg.set_content(body)
 
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()

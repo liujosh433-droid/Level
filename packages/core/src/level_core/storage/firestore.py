@@ -2,12 +2,20 @@
 
 Each collection lives at `users/{uid}/{collection}/{doc_id}`.
 KV slots live at `users/{uid}/state/{slot}`.
+
+All async methods here wrap the underlying google-cloud-firestore
+Python client (which is synchronous) via ``asyncio.to_thread``. That
+matters: the raw client would block the FastAPI event loop for the
+duration of every Firestore round trip, so under any real concurrency
+a single slow request would stall every other in-flight chat, sync,
+or admin call on the same instance.
 """
 
 from __future__ import annotations
 
+import asyncio
 import inspect
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Awaitable, Callable, Generic, TypeVar
 
 from pydantic import BaseModel
@@ -68,65 +76,150 @@ class FirestoreRepo(Generic[T]):
         )
 
     async def get(self, id_: str) -> T | None:
-        snap = self._col().document(id_).get()
-        if not snap.exists:
-            return None
-        return self._model.model_validate(snap.to_dict())
+        def _sync() -> dict[str, Any] | None:
+            snap = self._col().document(id_).get()
+            return snap.to_dict() if snap.exists else None
+
+        data = await asyncio.to_thread(_sync)
+        return self._model.model_validate(data) if data is not None else None
 
     async def list(self) -> list[T]:
-        return [self._model.model_validate(d.to_dict()) for d in self._col().stream()]
+        def _sync() -> list[dict[str, Any]]:
+            return [d.to_dict() for d in self._col().stream()]
+
+        rows = await asyncio.to_thread(_sync)
+        return [self._model.model_validate(row) for row in rows]
+
+    async def list_latest(
+        self,
+        limit: int,
+        *,
+        order_by: str = "created_at",
+        desc: bool = True,
+    ) -> list[T]:
+        """Return the newest ``limit`` rows via an indexed query.
+
+        Falls back to a full scan sorted in memory if the backend
+        rejects the query (missing index, etc.); the caller's caller
+        should still cap payload size regardless.
+        """
+        from google.cloud.firestore_v1.base_query import BaseQuery
+
+        direction = BaseQuery.DESCENDING if desc else BaseQuery.ASCENDING
+
+        def _sync() -> list[dict[str, Any]]:
+            try:
+                query = self._col().order_by(order_by, direction=direction).limit(limit)
+                return [d.to_dict() for d in query.stream()]
+            except Exception:
+                # Missing index or unsupported order_by column — degrade
+                # to full scan. Bounded by caller-side ceiling.
+                rows = [d.to_dict() for d in self._col().stream()]
+                rows.sort(key=lambda r: r.get(order_by, ""), reverse=desc)
+                return rows[:limit]
+
+        rows = await asyncio.to_thread(_sync)
+        return [self._model.model_validate(r) for r in rows]
+
+    async def list_since(
+        self, since: datetime, *, field: str = "created_at"
+    ) -> list[T]:
+        """Return every row where ``field >= since``.
+
+        Used by the gate to hydrate counters from ai_audit without
+        scanning the full history. Falls back to full scan when the
+        query fails.
+        """
+        cutoff = since.isoformat()
+
+        def _sync() -> list[dict[str, Any]]:
+            try:
+                query = self._col().where(field, ">=", cutoff)
+                return [d.to_dict() for d in query.stream()]
+            except Exception:
+                return [d.to_dict() for d in self._col().stream()]
+
+        rows = await asyncio.to_thread(_sync)
+        keep: list[T] = []
+        for r in rows:
+            try:
+                model = self._model.model_validate(r)
+            except Exception:  # noqa: BLE001
+                continue
+            keep.append(model)
+        return keep
 
     async def upsert(self, item: T) -> T:
         id_ = getattr(item, self._id_field)
-        doc = self._col().document(id_)
-        existing = doc.get()
-        new_version = (existing.to_dict() or {}).get("version", 0) + 1 if existing.exists else 1
         payload = item.model_dump(mode="json")
-        payload["version"] = new_version
-        if "updated_at" in payload:
-            payload["updated_at"] = datetime.utcnow().isoformat()
-        doc.set(payload)
-        return self._model.model_validate(payload)
+
+        def _sync() -> dict[str, Any]:
+            doc = self._col().document(id_)
+            existing = doc.get()
+            new_version = (
+                (existing.to_dict() or {}).get("version", 0) + 1
+                if existing.exists
+                else 1
+            )
+            payload["version"] = new_version
+            if "updated_at" in payload:
+                payload["updated_at"] = datetime.now(UTC).isoformat()
+            doc.set(payload)
+            return payload
+
+        result = await asyncio.to_thread(_sync)
+        return self._model.model_validate(result)
 
     async def upsert_many(self, items: list[T]) -> None:
         if not items:
             return
-        batch = self._client.batch()
-        pending = 0
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(UTC).isoformat()
+        serialized: list[tuple[str, dict[str, Any]]] = []
         for item in items:
             id_ = getattr(item, self._id_field)
-            doc = self._col().document(id_)
             payload = item.model_dump(mode="json")
             payload["version"] = int(payload.get("version") or 1) + 1
             if "updated_at" in payload:
                 payload["updated_at"] = now
-            batch.set(doc, payload)
-            pending += 1
-            if pending >= 400:
+            serialized.append((id_, payload))
+
+        def _sync() -> None:
+            batch = self._client.batch()
+            pending = 0
+            for id_, payload in serialized:
+                doc = self._col().document(id_)
+                batch.set(doc, payload)
+                pending += 1
+                if pending >= 400:
+                    batch.commit()
+                    batch = self._client.batch()
+                    pending = 0
+            if pending:
                 batch.commit()
-                batch = self._client.batch()
-                pending = 0
-        if pending:
-            batch.commit()
+
+        await asyncio.to_thread(_sync)
 
     async def delete(self, id_: str) -> None:
-        self._col().document(id_).delete()
+        await asyncio.to_thread(lambda: self._col().document(id_).delete())
 
     async def delete_many(self, ids: list[str]) -> None:
         if not ids:
             return
-        batch = self._client.batch()
-        pending = 0
-        for id_ in ids:
-            batch.delete(self._col().document(id_))
-            pending += 1
-            if pending >= 400:
+
+        def _sync() -> None:
+            batch = self._client.batch()
+            pending = 0
+            for id_ in ids:
+                batch.delete(self._col().document(id_))
+                pending += 1
+                if pending >= 400:
+                    batch.commit()
+                    batch = self._client.batch()
+                    pending = 0
+            if pending:
                 batch.commit()
-                batch = self._client.batch()
-                pending = 0
-        if pending:
-            batch.commit()
+
+        await asyncio.to_thread(_sync)
 
 
 class FirestoreKV(KVStore):
@@ -144,17 +237,20 @@ class FirestoreKV(KVStore):
         )
 
     async def read(self) -> dict[str, Any] | None:
-        snap = self._doc().get()
-        return snap.to_dict() if snap.exists else None
+        def _sync() -> dict[str, Any] | None:
+            snap = self._doc().get()
+            return snap.to_dict() if snap.exists else None
+
+        return await asyncio.to_thread(_sync)
 
     async def write(self, value: dict[str, Any]) -> None:
-        self._doc().set(value)
+        await asyncio.to_thread(lambda: self._doc().set(value))
 
     async def update_fields(self, **fields: Any) -> None:
         """Atomic top-level merge (Firestore native `set(..., merge=True)`)."""
         if not fields:
             return
-        self._doc().set(fields, merge=True)
+        await asyncio.to_thread(lambda: self._doc().set(fields, merge=True))
 
     async def mutate(
         self,
@@ -167,26 +263,32 @@ class FirestoreKV(KVStore):
         auto-retry on contention. If a caller needs to `await` inside
         the transform, they must hoist that work above the mutate call
         (see `agents/gate.py::record_charge`).
+
+        The entire transaction runs on a thread so we don't block the
+        event loop for the duration of a Firestore round trip.
         """
         from google.cloud import firestore
 
         doc = self._doc()
 
-        @firestore.transactional  # type: ignore[misc]
-        def _txn(transaction: Any) -> dict[str, Any]:
-            snap = doc.get(transaction=transaction)
-            current = snap.to_dict() if snap.exists else {}
-            result = fn(dict(current))
-            if inspect.isawaitable(result):
-                raise RuntimeError(
-                    "FirestoreKV.mutate does not support async transform "
-                    "functions; do async work outside the transaction."
-                )
-            assert isinstance(result, dict)
-            transaction.set(doc, result)
-            return result
+        def _run() -> dict[str, Any]:
+            @firestore.transactional  # type: ignore[misc]
+            def _txn(transaction: Any) -> dict[str, Any]:
+                snap = doc.get(transaction=transaction)
+                current = snap.to_dict() if snap.exists else {}
+                result = fn(dict(current))
+                if inspect.isawaitable(result):
+                    raise RuntimeError(
+                        "FirestoreKV.mutate does not support async transform "
+                        "functions; do async work outside the transaction."
+                    )
+                assert isinstance(result, dict)
+                transaction.set(doc, result)
+                return result
 
-        return _txn(self._client.transaction())
+            return _txn(self._client.transaction())
+
+        return await asyncio.to_thread(_run)
 
 
 def make_firestore_store(user_id: str) -> UserStore:
@@ -208,8 +310,10 @@ def make_firestore_store(user_id: str) -> UserStore:
         faster in the warm-slot case (previous judge polluted).
         """
         client = _client()
-        client.recursive_delete(
-            client.collection("users").document(user_id)
+        await asyncio.to_thread(
+            lambda: client.recursive_delete(
+                client.collection("users").document(user_id)
+            )
         )
 
     return UserStore(

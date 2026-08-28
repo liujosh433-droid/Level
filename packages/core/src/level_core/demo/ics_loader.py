@@ -31,7 +31,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -279,7 +279,7 @@ def _build_cached_event(
         location=occ.location,
         attendee_tokens=tokens,
         activity_type=activity,
-        classified_at=datetime.utcnow() if activity else None,
+        classified_at=datetime.now(UTC) if activity else None,
         matched_person_ids=matched_person_ids,
         origin="google",
     )

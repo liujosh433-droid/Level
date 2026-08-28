@@ -55,12 +55,38 @@ class TokenBucketLimiter:
     We don't lock: worst case is two concurrent asyncio tasks both
     read the same bucket and both allow. In a chat endpoint that's a
     non-issue - the extra call is one turn of slop, not a bypass.
+
+    Idle-bucket eviction: buckets that haven't been touched for
+    ``idle_ttl_seconds`` are removed opportunistically on each check.
+    Without this the dict grew forever on long-running Cloud Run
+    instances — one entry per distinct user (or IP) even when the
+    bucket sat full at capacity. Eviction happens amortized during
+    normal traffic; there is no background thread.
     """
 
-    def __init__(self, *, capacity: int, refill_per_second: float) -> None:
+    # Buckets untouched for this long are dropped. A bucket at full
+    # capacity is indistinguishable from a bucket that never existed
+    # (same admission decision), so eviction is safe.
+    _DEFAULT_IDLE_TTL_S = 3600.0
+    # Cap the eviction sweep so a single ``check`` never spends more
+    # than O(_MAX_EVICT_PER_CHECK) even under an accumulated backlog.
+    _MAX_EVICT_PER_CHECK = 256
+
+    def __init__(
+        self,
+        *,
+        capacity: int,
+        refill_per_second: float,
+        idle_ttl_seconds: float | None = None,
+    ) -> None:
         self._capacity = float(capacity)
         self._rate = float(refill_per_second)
         self._buckets: dict[str, _Bucket] = {}
+        self._idle_ttl = float(
+            idle_ttl_seconds
+            if idle_ttl_seconds is not None
+            else self._DEFAULT_IDLE_TTL_S
+        )
 
     def _refill(self, bucket: _Bucket, now: float) -> None:
         elapsed = now - bucket.last_refill
@@ -69,8 +95,27 @@ class TokenBucketLimiter:
         bucket.tokens = min(self._capacity, bucket.tokens + elapsed * self._rate)
         bucket.last_refill = now
 
+    def _evict_idle(self, now: float) -> None:
+        """Drop up to _MAX_EVICT_PER_CHECK stale buckets.
+
+        A bucket is stale when its last_refill is older than the idle
+        TTL. We iterate over a snapshot of items so we can pop safely
+        during the walk.
+        """
+        if not self._buckets:
+            return
+        cutoff = now - self._idle_ttl
+        dropped = 0
+        for key, bucket in list(self._buckets.items()):
+            if bucket.last_refill < cutoff:
+                self._buckets.pop(key, None)
+                dropped += 1
+                if dropped >= self._MAX_EVICT_PER_CHECK:
+                    break
+
     def check(self, key: str) -> RateLimitDecision:
         now = time.monotonic()
+        self._evict_idle(now)
         bucket = self._buckets.get(key)
         if bucket is None:
             bucket = _Bucket(self._capacity)
@@ -93,6 +138,7 @@ class TokenBucketLimiter:
             "capacity": self._capacity,
             "refill_per_second": self._rate,
             "active_keys": len(self._buckets),
+            "idle_ttl_seconds": self._idle_ttl,
         }
 
 

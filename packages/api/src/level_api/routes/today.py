@@ -425,7 +425,7 @@ async def put_back_missing_group(
         location=None,
         attendee_tokens=attendee_tokens,
         activity_type=activity,
-        classified_at=datetime.utcnow() if activity else None,
+        classified_at=datetime.now(UTC) if activity else None,
         matched_person_ids=matched_people,
         origin="level",
         level_reason="put_back_missing_usual",

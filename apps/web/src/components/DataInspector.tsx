@@ -439,6 +439,44 @@ export default function DataInspector() {
               <Row key={String(t.turn_id)} k={String(t.role ?? "")} v={String(t.text ?? "")} />
             ))}
           </Section>
+
+          {(() => {
+            // profile["memory_bank"]["memories"] is written by
+            // feedback → keep; render the tail here so the demo can
+            // point at the row appearing after the user thumbs up.
+            const raw = (snap.profile.memory_bank as Record<string, unknown> | undefined)
+              ?.memories;
+            const memories = Array.isArray(raw)
+              ? (raw as Record<string, unknown>[])
+              : [];
+            return (
+              <Section title={`Memory bank (${memories.length})`}>
+                {memories.slice(-5).reverse().map((m, i) => (
+                  <Row
+                    key={String(m.id ?? i)}
+                    k={String((Array.isArray(m.tags) ? m.tags[0] : "keep") ?? "keep")}
+                    v={String(m.text ?? "")}
+                  />
+                ))}
+                {memories.length === 0 && (
+                  <p className={styles.empty}>None yet — thumbs-up an AI reply.</p>
+                )}
+              </Section>
+            );
+          })()}
+
+          <Section title={`Negatives (${snap.negatives.length})`}>
+            {snap.negatives.slice(0, 6).map((n) => (
+              <Row
+                key={String(n.negative_id)}
+                k={String(n.agent ?? "")}
+                v={String(n.value ?? n.reason ?? "")}
+              />
+            ))}
+            {snap.negatives.length === 0 && (
+              <p className={styles.empty}>None yet — thumbs-down an AI reply.</p>
+            )}
+          </Section>
         </div>
       )}
       {open ? (

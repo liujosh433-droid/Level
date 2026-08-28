@@ -202,7 +202,9 @@ export type SourcesStatus = {
   days_back: number | null;
   days_forward: number | null;
   watch: unknown;
-  ai_calls_total: number;
+  // Rolling day count (rows older than the current UTC day roll
+  // off). See routes/sources.py — this used to be a lifetime count.
+  ai_calls_today: number;
 };
 
 export type TraceEntry = {

@@ -67,6 +67,28 @@ _intro_started_at: str | None = None
 _intro_error_at: datetime | None = None
 _intro_error_reason: str | None = None
 
+# Serializes the "check state → decide to schedule" section so two
+# concurrent /intro requests on the same instance can't both pass the
+# in-flight check before ``_intro_started_at`` is visible. Cloud Run
+# still has an instance-count multiplier for a truly concurrent burst
+# during a cold start; the GCS existence check below re-guards that
+# case by short-circuiting once the first generation lands.
+_intro_lock: asyncio.Lock | None = None
+
+
+def _get_intro_lock() -> asyncio.Lock:
+    """Lazily bind to the running event loop.
+
+    Building the Lock at import time attaches it to whichever loop
+    Python happens to have current, which breaks under pytest-asyncio
+    (each test can create a fresh loop). Deferring the construction
+    keeps it loop-local without forcing tests to reset a module-level.
+    """
+    global _intro_lock
+    if _intro_lock is None:
+        _intro_lock = asyncio.Lock()
+    return _intro_lock
+
 
 class IntroResponse(BaseModel):
     ready: bool
@@ -219,40 +241,58 @@ async def about_intro() -> IntroResponse:
         )
 
     global _intro_error_at, _intro_error_reason, _intro_started_at
-    if _intro_error_at is not None:
-        age = (datetime.now(timezone.utc) - _intro_error_at).total_seconds()
-        if age < ERROR_COOLDOWN_SECONDS:
+    # Serialize the "read state → decide to schedule" transition. Two
+    # concurrent polls on the same instance would otherwise both pass
+    # the in-flight check and both call ``asyncio.create_task`` before
+    # ``_intro_started_at`` was globally visible — burning a second
+    # ~$1.20 Veo generation with no benefit.
+    async with _get_intro_lock():
+        # Re-check the GCS cache inside the lock — a peer request may
+        # have completed the generation while we were waiting.
+        existing_in_lock = await asyncio.to_thread(_lookup_intro_url)
+        if existing_in_lock:
             return IntroResponse(
-                ready=False,
-                reason=_intro_error_reason or "veo_unavailable",
-            )
-        _intro_error_at = None
-        _intro_error_reason = None
-
-    started = _parse_iso_datetime(_intro_started_at)
-    if started is not None:
-        age = (datetime.now(timezone.utc) - started).total_seconds()
-        if age < IN_FLIGHT_MAX_AGE_SECONDS:
-            return IntroResponse(
-                ready=False,
-                reason="generating",
-                generating=True,
-                started_at=_intro_started_at,
+                ready=True,
+                video_url=existing_in_lock,
+                poster_url=_intro_cached_poster,
+                model=settings.level_model_veo,
+                cached=True,
             )
 
-    started_at_iso = datetime.now(timezone.utc).isoformat()
-    _intro_started_at = started_at_iso
-    asyncio.create_task(
-        _run_intro_in_background(model=settings.level_model_veo)
-    )
-    logger.info("media.veo.intro_scheduled", model=settings.level_model_veo)
-    return IntroResponse(
-        ready=False,
-        reason="generating",
-        generating=True,
-        started_at=started_at_iso,
-        model=settings.level_model_veo,
-    )
+        if _intro_error_at is not None:
+            age = (datetime.now(timezone.utc) - _intro_error_at).total_seconds()
+            if age < ERROR_COOLDOWN_SECONDS:
+                return IntroResponse(
+                    ready=False,
+                    reason=_intro_error_reason or "veo_unavailable",
+                )
+            _intro_error_at = None
+            _intro_error_reason = None
+
+        started = _parse_iso_datetime(_intro_started_at)
+        if started is not None:
+            age = (datetime.now(timezone.utc) - started).total_seconds()
+            if age < IN_FLIGHT_MAX_AGE_SECONDS:
+                return IntroResponse(
+                    ready=False,
+                    reason="generating",
+                    generating=True,
+                    started_at=_intro_started_at,
+                )
+
+        started_at_iso = datetime.now(timezone.utc).isoformat()
+        _intro_started_at = started_at_iso
+        asyncio.create_task(
+            _run_intro_in_background(model=settings.level_model_veo)
+        )
+        logger.info("media.veo.intro_scheduled", model=settings.level_model_veo)
+        return IntroResponse(
+            ready=False,
+            reason="generating",
+            generating=True,
+            started_at=started_at_iso,
+            model=settings.level_model_veo,
+        )
 
 
 async def _run_intro_in_background(*, model: str) -> None:
@@ -318,7 +358,7 @@ async def daily_chime(
     chime_cache[mood] = {
         "audio_url": result.get("audio_url"),
         "model": settings.level_model_lyria,
-        "generated_at": datetime.utcnow().isoformat(),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
     }
     cache["chime"] = chime_cache
     await _write_cache(store, cache)
@@ -423,7 +463,6 @@ async def _generate_veo(*, prompt: str, model: str) -> dict[str, str] | None:
     """
     try:
         from google import genai
-        from google.genai import types  # noqa: F401 - kept for future config
     except ImportError:  # pragma: no cover - runtime env
         logger.warning("media.veo.no_sdk")
         return None

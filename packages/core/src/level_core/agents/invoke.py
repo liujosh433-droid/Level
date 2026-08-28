@@ -189,7 +189,19 @@ async def invoke_with_retry(
                     return gemma
                 raise QuotaExhausted(_parse_retry_after(e), str(e)) from e
             code = getattr(e, "code", None) or getattr(e, "status_code", None)
-            if code and int(code) not in (500, 502, 503, 504):
+            # Fail fast on anything that isn't a transient 5xx. The
+            # prior implementation retried when ``code is None``, which
+            # meant a programming error (TypeError, AttributeError) or
+            # a misconfigured backend (auth, network) burned ~3s of
+            # retry budget before surfacing — hides the root cause and
+            # lengthens tail latency for real bugs.
+            if code is None:
+                raise
+            try:
+                code_int = int(code)
+            except (TypeError, ValueError):
+                raise
+            if code_int not in (500, 502, 503, 504):
                 raise
             if attempt < 2:
                 await asyncio.sleep(delays[attempt])

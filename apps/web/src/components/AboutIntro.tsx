@@ -12,6 +12,15 @@ interface IntroResponse {
   ready: boolean;
   video_url?: string | null;
   generating?: boolean;
+  model?: string | null;
+}
+
+function veoCredit(model: string | null | undefined): string {
+  const raw = (model ?? "").toLowerCase();
+  const ver = raw.match(/veo-(\d+\.\d+)/);
+  const version = ver ? ver[1] : "3.1";
+  if (raw.includes("fast")) return `Veo ${version} Fast`;
+  return `Veo ${version}`;
 }
 
 /**
@@ -21,6 +30,7 @@ interface IntroResponse {
  */
 export default function AboutIntro() {
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [model, setModel] = useState<string | null>(null);
   const [generating, setGenerating] = useState(false);
 
   useEffect(() => {
@@ -33,6 +43,7 @@ export default function AboutIntro() {
         if (cancelled) return;
         if (data.ready && data.video_url) {
           setVideoUrl(data.video_url);
+          setModel(data.model ?? null);
           setGenerating(false);
           return;
         }
@@ -80,7 +91,9 @@ export default function AboutIntro() {
           />
         )}
       </div>
-      {generating && !videoUrl ? (
+      {videoUrl ? (
+        <p className={styles.credit}>Generated with {veoCredit(model)}</p>
+      ) : generating ? (
         <p className={styles.note}>Cooking a short Level film. This only happens once.</p>
       ) : null}
     </div>

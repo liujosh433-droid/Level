@@ -192,7 +192,7 @@ Every number said in the recording is above. Do not paraphrase them into a stron
 - Hear my day: chime + TTS. **6 seconds.**
 - `/admin/traces` waterfall with parent→child edges. **8 seconds.**
 - `/v1/admin/agents` JSON scroll. **4 seconds.**
-- Veo weekly recap (full 15-second clip in one take). **15 seconds.**
+- Veo weekly recap (full 8-second clip in one take). **8 seconds.**
 - Architecture diagram slow pan across the six planes. **8 seconds.**
 
 Keep these in a folder called `demo-broll/` on the recording machine. Every one is a safety net.

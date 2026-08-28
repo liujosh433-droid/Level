@@ -74,10 +74,12 @@ class Settings(BaseSettings):
     #   * Veo 3.0 preview was retired in April 2026. Defaulting to
     #     ``veo-3.0-generate-preview`` (what shipped originally)
     #     returned "veo_unavailable" on every call.
-    #   * Fast is 2x cheaper and equally good for a 15-second
+    #   * Fast is ~2x cheaper and equally good for an 8-second
     #     stylistic recap loop, so it's the default. Bump to
     #     ``veo-3.1-generate-001`` via env if you need higher
-    #     fidelity or first-and-last-frame control.
+    #     fidelity or first-and-last-frame control. Veo 3.x
+    #     supports 4/6/8-second clips only; the SDK default is
+    #     8s and we don't override.
     #
     # Lyria 3 model ID has to be one of the Interactions API models
     # (``lyria-3-clip-preview`` = fixed 30-second clip,
@@ -89,6 +91,16 @@ class Settings(BaseSettings):
     level_model_veo: str = "veo-3.1-fast-generate-001"
     level_model_lyria: str = "lyria-3-clip-preview"
     level_media_enabled: bool = False
+
+    # Regenerate-button quota. The initial cold generation is
+    # already implicitly rate-limited by the per-ISO-week cache
+    # (1 auto-generation per user per week), so this only gates
+    # the /v1/media/recap?force=true path used by the Regenerate
+    # button. At ~$1.20/generation on Veo 3.1 Fast, a spammed
+    # button could burn credits fast, especially during a demo.
+    # 3 per week gives users room to iterate on a bad output
+    # without opening the door to unbounded spend.
+    level_veo_max_regens_per_week: int = 3
 
     level_cal_days_back: int = Field(default=14, ge=1, le=365)
     level_cal_days_forward: int = Field(default=28, ge=1, le=365)

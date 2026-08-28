@@ -130,9 +130,10 @@ for the full lifecycle + security + scalability walk-through.
 
 ## The bonus models
 
-- **Veo 3** on `/v1/media/recap`: a 15-second cinematic weekly recap
-  cached per ISO week per user. Prompt is built from category labels
-  + priority content words — no PII.
+- **Veo 3.1 Fast** on `/v1/media/recap`: an 8-second cinematic weekly
+  recap cached per ISO week per user. Prompt is built from category
+  labels + priority content words — no PII. Regenerations are
+  budget-capped (3/week/user) so demo credits can't be spammed away.
 - **Lyria** on `/v1/media/chime`: a calm / hopeful / energetic chime
   that plays around "Hear my day". Same PII-free approach; one prompt
   per mood, so the whole app shares a small chime library.

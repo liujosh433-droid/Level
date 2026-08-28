@@ -406,10 +406,26 @@ wrong region): the endpoint returns `{ready: false, reason: "..."}`,
 and the UI shows the placeholder with a plain-English explanation.
 It never breaks the page.
 
-Cost: Veo 3.1 Fast is ~$0.50-1 per 15-second 720p clip; Veo 3.1
-Standard is roughly 2x that. The endpoint caches per user per ISO
-week so a judge clicking around only pays for one clip a week.
-Lyria clips are cached at the app level per mood (three total).
+Cost: Veo 3.1 Fast is ~$0.15/sec generated (~$1.20 for an 8s
+clip at 720p); Veo 3.1 Standard runs $0.40-0.75/sec. The endpoint
+caches per user per ISO week so a judge clicking around only pays
+for one auto-generation a week. The Regenerate button is
+additionally budget-capped at
+`LEVEL_VEO_MAX_REGENS_PER_WEEK` (default `3`) per user per ISO
+week so a runaway click can't blow the demo budget - the /week
+tile shows "N/M left this week" preemptively and disables the
+button when the quota is used up. Lyria clips are cached at the
+app level per mood (three total).
+
+Latency: Veo 3.1 Fast on Vertex is a wide distribution. P50 lands
+in 60-90 seconds, P90 in 2-3 minutes, and P99 in 4-6 minutes
+under peak load. The /v1/media/recap endpoint spawns a background
+task and polls up to 10 minutes; the frontend shows a live
+elapsed counter with copy that softens at 3 minutes ("taking
+longer than usual") so a slow-but-legit run doesn't read as
+broken. Users can close the tab at any point - the background
+task keeps running and the video will be cached and instant on
+their next visit.
 
 ## Regenerating the architecture diagram
 

@@ -28,6 +28,13 @@
   max-width: 42rem;
 }
 
+.regenerateBox {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+
 .regenerate {
   align-self: flex-start;
   padding: 6px 12px;
@@ -37,12 +44,23 @@
   color: var(--ink, #1f3238);
   font-size: 0.82rem;
   cursor: pointer;
-  transition: background 120ms ease;
+  transition: background 120ms ease, opacity 120ms ease;
   white-space: nowrap;
 }
 
-.regenerate:hover {
+.regenerate:hover:not(:disabled) {
   background: rgba(0, 0, 0, 0.04);
+}
+
+.regenerate:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.quotaNote {
+  font-size: 0.72rem;
+  color: var(--ink-soft, #55707a);
+  font-variant-numeric: tabular-nums;
 }
 
 .videoFrame {

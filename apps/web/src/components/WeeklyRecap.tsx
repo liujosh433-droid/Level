@@ -5,7 +5,7 @@ import { api } from "@/lib/api";
 import styles from "./WeeklyRecap.module.css";
 
 /**
- * 15-second Veo-generated video summarizing this week's caregiving
+ * 8-second Veo-generated video summarizing this week's caregiving
  * rhythm. Fetches `/v1/media/recap`, which is deterministic +
  * per-ISO-week cached on the backend, so repeat visits are free.
  *
@@ -34,39 +34,51 @@ interface RecapResponse {
   cached?: boolean;
   generating?: boolean;
   started_at?: string | null;
+  regenerations_used?: number | null;
+  regenerations_max?: number | null;
 }
 
 const REASON_COPY: Record<string, string> = {
   media_disabled:
-    "Weekly recap video is off in this deployment. Set LEVEL_MEDIA_ENABLED=true and enable Veo 3 in your Vertex project to turn it on.",
+    "Weekly recap video is off in this deployment. Set LEVEL_MEDIA_ENABLED=true and enable Veo 3.1 in your Vertex project to turn it on.",
   veo_unavailable:
     "Couldn't reach Veo just now. This can happen if the model isn't enabled in your Vertex region or you're out of quota; the next call will retry.",
   veo_no_output:
     "Veo finished but returned no video. Try again in a moment; the model occasionally returns empty on the free-tier preview.",
+  regeneration_limit_reached:
+    "You've used this week's regeneration budget. This demo runs on a bounded Veo credit pool (~$1.20 per generation on Veo 3.1 Fast), so we cap regenerations per user per week. The recap will refresh automatically on Monday.",
 };
 
 // Poll cadence while generation is in flight. 6s is fast enough
 // that the tile flips within a few seconds of Veo finishing, slow
-// enough to keep the request rate below one per five seconds so a
-// user leaving /week open doesn't churn Cloud Run request slots.
+// enough to keep the request rate low so a user leaving /week
+// open doesn't churn Cloud Run request slots.
 const POLL_INTERVAL_MS = 6000;
 // Overall polling ceiling. Must match the backend's Veo polling
-// ceiling (VEO_POLL_CEILING_SECONDS) so the frontend gives up at
-// roughly the same moment the background task does - not sooner
-// (leaves the user staring at a "failed" tile while the backend
-// is still working) and not later (leaves the tile pretending to
-// generate after the task has already given up).
-const POLL_TIMEOUT_MS = 300_000;
-// Elapsed threshold past which we swap the "usually 30-90s" copy
-// for a "taking longer than usual" hint. Users tolerate a spinner
-// much better when it acknowledges it's slow.
-const SLOW_HINT_ELAPSED_MS = 90_000;
+// ceiling (VEO_POLL_CEILING_SECONDS = 600s) so the frontend gives
+// up at roughly the same moment the background task does - not
+// sooner (leaves the user staring at a "failed" tile while the
+// backend is still working) and not later (leaves the tile
+// pretending to generate after the task has already given up).
+const POLL_TIMEOUT_MS = 600_000;
+// Elapsed threshold past which we swap the "usually 1-3 min"
+// copy for a "taking longer than usual" hint. Fired at the P50
+// upper bound so the copy stays accurate through the typical
+// generation window and only softens when we're genuinely slow.
+const SLOW_HINT_ELAPSED_MS = 180_000;
 
 function elapsedSeconds(startedAt: string | null): number | null {
   if (!startedAt) return null;
   const started = Date.parse(startedAt);
   if (Number.isNaN(started)) return null;
   return Math.max(0, Math.round((Date.now() - started) / 1000));
+}
+
+function formatElapsed(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const min = Math.floor(seconds / 60);
+  const rem = seconds % 60;
+  return rem === 0 ? `${min}m` : `${min}m ${rem}s`;
 }
 
 function reasonCopy(reason: string | null | undefined): string {
@@ -213,19 +225,40 @@ export default function WeeklyRecap() {
         <div>
           <h2 className={styles.title}>This week&apos;s recap</h2>
           <p className={styles.subtitle}>
-            A 15-second cinematic loop of your week - generated once, cached per ISO week.
+            An 8-second cinematic loop of your week - generated once, cached per ISO week.
             Category labels only; no names or event bodies leave your account for the video prompt.
           </p>
         </div>
-        {state.kind === "ready" && (
-          <button
-            type="button"
-            className={styles.regenerate}
-            onClick={() => void fetchRecap("force")}
-          >
-            Regenerate
-          </button>
-        )}
+        {state.kind === "ready" && (() => {
+          const used = state.data.regenerations_used ?? 0;
+          const max = state.data.regenerations_max ?? 0;
+          const remaining = Math.max(0, max - used);
+          const canRegen = max === 0 || remaining > 0;
+          return (
+            <div className={styles.regenerateBox}>
+              <button
+                type="button"
+                className={styles.regenerate}
+                onClick={() => void fetchRecap("force")}
+                disabled={!canRegen}
+                title={
+                  canRegen
+                    ? `${remaining} of ${max} regenerations left this week`
+                    : `Regeneration budget for this week is used up`
+                }
+              >
+                Regenerate
+              </button>
+              {max > 0 ? (
+                <span className={styles.quotaNote}>
+                  {canRegen
+                    ? `${remaining}/${max} left this week`
+                    : `0/${max} left - resets Monday`}
+                </span>
+              ) : null}
+            </div>
+          );
+        })()}
       </header>
 
       {state.kind === "loading" && (
@@ -247,20 +280,21 @@ export default function WeeklyRecap() {
               {slow ? (
                 <>
                   Still cooking this week&apos;s recap - Veo is running slower than usual today.
-                  It&apos;ll finish on its own; feel free to come back to <em>/week</em> in a
-                  minute or two.
+                  It&apos;ll finish on its own within a few more minutes; feel free to close this
+                  tab and come back to <em>/week</em> later - the video will be waiting.
                 </>
               ) : (
                 <>
-                  Cooking this week&apos;s recap in the background. Veo usually takes about 30-90
-                  seconds, sometimes longer under load - the tile will update on its own when it&apos;s
-                  ready, no need to wait here.
+                  Cooking this week&apos;s recap in the background. Veo usually takes 1-3 minutes,
+                  occasionally longer under peak load - the tile will update on its own when
+                  it&apos;s ready. Feel free to keep exploring or close this tab; the recap will be
+                  cached and instant on your next visit.
                 </>
               )}
               {elapsed !== null ? (
                 <>
                   {" "}
-                  <span className={styles.elapsedNote}>Elapsed: {elapsed}s.</span>
+                  <span className={styles.elapsedNote}>Elapsed: {formatElapsed(elapsed)}.</span>
                 </>
               ) : null}
             </p>
@@ -288,7 +322,9 @@ export default function WeeklyRecap() {
 
       {state.kind === "not_ready" && (
         <div className={styles.placeholder}>
-          <span className={styles.placeholderBadge}>Off</span>
+          <span className={styles.placeholderBadge}>
+            {state.data.reason === "regeneration_limit_reached" ? "Budget reached" : "Off"}
+          </span>
           <p>{reasonCopy(state.data.reason)}</p>
         </div>
       )}

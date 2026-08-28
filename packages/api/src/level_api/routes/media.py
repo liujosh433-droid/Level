@@ -39,21 +39,27 @@ logger = get_logger(__name__)
 
 MEDIA_CACHE_KEY = "media_cache"
 IN_FLIGHT_KEY = "recap_in_flight"
-# Stale threshold for the in-flight flag. Set to
-# ``VEO_POLL_CEILING_SECONDS + slack`` so the frontend re-poll
-# window can NEVER clear a flag while a legit background task is
-# still running (that would spawn a duplicate Veo call). Only
-# crashed tasks or torn-down Cloud Run instances should ever
-# trigger the stale path.
-IN_FLIGHT_MAX_AGE_SECONDS = 600
+# Per-ISO-week counter for Regenerate-button uses of Veo. Lives
+# under media_cache so it shares the same ISO-week rollover as the
+# cached video. See ``_read_regen_quota`` for the reset rule.
+REGEN_QUOTA_KEY = "recap_regens"
+# Stale threshold for the in-flight flag. Set to 1.5x
+# VEO_POLL_CEILING_SECONDS so the frontend re-poll window can
+# NEVER clear a flag while a legit background task is still
+# running (that would spawn a duplicate Veo call). Only crashed
+# tasks or torn-down Cloud Run instances should ever trigger the
+# stale path.
+IN_FLIGHT_MAX_AGE_SECONDS = 900
 # How long to keep polling Veo's long-running operation before
-# giving up. Veo 3.1 Fast usually lands in 30-90s but occasional
-# stragglers push into the 3-4 minute range under load; 300s
-# gives us enough headroom to catch nearly all of them without
-# holding the async task open indefinitely. The task itself is
-# cheap while it waits (an asyncio.sleep loop), the cost lives
-# in the Veo call at the far end.
-VEO_POLL_CEILING_SECONDS = 300
+# giving up. Published latency numbers for Veo 3.1 Fast on Vertex:
+#   * P50: 60-90s
+#   * P90: 2-3 minutes (under load)
+#   * P99: 4-6 minutes (peak load / cold cache in the region)
+# The task is cheap while it waits (an asyncio.sleep loop); the
+# real cost lives in the Veo call at the far end. 10 min gives
+# us enough headroom to catch essentially every legit generation
+# while still bailing out on genuinely hung operations.
+VEO_POLL_CEILING_SECONDS = 600
 
 
 class RecapResponse(BaseModel):
@@ -66,6 +72,11 @@ class RecapResponse(BaseModel):
     cached: bool = False
     generating: bool = False
     started_at: str | None = None
+    # Regenerate-button quota state, echoed on every response so
+    # the UI can render "N of M regenerations used this week"
+    # preemptively (not just after a rejection).
+    regenerations_used: int | None = None
+    regenerations_max: int | None = None
 
 
 class ChimeResponse(BaseModel):
@@ -100,16 +111,41 @@ def _prompt_recap(highlights: list[str]) -> str:
 
     Deterministic and PII-free: names are stripped upstream (recap only
     receives category labels), so the prompt is safe to hash+cache.
+
+    Duration: Veo 3.x accepts only 4/6/8-second clips (SDK default 8),
+    so the prompt asks for 8s rather than the previous "15-second"
+    which the model silently ignored.
     """
     if not highlights:
         highlights = ["a calm week", "family time", "small victories"]
     scene = "; ".join(highlights[:5])
     return (
-        "A warm 15-second cinematic recap for a caregiver's week: "
+        "A warm 8-second cinematic recap for a caregiver's week: "
         f"{scene}. "
         "Soft morning light, gentle motion, unhurried pacing, family-friendly. "
         "No text overlays. No people's faces in focus."
     )
+
+
+def _read_regen_quota(cache: dict[str, Any], week_start_iso: str) -> dict[str, Any]:
+    """Read the current regen quota, resetting on a new ISO week.
+
+    Returns a dict with ``week_start`` and ``count`` fields, always
+    tagged to the current week - so a caller can trust the count
+    field without a separate "is this stale?" check. Doesn't
+    persist; the caller either bumps and writes, or discards.
+    """
+    q = cache.get(REGEN_QUOTA_KEY) or {}
+    if q.get("week_start") != week_start_iso:
+        return {"week_start": week_start_iso, "count": 0}
+    return {"week_start": week_start_iso, "count": int(q.get("count") or 0)}
+
+
+def _regen_max() -> int:
+    """Central place to fetch the configured max. Kept as a helper
+    so tests can monkeypatch a single call rather than every call
+    site."""
+    return int(get_settings().level_veo_max_regens_per_week)
 
 
 async def _collect_highlights(store: UserStore) -> list[str]:
@@ -160,9 +196,11 @@ async def weekly_recap(
        return ``{ready:false, generating:true, started_at:now}``.
 
     ``force=true`` bypasses the cache and blocks synchronously on
-    Veo (30-60s). Used by the /week "Regenerate" button, which
-    shows its own loading state - a UI that explicitly asks for a
-    fresh call is expected to wait for it.
+    Veo. Used by the /week "Regenerate" button, which shows its
+    own loading state - a UI that explicitly asks for a fresh call
+    is expected to wait for it. Rate-limited to
+    ``level_veo_max_regens_per_week`` per user per ISO week to
+    bound cost at demo-friendly spend levels.
     """
     settings = get_settings()
     from level_core.tz import tz_for_store
@@ -171,15 +209,21 @@ async def weekly_recap(
     today = datetime.now(tz).date()
     week_start = _iso_week_start(today)
     week_start_iso = week_start.isoformat()
+    regen_max = _regen_max()
 
     if not settings.level_media_enabled:
         return RecapResponse(
             ready=False,
             reason="media_disabled",
             week_start=week_start_iso,
+            regenerations_max=regen_max,
+            regenerations_used=0,
         )
 
     cache = await _read_cache(store)
+    quota = _read_regen_quota(cache, week_start_iso)
+    regens_used = int(quota["count"])
+
     cached = cache.get("recap") or {}
     if (
         not force
@@ -193,19 +237,52 @@ async def weekly_recap(
             week_start=week_start_iso,
             model=cached.get("model"),
             cached=True,
+            regenerations_used=regens_used,
+            regenerations_max=regen_max,
         )
 
     highlights = await _collect_highlights(store)
     prompt = _prompt_recap(highlights)
 
     if force:
-        return await _run_recap_synchronously(
+        # Rate-limit the explicit Regenerate button. Count is
+        # checked and incremented BEFORE the Veo call so a Veo
+        # failure still consumes the credit - otherwise a spurious
+        # veo_unavailable would let a user retry unbounded, which
+        # is exactly the demo-cost story we're trying to protect.
+        if regens_used >= regen_max:
+            logger.info(
+                "media.veo.regen_limit_reached",
+                user=store.user_id,
+                week=week_start_iso,
+                used=regens_used,
+                max=regen_max,
+            )
+            return RecapResponse(
+                ready=False,
+                reason="regeneration_limit_reached",
+                week_start=week_start_iso,
+                regenerations_used=regens_used,
+                regenerations_max=regen_max,
+            )
+        cache[REGEN_QUOTA_KEY] = {
+            "week_start": week_start_iso,
+            "count": regens_used + 1,
+        }
+        await _write_cache(store, cache)
+        result = await _run_recap_synchronously(
             store=store,
             cache=cache,
             prompt=prompt,
             week_start_iso=week_start_iso,
             model=settings.level_model_veo,
         )
+        # ``_run_recap_synchronously`` may re-read cache before it
+        # writes, but the quota bump above landed first - the
+        # response just needs the updated count reflected.
+        result.regenerations_used = regens_used + 1
+        result.regenerations_max = regen_max
+        return result
 
     # Not cached, not forcing. Check whether a background task is
     # already running for this week. The flag is only trusted while
@@ -228,6 +305,8 @@ async def weekly_recap(
                     generating=True,
                     started_at=in_flight.get("started_at"),
                     week_start=week_start_iso,
+                    regenerations_used=regens_used,
+                    regenerations_max=regen_max,
                 )
         # Stale or unparseable - fall through to kick a fresh task.
 
@@ -263,6 +342,8 @@ async def weekly_recap(
         generating=True,
         started_at=started_at_iso,
         week_start=week_start_iso,
+        regenerations_used=regens_used,
+        regenerations_max=regen_max,
     )
 
 
@@ -485,13 +566,15 @@ async def _generate_veo(*, prompt: str, model: str) -> dict[str, str] | None:
             client.models.generate_videos, model=model, prompt=prompt
         )
         # Poll for completion up to VEO_POLL_CEILING_SECONDS. Veo
-        # 3.1 Fast typically lands in 30-90s but stragglers under
-        # load push into 3-4 min; a shorter ceiling was silently
-        # aborting mid-generation and causing the frontend to
+        # 3.1 Fast has a wide latency distribution on Vertex - see
+        # the constant's docstring. Earlier ceilings (90s, then
+        # 300s) were silently aborting mid-generation on legit
+        # slow-but-not-hung runs and causing the frontend to
         # re-poll into a fresh background task, doubling the cost
         # for no benefit. The stale-flag guard on the in-flight
-        # key uses this same ceiling so a re-poll can't spawn a
-        # duplicate while a legit task is still running.
+        # key uses a 1.5x version of this ceiling so a re-poll
+        # can't spawn a duplicate while a legit task is still
+        # running.
         for _ in range(VEO_POLL_CEILING_SECONDS):
             if getattr(op, "done", False):
                 break

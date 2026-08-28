@@ -344,7 +344,11 @@ async def test_reset_demo_state_uses_native_reset_all_on_warm_slot() -> None:
 
     result = await reset_demo_state(store)
 
-    assert result == {"reset": True}
+    # ``media_cache_preserved`` is False here because the demo seed
+    # doesn't populate a Veo cache - only the /v1/media/recap route
+    # does that. The separate ``test_weekly_recap_survives_demo_reset``
+    # test covers the True branch end-to-end.
+    assert result == {"reset": True, "media_cache_preserved": False}
     # Every mutable surface should now be empty.
     assert await store.agenda.list() == []
     assert await store.people.list() == []
@@ -1036,7 +1040,7 @@ async def test_weekly_recap_background_task_skips_data_urls(monkeypatch) -> None
 
 
 def test_weekly_recap_force_true_still_synchronous(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    """The Regenerate button on /about hits ?force=true. That path
+    """The Regenerate button on /week hits ?force=true. That path
     is explicitly the "user opts into a wait" contract - it must
     block on Veo and return a real URL in a single response, so the
     button's loading state has a well-defined completion. Adding
@@ -1065,6 +1069,9 @@ def test_weekly_recap_force_true_still_synchronous(monkeypatch) -> None:  # type
     assert body["ready"] is True
     assert body["video_url"] == "https://example.test/veo/forced.mp4"
     assert body["generating"] is False
+    # First force consumes 1 credit out of the default 3.
+    assert body["regenerations_used"] == 1
+    assert body["regenerations_max"] == 3
 
     # And a subsequent (non-force) GET hits the cache without
     # kicking a new task - force=true's synchronous write still
@@ -1074,3 +1081,141 @@ def test_weekly_recap_force_true_still_synchronous(monkeypatch) -> None:  # type
     body2 = r2.json()
     assert body2["ready"] is True
     assert body2["cached"] is True
+    assert body2["regenerations_used"] == 1
+    assert body2["regenerations_max"] == 3
+
+
+def test_weekly_recap_regen_quota_blocks_after_max(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The Regenerate button is capped at N per ISO week to bound
+    Veo spend during a demo. After the cap is hit, force=true must
+    return {ready:false, reason:"regeneration_limit_reached"} WITHOUT
+    invoking Veo - the frontend disables the button preemptively but
+    a direct API caller also needs the guard. Regression covers
+    the "one extra call slips through" bug we'd have if the count
+    were incremented after the Veo call instead of before."""
+    from level_api.routes import media as media_routes
+
+    monkeypatch.setenv("LEVEL_MEDIA_ENABLED", "true")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-project")
+    # Tight budget so the test spends exactly 2 fake Veo calls
+    # and then hits the cap; the default (3) would be slower to
+    # exercise without adding value.
+    monkeypatch.setenv("LEVEL_VEO_MAX_REGENS_PER_WEEK", "2")
+    client = _make_client("local", monkeypatch)
+
+    login = client.post("/v1/auth/demo", json={"scenario": "solo"})
+    assert login.status_code == 200
+
+    calls = {"veo": 0}
+
+    async def fake_veo(*, prompt: str, model: str) -> dict[str, str]:
+        calls["veo"] += 1
+        return {
+            "video_url": f"https://example.test/veo/{calls['veo']}.mp4",
+            "poster_url": "https://example.test/veo/poster.jpg",
+        }
+
+    monkeypatch.setattr(media_routes, "_generate_veo", fake_veo)
+
+    # Two regens are allowed and each consumes one credit.
+    r1 = client.get("/v1/media/recap?force=true")
+    assert r1.status_code == 200
+    b1 = r1.json()
+    assert b1["ready"] is True
+    assert b1["regenerations_used"] == 1
+    assert b1["regenerations_max"] == 2
+
+    r2 = client.get("/v1/media/recap?force=true")
+    assert r2.status_code == 200
+    b2 = r2.json()
+    assert b2["ready"] is True
+    assert b2["regenerations_used"] == 2
+
+    # Third one is rejected without calling Veo.
+    r3 = client.get("/v1/media/recap?force=true")
+    assert r3.status_code == 200
+    b3 = r3.json()
+    assert b3["ready"] is False
+    assert b3["reason"] == "regeneration_limit_reached"
+    assert b3["regenerations_used"] == 2
+    assert b3["regenerations_max"] == 2
+    assert calls["veo"] == 2, (
+        f"third force=true must NOT invoke Veo; called {calls['veo']} times"
+    )
+
+    # A non-force GET still returns the cached (last-good) video
+    # and echoes the current quota so the UI can render "0 left".
+    r4 = client.get("/v1/media/recap")
+    assert r4.status_code == 200
+    b4 = r4.json()
+    assert b4["ready"] is True
+    assert b4["cached"] is True
+    assert b4["regenerations_used"] == 2
+    assert b4["regenerations_max"] == 2
+
+
+def test_weekly_recap_survives_demo_reset(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Every "Try demo" click calls ``reset_demo_state``, which
+    recursively wipes the user's profile subtree. Without an
+    explicit carve-out that also drops the ``media_cache`` blob
+    where the Veo URL lives - forcing the next /week visit to burn
+    another ~$1.20 Veo call. On demo day with N judges hitting the
+    same slot, that turns a "one video per week per user" cost
+    into "one video per session," blowing the budget.
+
+    This test locks in the fix: seed once, generate the video once,
+    reset, and verify the next non-force GET returns cached=true
+    without ever hitting Veo. Also verifies the regen counter
+    survives (otherwise a judge could bypass the weekly quota by
+    clicking Try demo between regenerations)."""
+    from level_api.routes import media as media_routes
+
+    monkeypatch.setenv("LEVEL_MEDIA_ENABLED", "true")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-project")
+    client = _make_client("local", monkeypatch)
+
+    # Seed the demo user + generate one video via force=true so the
+    # cache is populated.
+    login1 = client.post("/v1/auth/demo", json={"scenario": "solo"})
+    assert login1.status_code == 200
+
+    calls = {"veo": 0}
+
+    async def fake_veo(*, prompt: str, model: str) -> dict[str, str]:
+        calls["veo"] += 1
+        return {
+            "video_url": "https://example.test/veo/preserved.mp4",
+            "poster_url": "https://example.test/veo/poster.jpg",
+        }
+
+    monkeypatch.setattr(media_routes, "_generate_veo", fake_veo)
+
+    r_gen = client.get("/v1/media/recap?force=true")
+    assert r_gen.status_code == 200
+    assert r_gen.json()["ready"] is True
+    assert calls["veo"] == 1
+
+    # A second click of "Try demo" reseeds the same slot. Without
+    # the preservation carve-out this would wipe media_cache.
+    login2 = client.post("/v1/auth/demo", json={"scenario": "solo"})
+    assert login2.status_code == 200
+
+    # The next /week visit must serve the cached video without
+    # touching Veo. If Veo gets called a second time here, the
+    # cache was blown away and demo credits are leaking.
+    r_after = client.get("/v1/media/recap")
+    assert r_after.status_code == 200
+    body = r_after.json()
+    assert body["ready"] is True, (
+        f"cache wiped by reset - Veo would be called again. body={body}"
+    )
+    assert body["cached"] is True
+    assert body["video_url"] == "https://example.test/veo/preserved.mp4"
+    assert calls["veo"] == 1, (
+        f"expected 0 additional Veo calls after reset, got {calls['veo'] - 1}"
+    )
+
+    # And the regen counter survived, so the weekly quota can't
+    # be bypassed by clicking Try demo between regenerations.
+    assert body["regenerations_used"] == 1
+    assert body["regenerations_max"] == 3

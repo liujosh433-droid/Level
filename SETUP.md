@@ -68,6 +68,90 @@ emailing anyone.
 a friendly "connect Google to actually book" message; the seeded
 agenda is read-only.
 
+### Demo real-send mode (optional, for demo recordings)
+
+If you want a demo recording to include *actual email proof* (open
+your inbox on screen, show the drafted note landed there), demo
+mode has an escape hatch that flips the email-preview
+short-circuit into a real Gmail send — with a hard intercept on
+the recipient so mail can never leak to a fake demo contact.
+
+Three env vars, all required to arm it (any missing → preview):
+
+```bash
+# Master toggle. False by default so nobody accidentally sends.
+LEVEL_DEMO_SEND_REAL_EMAILS=true
+
+# Every demo send is rewritten to this address. Point at YOUR own
+# inbox so the drafted "to teacher@example.com" lands in a mailbox
+# you can screencap.
+LEVEL_DEMO_EMAIL_INTERCEPT_TO=you@example.com
+
+# Refresh token for the Gmail account that will actually send.
+# Do the normal OAuth flow against your own Google account once
+# and grab the refresh token from `.level/local_store/<uid>/tokens.json`.
+LEVEL_DEMO_GMAIL_REFRESH_TOKEN=1//0e...long-token
+```
+
+When armed:
+
+- The endpoint still returns `demo: true` (so the UI shows the
+same preview banner), plus `demo_real_send: true`, `drafted_to`,
+and `delivered_to` for observability.
+- The drafted `to` in the response is the *pretend* recipient
+(e.g. "Ms. Anna"), never the intercept address — nothing about
+the demo UI changes.
+- The wire call to Gmail always uses the intercept address as the
+recipient, so no matter what the AI drafts, the mail lands in
+your own inbox.
+
+Real-send stays gated on `is_demo_user(profile)` — a real
+signed-in user's `/email/send` never enters this branch even if
+the env vars are set.
+
+**Enabling it in Cloud Run (optional).** The two non-secret vars
+ride along as plain env; the refresh token goes into Secret
+Manager. If you use the bundled Terraform module
+(`infra/terraform/`), add to your `terraform.tfvars`:
+
+```hcl
+demo_send_real_emails    = true
+demo_email_intercept_to  = "you@example.com"
+demo_gmail_refresh_token = "1//0e...long-token"   # marked sensitive
+```
+
+then `terraform apply`. The module provisions a
+`level-demo-gmail-refresh-token` secret, mounts it into the API
+service, and skips creating it entirely when
+`demo_send_real_emails = false` (the default).
+
+To wire it without Terraform, run once:
+
+```bash
+# 1. Create the Secret Manager entry.
+printf %s "$LEVEL_DEMO_GMAIL_REFRESH_TOKEN" \
+  | gcloud secrets create level-demo-gmail-refresh-token \
+      --replication-policy=automatic --data-file=-
+
+# 2. Grant the Cloud Run SA read access (skip if you use the TF
+#    module - it grants project-level secretAccessor already).
+gcloud secrets add-iam-policy-binding level-demo-gmail-refresh-token \
+  --member="serviceAccount:$(gcloud run services describe level-api \
+      --region "$GOOGLE_CLOUD_REGION" \
+      --format='value(spec.template.spec.serviceAccountName)')" \
+  --role=roles/secretmanager.secretAccessor
+
+# 3. Update the running service.
+gcloud run services update level-api --region "$GOOGLE_CLOUD_REGION" \
+  --update-env-vars="LEVEL_DEMO_SEND_REAL_EMAILS=true,LEVEL_DEMO_EMAIL_INTERCEPT_TO=you@example.com" \
+  --update-secrets="LEVEL_DEMO_GMAIL_REFRESH_TOKEN=level-demo-gmail-refresh-token:latest"
+```
+
+To rotate the token, add a new secret version
+(`gcloud secrets versions add level-demo-gmail-refresh-token
+--data-file=-`) — Cloud Run picks it up on the next cold start
+because the mount uses `:latest`.
+
 ### Skipping the key: what you lose
 
 You can boot without `GOOGLE_API_KEY` and the app will still run —

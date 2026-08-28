@@ -149,6 +149,28 @@ class Settings(BaseSettings):
     level_demo_slots_per_scenario: int = Field(default=3, ge=1, le=50)
     level_demo_per_ip_per_hour: int = Field(default=10, ge=1, le=1000)
 
+    # "Real send" mode for demo email. When all three are set, the
+    # ``/v1/email/send`` demo short-circuit switches from a preview
+    # response to an actual Gmail send using the operator's own OAuth
+    # refresh token, with the recipient rewritten to a safe intercept
+    # address (usually the operator's own inbox) so the demo produces
+    # visible email proof without ever mailing the fake demo contacts.
+    #
+    # Only fires when ``is_demo_user(profile)`` is True AND all three
+    # values are populated - a defensive fence so a stray env var
+    # can't accidentally cause a real user's mail to be rerouted.
+    # See ``routes/email.py::send`` for the branch.
+    #
+    # Setup (one-time, on the operator's own laptop):
+    #   1. Run the normal OAuth flow against your own Gmail account.
+    #   2. Copy the resulting refresh_token from `.level/tokens.json`.
+    #   3. Set ``LEVEL_DEMO_GMAIL_REFRESH_TOKEN`` to it.
+    #   4. Set ``LEVEL_DEMO_EMAIL_INTERCEPT_TO`` to your own email.
+    #   5. Set ``LEVEL_DEMO_SEND_REAL_EMAILS=true``.
+    level_demo_send_real_emails: bool = False
+    level_demo_email_intercept_to: str = ""
+    level_demo_gmail_refresh_token: str = ""
+
     @property
     def is_local(self) -> bool:
         return self.level_env == "local"

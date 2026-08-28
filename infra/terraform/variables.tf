@@ -61,3 +61,38 @@ variable "demo_per_ip_per_hour" {
   type        = number
   default     = 10
 }
+
+variable "demo_send_real_emails" {
+  description = <<-EOT
+    Flip the /v1/email/send demo short-circuit from "preview" to a real Gmail
+    send using the operator's own refresh token, with the recipient rewritten
+    unconditionally to demo_email_intercept_to. Used to produce actual email
+    proof in a demo recording. Only fires for demo users. Off by default; when
+    true, demo_gmail_refresh_token MUST also be set or the runtime falls back
+    to preview mode. See SETUP.md #demo-real-send-mode.
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "demo_email_intercept_to" {
+  description = <<-EOT
+    Recipient every demo send is rewritten to when demo_send_real_emails=true.
+    Point at your own inbox so mail can never leak to a fake demo contact.
+  EOT
+  type        = string
+  default     = ""
+}
+
+variable "demo_gmail_refresh_token" {
+  description = <<-EOT
+    Refresh token for the Gmail account that will actually send demo emails.
+    Marked sensitive; stored in Secret Manager. Only mounted into Cloud Run
+    when demo_send_real_emails=true. Get one by running the normal OAuth flow
+    against your own Google account locally and pulling refresh_token out of
+    .level/local_store/<uid>/tokens.json.
+  EOT
+  type        = string
+  default     = ""
+  sensitive   = true
+}

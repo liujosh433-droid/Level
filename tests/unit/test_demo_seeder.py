@@ -261,6 +261,27 @@ async def test_seed_populates_proactive_cards_for_the_demo_week() -> None:
         "card_id should suffix group_id so the frontend can dedupe reliably"
     )
 
+    # Regression: the possessive template used to stitch the owner's
+    # name in front of a title_hint that already carried it, so
+    # "Helen weekly grocery drop" became "Helen's helen weekly
+    # grocery drop is missing this week." Now the owner-prefix is
+    # stripped before formatting so the name only appears once.
+    # We check across all cards because the solo scenario seeds
+    # multiple missing usuals and the buggy phrasing could hit any
+    # of them.
+    for c in cards:
+        name = (c.get("person_name") or "").strip()
+        if not name:
+            continue
+        text = c["text"]
+        possessive = f"{name}'s ".lower()
+        # The name in the possessive should not immediately be
+        # followed by the same name as the first word of the
+        # activity phrase.
+        assert f"{possessive}{name.lower()} " not in text.lower(), (
+            f"duplicated owner name in card text: {text!r}"
+        )
+
 
 @pytest.mark.asyncio
 async def test_reset_demo_state_refuses_non_demo_user_id(store) -> None:  # type: ignore[no-untyped-def]

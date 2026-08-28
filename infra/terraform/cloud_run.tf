@@ -79,6 +79,36 @@ resource "google_cloud_run_v2_service" "api" {
         value = tostring(var.demo_per_ip_per_hour)
       }
 
+      # Demo real-send mode. Master toggle is always emitted (false
+      # by default) so the runtime code has a deterministic signal;
+      # the intercept address rides along the same way. The refresh
+      # token is pulled from Secret Manager and only wired up when
+      # the feature is enabled - see the `dynamic` block below for
+      # the conditional mount.
+      env {
+        name  = "LEVEL_DEMO_SEND_REAL_EMAILS"
+        value = var.demo_send_real_emails ? "true" : "false"
+      }
+      env {
+        name  = "LEVEL_DEMO_EMAIL_INTERCEPT_TO"
+        value = var.demo_email_intercept_to
+      }
+      dynamic "env" {
+        # `for_each` on a list literal is the idiomatic way to make
+        # a single-shot conditional env block: length-1 list emits
+        # once, empty list emits zero times.
+        for_each = var.demo_send_real_emails ? [1] : []
+        content {
+          name = "LEVEL_DEMO_GMAIL_REFRESH_TOKEN"
+          value_source {
+            secret_key_ref {
+              secret  = google_secret_manager_secret.demo_gmail_refresh_token[0].secret_id
+              version = "latest"
+            }
+          }
+        }
+      }
+
       resources {
         limits = {
           cpu    = "1"
@@ -99,6 +129,11 @@ resource "google_cloud_run_v2_service" "api" {
     google_artifact_registry_repository.level,
     google_secret_manager_secret_version.session_secret_v1,
     google_secret_manager_secret_version.oauth_client_secret_v1,
+    # No dependency on the optional demo refresh-token secret -
+    # it's a count-guarded resource and Terraform can't express a
+    # depends_on on a resource that may not exist. The dynamic env
+    # block above only references it when the count is 1, so the
+    # implicit dependency is picked up correctly there.
   ]
 }
 

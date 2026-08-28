@@ -13,6 +13,7 @@ inline from an HTTP request handler when needed.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -33,6 +34,33 @@ logger = get_logger(__name__)
 # names without stringly-typed drift.
 PROACTIVE_CARDS_KEY = "proactive_cards"
 MAX_PROACTIVE_CARDS = 5
+
+
+def _strip_owner_prefix(activity_label: str, display_name: str) -> str:
+    """Strip a leading owner-name prefix from a title hint.
+
+    ``title_hint`` is majority-voted from event summaries and often
+    already carries the person's name ("Helen weekly grocery drop",
+    "Nova ballet"). Stitching that into the possessive template
+    produces "Helen's Helen weekly grocery drop is missing" - the
+    duplicated name reads like a typo.
+
+    Matches ``<name> `` and ``<name>'s `` (case-insensitive) at the
+    start of the label. Returns the original label unchanged when
+    the prefix isn't there or when stripping it would leave the
+    label empty (defensive: we'd rather duplicate than say
+    "'s nothing is missing").
+    """
+    name = display_name.strip()
+    if not name:
+        return activity_label
+    # ``\b`` matches a name that ends at a word boundary so we don't
+    # eat a prefix out of an unrelated word ("Helena" wouldn't match
+    # "Helen"). ``'s`` is optional so both "Helen weekly grocery
+    # drop" and "Helen's grocery" are covered.
+    pattern = re.compile(rf"^{re.escape(name)}(?:'s)?\s+", re.IGNORECASE)
+    stripped = pattern.sub("", activity_label, count=1).strip()
+    return stripped or activity_label
 
 
 async def regenerate_proactive_cards(
@@ -103,6 +131,11 @@ async def regenerate_proactive_cards(
         # Falls back to category when the underlying usual didn't carry
         # a title (badly seeded data or LLM-less local dev).
         activity_label = (g.title_hint or g.category.label).strip()
+        # Strip the owner's name from the front of the label - the
+        # possessive template below already carries it. Otherwise a
+        # title_hint like "Helen weekly grocery drop" produces
+        # "Helen's helen weekly grocery drop is missing".
+        activity_label = _strip_owner_prefix(activity_label, display_name)
         if primary and primary.is_self:
             # Own-usual phrasing: "Your grocery run is missing" reads
             # better than "Josh's grocery run is missing" when it's

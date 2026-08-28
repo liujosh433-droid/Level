@@ -35,9 +35,10 @@ from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException
+from level_core.config import get_settings
 from level_core.demo.seeder import is_demo_user
 from level_core.email.drafter import draft_email
-from level_core.email.gmail_client import send_email
+from level_core.email.gmail_client import send_email, send_email_with_refresh_token
 from level_core.observability import get_logger
 from level_core.storage.base import UserStore
 from pydantic import BaseModel
@@ -150,14 +151,80 @@ async def send(
         )
         raise HTTPException(status_code=400, detail="unknown_confirmation_token")
 
-    # Demo-mode short-circuit. A judge running locally without a real
-    # Gmail token should still be able to click "Send" and see the
-    # happy-path UX; we log the send + clear the pending draft, but
-    # never hit Google. Skipping this would 502 with
-    # ``gmail_send_failed`` (see the exception path below), which
-    # reads as a bug during a demo even though it's technically
-    # correct: no tokens means no send.
+    # Demo-mode short-circuit. Two behaviors depending on config:
+    #
+    # 1. **Real send** (all three ``LEVEL_DEMO_SEND_REAL_EMAILS`` /
+    #    ``LEVEL_DEMO_GMAIL_REFRESH_TOKEN`` /
+    #    ``LEVEL_DEMO_EMAIL_INTERCEPT_TO`` set): fires an actual Gmail
+    #    send using the operator's refresh token, but rewrites the
+    #    recipient to the intercept address so mail never leaks to a
+    #    fake demo contact. Used to produce visible email proof
+    #    (screencap the inbox landing) during a demo. Only fires for
+    #    demo users - a real user's send never routes here.
+    #
+    # 2. **Preview** (default when any of the three is missing): logs
+    #    the send + clears the pending draft, but never hits Google.
+    #    Skipping the demo branch entirely would 502 with
+    #    ``gmail_send_failed`` (see the exception path below), which
+    #    reads as a bug during a demo even though it's technically
+    #    correct: no tokens means no send.
     if is_demo_user(profile):
+        settings = get_settings()
+        intercept_to = (settings.level_demo_email_intercept_to or "").strip()
+        real_send_enabled = (
+            settings.level_demo_send_real_emails
+            and bool(settings.level_demo_gmail_refresh_token)
+            and bool(intercept_to)
+        )
+
+        if real_send_enabled:
+            # Actually send via Gmail. We rewrite the recipient
+            # unconditionally so a demo can never mail an external
+            # party by mistake - the drafted "to" is preserved in
+            # the response so the UI still shows the pretend contact.
+            try:
+                sent = await send_email_with_refresh_token(
+                    refresh_token=settings.level_demo_gmail_refresh_token,
+                    to=intercept_to,
+                    subject=body.subject,
+                    body=body.body,
+                )
+            except Exception as exc:  # noqa: BLE001 - surface to the user
+                logger.exception(
+                    "email.send.demo_real_send_failed",
+                    user=store.user_id,
+                    intercept_to=intercept_to[:64],
+                )
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"gmail_send_failed: {exc.__class__.__name__}",
+                ) from exc
+
+            _pending_drafts.pop(body.confirmation_token, None)
+            if profile_valid:
+                profile.pop(PENDING_EMAIL_DRAFT_KEY, None)
+                await store.profile.write(profile)
+            _sent_idempotency[x_idempotency_key] = now
+            logger.info(
+                "email.send.demo_real_send_ok",
+                user=store.user_id,
+                drafted_to=body.to[:64],
+                intercept_to=intercept_to[:64],
+                message_id=sent.message_id,
+            )
+            return {
+                "message_id": sent.message_id,
+                "thread_id": sent.thread_id,
+                "demo": True,
+                "demo_real_send": True,
+                "drafted_to": body.to,
+                "delivered_to": intercept_to,
+                "notice": (
+                    "Demo real-send mode: sent to intercept address "
+                    f"({intercept_to}) instead of {body.to}."
+                ),
+            }
+
         logger.info(
             "email.send.demo_preview",
             user=store.user_id,

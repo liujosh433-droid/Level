@@ -25,6 +25,8 @@ from unittest.mock import AsyncMock
 import pytest
 from httpx import ASGITransport, AsyncClient
 from level_core.auth.sessions import build_session_cookie
+from level_core.config import get_settings
+from level_core.demo.seeder import PROFILE_DEMO_KEY
 from level_core.email.gmail_client import SentEmail
 from level_core.schemas import UserSession
 from level_core.storage.factory import get_store
@@ -247,4 +249,126 @@ async def test_duplicate_idempotency_key_returns_409(
             },
             headers={**_cookie_headers(user_id), "X-Idempotency-Key": "dup"},
         )
-    assert r2.status_code == 409
+        assert r2.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_demo_send_previews_by_default(
+    tmp_path, monkeypatch  # type: ignore[no-untyped-def]
+) -> None:
+    """Default demo behavior (no real-send env vars): /email/send
+    short-circuits into a preview response, never hits Gmail, and
+    returns `demo: true, demo_real_send` absent."""
+    monkeypatch.chdir(tmp_path)
+    user_id = "u_demo_solo"
+    store = get_store(user_id)
+    token = f"ct_{uuid.uuid4().hex[:8]}"
+
+    profile = dict(await store.profile.read() or {})
+    profile[PROFILE_DEMO_KEY] = "solo"
+    _seed_pending_draft(profile, token)
+    await store.profile.write(profile)
+
+    fake_send = AsyncMock(return_value=SentEmail(message_id="real", thread_id="t"))
+    fake_real_send = AsyncMock(
+        return_value=SentEmail(message_id="real", thread_id="t")
+    )
+    monkeypatch.setattr(email_route, "send_email", fake_send)
+    monkeypatch.setattr(
+        email_route, "send_email_with_refresh_token", fake_real_send
+    )
+
+    from level_api.main import create_app
+
+    app = create_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/v1/email/send",
+            json={
+                "confirmation_token": token,
+                "to": "teacher@example.com",
+                "subject": "s",
+                "body": "b",
+            },
+            headers={**_cookie_headers(user_id), "X-Idempotency-Key": "kk"},
+        )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["demo"] is True
+    assert "demo_real_send" not in body
+    assert body["message_id"].startswith("demo-")
+    # No Gmail path fired.
+    fake_send.assert_not_awaited()
+    fake_real_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_demo_send_real_send_rewrites_recipient_to_intercept(
+    tmp_path, monkeypatch  # type: ignore[no-untyped-def]
+) -> None:
+    """When all three env vars are set, the demo branch actually calls
+    Gmail via ``send_email_with_refresh_token`` and rewrites the ``to``
+    address to the intercept inbox. The drafted ``to`` is preserved
+    in the response for UI display but never mailed."""
+    monkeypatch.setenv("LEVEL_DEMO_SEND_REAL_EMAILS", "true")
+    monkeypatch.setenv("LEVEL_DEMO_EMAIL_INTERCEPT_TO", "operator@example.com")
+    monkeypatch.setenv(
+        "LEVEL_DEMO_GMAIL_REFRESH_TOKEN", "1//stub-refresh-token"
+    )
+    get_settings.cache_clear()
+
+    monkeypatch.chdir(tmp_path)
+    user_id = "u_demo_solo"
+    store = get_store(user_id)
+    token = f"ct_{uuid.uuid4().hex[:8]}"
+
+    profile = dict(await store.profile.read() or {})
+    profile[PROFILE_DEMO_KEY] = "solo"
+    _seed_pending_draft(profile, token)
+    await store.profile.write(profile)
+
+    fake_real_send = AsyncMock(
+        return_value=SentEmail(message_id="msg_9", thread_id="thr_9")
+    )
+    fake_send = AsyncMock(return_value=SentEmail(message_id="wrong", thread_id="t"))
+    monkeypatch.setattr(
+        email_route, "send_email_with_refresh_token", fake_real_send
+    )
+    monkeypatch.setattr(email_route, "send_email", fake_send)
+
+    from level_api.main import create_app
+
+    app = create_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/v1/email/send",
+            json={
+                "confirmation_token": token,
+                "to": "teacher@example.com",
+                "subject": "Absence note",
+                "body": "Nova is out sick tomorrow.",
+            },
+            headers={**_cookie_headers(user_id), "X-Idempotency-Key": "kk"},
+        )
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["demo"] is True
+    assert body["demo_real_send"] is True
+    assert body["drafted_to"] == "teacher@example.com"
+    assert body["delivered_to"] == "operator@example.com"
+    assert body["message_id"] == "msg_9"
+    # Real-send fired ONCE with the intercept recipient - the drafted
+    # address is preserved in the response but never in the wire call,
+    # so a demo can't accidentally mail an external party.
+    fake_real_send.assert_awaited_once()
+    called_kwargs = fake_real_send.await_args.kwargs
+    assert called_kwargs["to"] == "operator@example.com"
+    assert called_kwargs["subject"] == "Absence note"
+    assert called_kwargs["refresh_token"] == "1//stub-refresh-token"
+    # The per-user send path (Gmail via store.tokens) was NOT used -
+    # demo users have no tokens and this env-creds variant is the
+    # only path that should fire here.
+    fake_send.assert_not_awaited()
+
+    get_settings.cache_clear()

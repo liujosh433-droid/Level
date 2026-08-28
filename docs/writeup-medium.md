@@ -64,7 +64,7 @@ Every named box in that diagram is a real file. The Mermaid source is at [`docs/
 
 ### 4. Model tier — Gemini 3.5 → 2.5 → Gemma, plus Veo and Lyria
 
-- **What.** Extraction and generation flow through Gemini 3.5 (Flash for cheap extractors, Pro for generators). On 429 or quota exhaustion, the invoke layer walks down: Vertex Gemini 2.5 → Gemma via Vertex Model Garden. Bonus models: **Veo 3** for a weekly recap video, **Lyria** for a "Hear my day" chime.
+- **What.** Extraction and generation flow through Gemini 3.5 (Flash for cheap extractors, Pro for generators). On 429 or quota exhaustion, the invoke layer walks down: Vertex Gemini 2.5 → Gemma via Vertex Model Garden. Bonus models: **Veo 3** for an 8-second Info-page film, **Lyria** for a "Hear my day" chime.
 - **Why.** Model outages are the most common cause of a demo dying. A three-tier ladder means the app keeps working when a tier goes down, and the row's `fallback_used` column shows which tier actually ran.
 - **Scale.** Gemma handles small-schema extractors (chit-chat, activity classification, priority, reminder, usual) cleanly; generator agents with richer schemas soft-degrade to `"try again in a moment"` rather than emitting bad JSON. The `_GEMMA_ELIGIBLE` list is the source of truth for which agent falls through.
 - **Security.** PII strip runs on both `user_input` and calendar-derived `context` strings before any model tier — Vertex never sees an email or phone number.
@@ -183,7 +183,7 @@ Two things go wrong in real agent systems all the time: your model quota, and yo
 The hackathon awards up to 0.6 bonus points for extra Google AI models on top of Gemini. It's easy to bolt these on cynically. I tried not to.
 
 - **Gemma** earned its 0.2 by being an actual working failover. When both Gemini tiers 429 mid-demo (they will), Gemma 3-4B via Vertex Model Garden keeps chat alive for the small-schema extractors. Its `fallback_used="gemma-3-4b-it"` shows up in `/admin/traces` when it fires.
-- **Veo 3** generates a fifteen-second cinematic weekly recap on `/v1/media/recap`, cached per ISO week per user. The prompt is built from category labels + priority content words — no PII touches Veo. The video reminds you what your week actually contained after a rough Friday. Endpoint is `curl`-triggerable in the demo.
+- **Veo 3** generates an 8-second cinematic Level film on `/v1/media/intro`, once for the whole app. The prompt is a fixed brand trailer — no calendar, no PII. The Info page plays it; later visits are a GCS URL lookup.
 - **Lyria** produces a calm/hopeful/energetic chime that plays around the "Hear my day" flow. The chime plays before the SummaryAgent's TTS starts, so the day summary gets a warm intro instead of a jump-cut into a robot voice. Small, but noticeably nicer.
 
 Both media endpoints degrade to `{ready: false, reason: ...}` if the Vertex project doesn't have the model enabled — so a demo doesn't fail because someone forgot to click a checkbox in the Cloud console.

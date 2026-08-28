@@ -28,7 +28,7 @@ hashtag and hackathon disclosure. Post before the submission deadline.
 > • Gemini 3.5 Flash + Pro (primary)
 > • Vertex 2.5 (tier-2 fallback on 429)
 > • Gemma via Vertex Model Garden (tier-3 extraction fallback)
-> • Veo 3 for the weekly recap video
+> • Veo 3 for an 8-second Info-page film
 > • Lyria for the "Hear my day" chime
 >
 > Every fallback is visible in /admin/traces.

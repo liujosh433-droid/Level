@@ -23,27 +23,6 @@
   margin-bottom: 0.45rem;
 }
 
-.art {
-  position: relative;
-  flex: 0 1 20rem;
-  width: min(42vw, 20rem);
-  flex-shrink: 0;
-}
-
-.artFrame {
-  border-radius: calc(var(--radius-lg) + 6px);
-  padding: 0.35rem;
-  background: radial-gradient(ellipse 80% 70% at 50% 45%, #f7fbfc 0%, #e8f1f3 100%);
-  overflow: hidden;
-}
-
-.people {
-  width: 100%;
-  height: auto;
-  display: block;
-  border-radius: var(--radius-lg);
-}
-
 .wrap section h2 {
   margin-bottom: 10px;
 }
@@ -61,10 +40,5 @@
   .hero {
     flex-direction: column;
     align-items: flex-start;
-  }
-
-  .art {
-    width: min(100%, 18rem);
-    align-self: center;
   }
 }

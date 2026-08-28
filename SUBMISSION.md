@@ -95,7 +95,7 @@ the guardrail stack, feedback loop, and demo seeder end-to-end.
 A caregiver partner for busy parents and multi-generational
 households. Level reads your Google Calendar, learns who you care
 for, notices your usual weekly rhythm, tracks your priorities, drafts
-school emails, generates a weekly recap video, and speaks a short
+school emails, and speaks a short
 summary of your day.
 
 ## Mandatory stack (checklist)
@@ -276,14 +276,12 @@ enforces (in order):
   [`agents/invoke.py::_try_gemma`](packages/core/src/level_core/agents/invoke.py);
   triggered by the eligibility list `GEMMA_ELIGIBLE`. Surfaces in
   `/admin/traces` as `fallback_used="gemma-3-4b-it"`.
-- **+0.2 Veo 3** weekly recap surfaced at
-  [`/week`](apps/web/src/app/(dashboard)/week/page.tsx) backed by
-  [`routes/media.py::weekly_recap`](packages/api/src/level_api/routes/media.py).
-  Cached per ISO week per user; PII-free prompt is built from category
-  labels + priority content words. Fire-and-forget: the first GET of the
-  week spawns a background Veo task and returns `reason:"generating"`
-  in <100ms so the page never blocks; the frontend polls every 4s
-  until the tile flips to the finished `<video>`.
+- **+0.2 Veo 3** 8-second Info-page film at
+  [`/about`](apps/web/src/app/(dashboard)/about/page.tsx) backed by
+  [`routes/media.py::about_intro`](packages/api/src/level_api/routes/media.py).
+  Generated once for the whole app (fixed brand prompt, no calendar
+  PII) and reused from a stable GCS object. First GET may return
+  `reason:"generating"`; every later request is a URL lookup.
 - **+0.2 Lyria** chime for "Hear my day" (calm / hopeful / energetic).
   Endpoint:
   [`routes/media.py::daily_chime`](packages/api/src/level_api/routes/media.py).

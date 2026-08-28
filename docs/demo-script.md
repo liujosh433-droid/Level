@@ -135,7 +135,7 @@ Target pace **150 words per minute**. The spoken VO below totals **~540 words = 
 
 ### Beat 8 — Bonus models earned + close (3:30 → 4:00)
 
-*[SCREEN] Fast cuts: Veo weekly recap plays for 3 seconds. Trace waterfall row shows `fallback_used="gemma-3-4b-it"`. ADKPlannerAgent row. Then full-frame close card:*
+*[SCREEN] Fast cuts: Veo Info-page film plays for 3 seconds. Trace waterfall row shows `fallback_used="gemma-3-4b-it"`. ADKPlannerAgent row. Then full-frame close card:*
 
 ```
 Level
@@ -146,7 +146,7 @@ Built with Gemini 3.5 · ADK · Cloud Run · Firestore
 ```
 
 **VO:**
-> Four bonus models, earned by working — not sprinkled. **ADK** on the email hot path. **Gemma** as real quota failover. **Veo 3** for the weekly recap you're seeing right now. **Lyria** for the chime you heard. Every one shows up in the trace waterfall.
+> Four bonus models, earned by working — not sprinkled. **ADK** on the email hot path. **Gemma** as real quota failover. **Veo 3** for the Info-page film you're seeing right now. **Lyria** for the chime you heard. Every one shows up in the trace waterfall.
 >
 > Level. Repo's public. Live demo is one click. Thanks for watching.
 
@@ -175,7 +175,7 @@ Every number said in the recording is above. Do not paraphrase them into a stron
 |---|---|
 | Chat reply is >8s slow | *"This one calls the LLM — you'll see it in the trace waterfall shortly."* |
 | Lyria chime doesn't play | *"Chime is a bonus — Level degrades gracefully when a Vertex model isn't enabled, and the summary still plays."* |
-| Veo endpoint 404 | *"We ship recorded footage for the recap in case a Vertex model is warming up — it's cached per week."* Cut to B-roll. |
+| Veo endpoint 404 | *"The Info page keeps the still photo if Veo is warming up — the film is generated once and cached."* Cut to B-roll. |
 | Traces page shows an old trace | *"That's the trace from the earlier click — the timestamps prove Level really is running this live."* |
 | Demo button 404s (cloud demo off) | Cut to local demo B-roll immediately, no on-camera panic. |
 | Feedback chip doesn't visibly re-influence | *"Adaptation shows on the next generator turn — one more click and you'd see the memory in the recall block."* |
@@ -192,7 +192,7 @@ Every number said in the recording is above. Do not paraphrase them into a stron
 - Hear my day: chime + TTS. **6 seconds.**
 - `/admin/traces` waterfall with parent→child edges. **8 seconds.**
 - `/v1/admin/agents` JSON scroll. **4 seconds.**
-- Veo weekly recap (full 8-second clip in one take). **8 seconds.**
+- Veo Info-page film (full 8-second clip in one take). **8 seconds.**
 - Architecture diagram slow pan across the six planes. **8 seconds.**
 
 Keep these in a folder called `demo-broll/` on the recording machine. Every one is a safety net.

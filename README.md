@@ -3,7 +3,7 @@
 Caregiver partner for busy parents and multi-generational households.
 Level reads your Google Calendar, learns which humans you care for,
 notices your usual weekly rhythm, tracks your priorities, drafts
-school emails, generates a weekly recap video, and speaks a short
+school emails, and speaks a short
 summary of your day.
 
 Built for the [All Things Agentic Hackathon](https://allthingsagentichackathon.devpost.com/)
@@ -25,8 +25,8 @@ in the **Collaborative Partner** track.
 
 - **Gemma 3** as a tier-3 extraction fallback when both AI Studio 3.5
   and Vertex 2.5 return 429. See `agents/base.py::_try_gemma`.
-- **Veo 3** for the weekly recap video on `/week`. Cached per ISO
-  week per user; disable with `LEVEL_MEDIA_ENABLED=false`.
+- **Veo 3** for an 8-second Info-page film on `/about`. Generated once
+  and reused from GCS; disable with `LEVEL_MEDIA_ENABLED=false`.
 - **Lyria** for a calm/hopeful/energetic chime around "Hear my day".
 
 ## Architecture
@@ -163,8 +163,8 @@ importable into a scratch Google account for OAuth testing):
 | `LEVEL_MODEL_GEMMA`            | `gemma-3-4b-it`    | Tier-3 extraction fallback |
 | `LEVEL_ADK_MODE`               | `false`            | Route email + book intents through ADK LlmAgent |
 | `LEVEL_MEDIA_ENABLED`          | `false`            | Enable Veo + Lyria endpoints |
-| `LEVEL_MODEL_VEO`              | `veo-3.1-fast-generate-001` | Weekly recap video model (Vertex; use `-001` suffix, not `-preview` — see config.py) |
-| `LEVEL_VEO_MAX_REGENS_PER_WEEK` | `3`                | Regenerate-button quota per user per ISO week; caps demo spend |
+| `LEVEL_MODEL_VEO`              | `veo-3.1-fast-generate-001` | Info-page film model (Vertex; use `-001` suffix, not `-preview` — see config.py) |
+| `LEVEL_VEO_INTRO_URL`          | *(empty)*          | Pin a previously generated intro URL to skip Veo entirely |
 | `LEVEL_MODEL_LYRIA`            | `lyria-3-clip-preview` | Hear-my-day chime model (via Interactions API on Vertex, `global` region) |
 | `LEVEL_DAILY_COST_CAP_USD`     | `2.00`             | Per-user daily cap for downstream agents |
 | `LEVEL_ROUTER_COST_CAP_MULTIPLIER` | `3.0`          | Softer cap for the exempt ChatRouterAgent |

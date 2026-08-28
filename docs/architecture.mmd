@@ -25,7 +25,7 @@ flowchart TB
     direction TB
     Chat["/v1/chat + /v1/chat/stream - SSE"]
     Feedback["/v1/feedback - keep / adjust / not-me"]
-    Media["/v1/media/recap + /v1/media/chime"]
+    Media["/v1/media/intro + /v1/media/chime"]
     Admin["/v1/admin - agents, traces, verify"]
     RestOfAPI["/v1/{today,me,sources,email,schedule,contacts,reminders,profile,auth,calendar}"]
     SecHeaders["Security headers + Trace-Id middleware"]
@@ -73,7 +73,7 @@ flowchart TB
     Gemini["Gemini 3.5 Flash + Pro - Vertex or AI Studio"]:::google
     Vertex25["Gemini 2.5 - Tier-2 fallback"]:::google
     Gemma["Gemma 3 - Tier-3 extraction fallback"]:::google
-    Veo["Veo 3 - weekly recap"]:::google
+    Veo["Veo 3 - Info page film"]:::google
     Lyria["Lyria - chime for Hear my day"]:::google
     ADK["Google ADK - LlmAgent + FunctionTool"]:::google
   end

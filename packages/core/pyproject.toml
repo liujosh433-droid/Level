@@ -11,6 +11,7 @@ dependencies = [
     "google-auth-oauthlib>=1.2",
     "google-api-python-client>=2.147",
     "google-cloud-firestore>=2.19",
+    "google-cloud-storage>=2.18",
     "google-cloud-aiplatform>=1.71",
     "google-genai>=0.3",
     "google-adk>=0.2",

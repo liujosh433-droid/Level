@@ -84,15 +84,13 @@ def is_demo_user(profile: dict | None) -> bool:
 # ``u_demo_solo_<slot>`` (slot >= 1 in cloud demo mode).
 DEMO_USER_ID_PREFIX = "u_demo_"
 
-# Profile subkey used by the /v1/media/recap route to cache the Veo
-# video URL, poster, and per-ISO-week regeneration counter. Must
-# stay in sync with ``MEDIA_CACHE_KEY`` in
+# Profile subkey used by /v1/media/chime to cache Lyria clips.
+# Must stay in sync with ``MEDIA_CACHE_KEY`` in
 # ``packages/api/src/level_api/routes/media.py``. Duplicated (rather
 # than imported) to avoid a level_core -> level_api layering
-# violation; a guard test in the media suite would be a reasonable
-# safety net if this drifts. Preserved across demo resets so a
-# ~$1.20 Veo generation isn't thrown away every time a judge clicks
-# "Try demo".
+# violation. The Veo Info-page film is global (GCS), not per-user,
+# so it is not stored here. Preserved across demo resets so a
+# judge clicking "Try demo" doesn't force a fresh Lyria call.
 _MEDIA_CACHE_PROFILE_KEY = "media_cache"
 
 
@@ -140,25 +138,8 @@ async def reset_demo_state(store: UserStore) -> dict[str, object]:
         logger.info("demo.reset.cold_slot", user_id=store.user_id)
         return {"reset": False, "reason": "cold_slot"}
 
-    # Preserve the Veo/Lyria cache across the wipe. Every /v1/media
-    # generation is a real GCP spend (~$1.20 per Veo Fast call), and
-    # the whole point of caching it per ISO week is to amortize
-    # that across judge sessions on the same demo slot. If we let
-    # ``reset_all()`` drop the cache, every "Try demo" click forces
-    # a fresh $1.20 Veo call on the next /week visit - defeating
-    # both the cache and the regenerate-quota rate limiter.
-    #
-    # Design notes:
-    #   * The recap prompt is category-labels-only (no names, no
-    #     event bodies), so a video generated for scenario A is a
-    #     valid abstract cinematic loop for scenario B on the same
-    #     slot too. Cross-scenario reuse is intentional.
-    #   * We preserve the entire ``media_cache`` blob, not just the
-    #     video URL - the ``recap_regens`` counter must survive
-    #     too, otherwise a judge could bypass the weekly quota by
-    #     clicking "Try demo" between regenerations.
-    #   * The video URL is a signed GCS/Vertex URL that Veo minted;
-    #     it doesn't leak PII and remains valid across the reset.
+    # Preserve the Lyria chime cache across the wipe so "Try demo"
+    # doesn't force a fresh music generation on the same slot.
     preserved_media_cache = (
         profile.get(_MEDIA_CACHE_PROFILE_KEY)
         if isinstance(profile, dict)
@@ -197,7 +178,7 @@ async def reset_demo_state(store: UserStore) -> dict[str, object]:
         await store.calendar_sync.write({})
         await store.tokens.write({})
 
-    # Restore the preserved Veo/Lyria cache into the fresh profile.
+    # Restore the preserved Lyria cache into the fresh profile.
     # ``update_fields`` merges, so this survives the subsequent
     # ``seed_demo_user`` writes that layer identity + demo markers
     # on top. Skipped entirely when nothing was cached (cold-slot
@@ -210,7 +191,7 @@ async def reset_demo_state(store: UserStore) -> dict[str, object]:
         logger.info(
             "demo.reset.media_cache_preserved",
             user_id=store.user_id,
-            has_recap=bool(preserved_media_cache.get("recap")),
+            has_chime=bool(preserved_media_cache.get("chime")),
         )
 
     logger.info("demo.reset", user_id=store.user_id)

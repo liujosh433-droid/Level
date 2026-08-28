@@ -545,9 +545,9 @@ fan-out. Not in scope for the hackathon.
   the SSE chunks a completed reply; using
   `client.models.generate_content_stream()` for the summary path
   would drop time-to-first-byte by ~1.5s.
-- **Precompute weekly Veo recap** in the nightly job rather than
-  on-demand at `/v1/media/recap` first hit. Users would see the
-  video already ready when they visit /week.
+- **Precompute the Veo Info-page film** at deploy time rather than
+  on the first `/about` visit. After the first generation the clip
+  is already instant from GCS.
 - **Move `profile["_gate_counters"]` to a dedicated
   `gate_counters` KV** so writes don't collide with unrelated
   profile writes. Small win; only matters at extreme concurrency
@@ -599,5 +599,5 @@ fan-out. Not in scope for the hackathon.
 | Streaming SSE                     | `packages/api/src/level_api/routes/chat.py::chat_stream` |
 | Feedback loop                     | `packages/api/src/level_api/routes/feedback.py` (write) + `packages/core/src/level_core/agents/memory_bank.py::recall_split` (read) |
 | Loop integration test             | `tests/unit/test_feedback_loop_closes.py` |
-| Veo weekly recap                  | `packages/api/src/level_api/routes/media.py::weekly_recap` |
+| Veo Info-page film                | `packages/api/src/level_api/routes/media.py::about_intro` |
 | Lyria chime                       | `packages/api/src/level_api/routes/media.py::daily_chime` |

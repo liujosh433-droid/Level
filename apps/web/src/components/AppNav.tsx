@@ -10,7 +10,6 @@ import styles from "./AppNav.module.css";
 
 const TABS = [
   { href: "/today", label: "Today" },
-  { href: "/week", label: "Week" },
   { href: "/profile", label: "About me" },
   { href: "/contacts", label: "Contacts" },
   { href: "/sources", label: "Sources" },

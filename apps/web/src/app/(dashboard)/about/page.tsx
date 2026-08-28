@@ -1,4 +1,4 @@
-import Image from "next/image";
+import AboutIntro from "@/components/AboutIntro";
 import styles from "./about.module.css";
 
 export default function AboutPage() {
@@ -15,18 +15,7 @@ export default function AboutPage() {
             in the Collaborative Partner track.
           </p>
         </div>
-        <div className={styles.art} aria-hidden="true">
-          <div className={styles.artFrame}>
-            <Image
-              src="/about-care.jpg"
-              alt=""
-              width={1600}
-              height={900}
-              priority
-              className={styles.people}
-            />
-          </div>
-        </div>
+        <AboutIntro />
       </header>
 
       <section>

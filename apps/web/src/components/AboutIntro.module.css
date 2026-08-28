@@ -1,0 +1,36 @@
+.art {
+  position: relative;
+  flex: 0 1 20rem;
+  width: min(42vw, 20rem);
+  flex-shrink: 0;
+}
+
+.frame {
+  border-radius: calc(var(--radius-lg) + 6px);
+  padding: 0.35rem;
+  background: radial-gradient(ellipse 80% 70% at 50% 45%, #f7fbfc 0%, #e8f1f3 100%);
+  overflow: hidden;
+}
+
+.film {
+  width: 100%;
+  height: auto;
+  display: block;
+  border-radius: var(--radius-lg);
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+}
+
+.note {
+  margin: 8px 2px 0;
+  color: var(--ink-soft, #55707a);
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
+@media (max-width: 640px) {
+  .art {
+    width: min(100%, 18rem);
+    align-self: center;
+  }
+}

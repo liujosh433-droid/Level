@@ -371,16 +371,18 @@ agents/gate.py drops non-chat AI calls until midnight PT.
 - `LEVEL_USER_RATE_PER_HOUR` / `LEVEL_USER_RATE_PER_DAY` cap raw call
 counts. Both stored in the audit log so `/admin/traces` shows spend.
 
-## Multimodal recap + chime (Veo 3 + Lyria)
+## Multimodal intro + chime (Veo 3 + Lyria)
 
-Off by default. The `/week` page renders a "This week's recap"
-tile that stays as a friendly placeholder unless you turn media on;
-"Hear my day" plays a Lyria chime intro when it's on.
+Off by default. The Info page (`/about`) plays an 8-second Level
+film if media is on; otherwise it keeps the still photo. "Hear my
+day" plays a Lyria chime intro when it's on.
 
 ```bash
 LEVEL_MEDIA_ENABLED=true
 LEVEL_MODEL_VEO=veo-3.1-fast-generate-001      # default (Vertex GA)
 LEVEL_MODEL_LYRIA=lyria-3-clip-preview         # default
+# Optional: pin the generated HTTPS URL so Veo is never called again.
+# LEVEL_VEO_INTRO_URL=https://storage.googleapis.com/your-bucket/about/level-intro.mp4
 ```
 
 Model-ID gotcha: on Vertex AI (`vertexai=True` in the SDK client)
@@ -403,29 +405,15 @@ To actually reach the models you also need:
 
 Behavior when on but the model is unavailable (no quota, no access,
 wrong region): the endpoint returns `{ready: false, reason: "..."}`,
-and the UI shows the placeholder with a plain-English explanation.
-It never breaks the page.
+and the Info page keeps the still photo. It never breaks the page.
 
 Cost: Veo 3.1 Fast is ~$0.15/sec generated (~$1.20 for an 8s
-clip at 720p); Veo 3.1 Standard runs $0.40-0.75/sec. The endpoint
-caches per user per ISO week so a judge clicking around only pays
-for one auto-generation a week. The Regenerate button is
-additionally budget-capped at
-`LEVEL_VEO_MAX_REGENS_PER_WEEK` (default `3`) per user per ISO
-week so a runaway click can't blow the demo budget - the /week
-tile shows "N/M left this week" preemptively and disables the
-button when the quota is used up. Lyria clips are cached at the
-app level per mood (three total).
+clip at 720p). The film is generated **once** for the whole app and
+stored at a stable GCS object (`about/level-intro.mp4`). Later
+requests are a URL lookup. Lyria clips are cached per mood.
 
-Latency: Veo 3.1 Fast on Vertex is a wide distribution. P50 lands
-in 60-90 seconds, P90 in 2-3 minutes, and P99 in 4-6 minutes
-under peak load. The /v1/media/recap endpoint spawns a background
-task and polls up to 10 minutes; the frontend shows a live
-elapsed counter with copy that softens at 3 minutes ("taking
-longer than usual") so a slow-but-legit run doesn't read as
-broken. Users can close the tab at any point - the background
-task keeps running and the video will be cached and instant on
-their next visit.
+Latency: the first visitor after a cold deploy waits 1–3 minutes
+while Veo runs in the background. After that the clip is instant.
 
 ## Regenerating the architecture diagram
 

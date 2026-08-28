@@ -12,39 +12,51 @@ in the **Collaborative Partner** track.
 
 ## Try it, watch it, read it
 
-- **Live demo**: <!-- TODO: paste Cloud Run URL -->
+- **Live demo**: https://level-web-185318998255.us-central1.run.app/today
   Click **Try demo: Solo caregiver** on the landing page. Nothing to install,
   no API key on your end.
-- **Video walkthrough**: <!-- TODO: paste YouTube URL -->
+- **Video walkthrough**: https://www.youtube.com/watch?v=ETJRg-02_0s
   3-minute demo of the full loop: connect \u2192 today \u2192 chat \u2192 draft email \u2192 hear my day.
-- **Write-up**: <!-- TODO: paste Medium article URL -->
+- **Write-up**: https://medium.com/@liujosh433/building-level-a-caregivers-second-set-of-hands-2bec3ddabdab
+
   What we built, why we built it this way, and what surprised us.
 
 ---
 
 ## What Level does
 
-- **Reads your calendar, per-person.** Google Calendar delta sync fills a
+- **Reads/learns your calendar, per-person.** Google Calendar delta sync fills a
   cache; the RoleAgent proposes who each event is about; a name-vs-noun guard
-  keeps `"Grocery run"` from becoming a care person.
+  helps to identify people/care-roles.
+
 - **Learns your weekly rhythm.** Four weeks of history \u2192 majority-vote
   usuals like *"Nova ballet, Thu 4:30\u20135:30pm"*. Handles messy calendars where
   the same event is titled three different ways.
+
 - **Notices what's missing.** A nightly job flags usuals that didn't happen
   this week. On `/today` they surface as **"Level noticed while you slept"**
   cards with a one-tap "put it back."
+  
 - **Chat that gets things done.** Fast-paths handle greetings, priorities,
   bookings, reminders, and agenda lookups in <10 ms with zero LLM cost.
   Everything else routes through a Gemini 3.5 Flash router, then a specialist
   agent (Email / Book / Person / Summary / \u2026). Streams back over SSE.
+
+  - **Attach reminders/notes to events**
+  Simply tell Level "Remind me to bring my charger to work" and it'll attach that
+  note onto all work-related events. 
+
 - **Drafts school emails.** Gmail send is behind a confirmation token + 10 min
   TTL; demo mode short-circuits to a preview so nothing ever leaves your
   inbox by accident.
+
 - **"Hear my day"** in one tap. SummaryAgent \u2192 Web Speech TTS, with an
   optional Lyria calm/hopeful/energetic chime intro.
+
 - **Feedback closes the loop.** Every AI artifact has keep / adjust / not-me
   chips. Kept facts land in Memory Bank; rejections become few-shot
   negatives on the next matching agent call.
+
 - **Traceable end-to-end.** Every LLM call carries an HMAC-signed
   `agent_identity` + `parent_audit_id`. `/admin/traces` renders a real
   waterfall grouped by `trace_id`.
@@ -120,7 +132,7 @@ Two scenarios are available:
 - **Solo caregiver** \u2014 the primary demo. Single parent (Josh) with two kids
   and elder care for Helen. RoleAgent inference story lands hardest here.
 - **Two-parent family** \u2014 adds co-parent Alex so you can see how Level
-  splits pickup duty across two adults.
+  handles schedules with two adults.
 
 Everything else \u2014 real OAuth setup, cloud deploy, Veo/Lyria wiring, port
 collisions with Cursor \u2014 lives in [SETUP.md](SETUP.md).

@@ -975,7 +975,7 @@ async def test_weekly_recap_background_task_writes_cache(monkeypatch) -> None:  
         store=store,
         prompt="test prompt",
         week_start_iso="2026-08-24",
-        model="veo-3.0-generate-preview",
+        model="veo-3.1-fast-generate-001",
     )
 
     profile = await store.profile.read() or {}
@@ -984,6 +984,11 @@ async def test_weekly_recap_background_task_writes_cache(monkeypatch) -> None:  
     assert recap.get("video_url") == "https://example.test/veo/bg.mp4"
     assert recap.get("poster_url") == "https://example.test/veo/poster.jpg"
     assert recap.get("week_start") == "2026-08-24"
+    # The model that produced this clip is stamped on the cache
+    # entry so a config bump invalidates cleanly (a stale entry
+    # from the old model just gets overwritten on next fetch, we
+    # don't have to bust anything by hand).
+    assert recap.get("model") == "veo-3.1-fast-generate-001"
     # In-flight flag cleared on completion so the next GET doesn't
     # keep showing "generating".
     assert media_routes.IN_FLIGHT_KEY not in cache
@@ -1017,7 +1022,7 @@ async def test_weekly_recap_background_task_skips_data_urls(monkeypatch) -> None
         store=store,
         prompt="test prompt",
         week_start_iso="2026-08-24",
-        model="veo-3.0-generate-preview",
+        model="veo-3.1-fast-generate-001",
     )
 
     profile = await store.profile.read() or {}

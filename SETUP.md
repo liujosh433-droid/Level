@@ -379,28 +379,37 @@ tile that stays as a friendly placeholder unless you turn media on;
 
 ```bash
 LEVEL_MEDIA_ENABLED=true
-LEVEL_MODEL_VEO=veo-3.0-generate-preview       # default
+LEVEL_MODEL_VEO=veo-3.1-fast-generate-001      # default (Vertex GA)
 LEVEL_MODEL_LYRIA=lyria-3-clip-preview         # default
 ```
+
+Model-ID gotcha: on Vertex AI (`vertexai=True` in the SDK client)
+the Veo 3.1 model IDs end in `-001` — `veo-3.1-generate-001` for
+the standard model or `veo-3.1-fast-generate-001` for the fast /
+cheaper variant we default to. The Gemini API path uses
+`-preview` suffixes; using those with Vertex returns 404. Veo 3.0
+preview was retired in April 2026, which is why the older
+`veo-3.0-generate-preview` default silently failed.
 
 To actually reach the models you also need:
 
 - `GOOGLE_CLOUD_PROJECT` set and Vertex AI enabled.
-- Veo 3 and Lyria 3 access on that project (both are preview
-  gates — check `gcloud ai models list --region=<region>` and
-  request access in the Vertex console if needed).
-- Lyria only serves from region `global`; the code hardcodes this,
-  so you don't need to change `GOOGLE_CLOUD_REGION`.
+- Veo 3.1 (Standard or Fast) available in your project — GA as of
+  Nov 2025 in `us-central1`. Check with
+  `gcloud ai models list --region=us-central1 | grep veo`.
+- Lyria 3 access on the same project. Lyria only serves from
+  region `global`; the code hardcodes this, so you don't need to
+  change `GOOGLE_CLOUD_REGION`.
 
 Behavior when on but the model is unavailable (no quota, no access,
 wrong region): the endpoint returns `{ready: false, reason: "..."}`,
 and the UI shows the placeholder with a plain-English explanation.
 It never breaks the page.
 
-Cost: Veo 3 preview is ~$1-4 per 15-second clip depending on region;
-the endpoint caches per user per ISO week so a judge clicking around
-only ever pays for one clip a week. Lyria clips are cached at the
-app level per mood (three total).
+Cost: Veo 3.1 Fast is ~$0.50-1 per 15-second 720p clip; Veo 3.1
+Standard is roughly 2x that. The endpoint caches per user per ISO
+week so a judge clicking around only pays for one clip a week.
+Lyria clips are cached at the app level per mood (three total).
 
 ## Regenerating the architecture diagram
 

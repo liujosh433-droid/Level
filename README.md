@@ -163,7 +163,7 @@ importable into a scratch Google account for OAuth testing):
 | `LEVEL_MODEL_GEMMA`            | `gemma-3-4b-it`    | Tier-3 extraction fallback |
 | `LEVEL_ADK_MODE`               | `false`            | Route email + book intents through ADK LlmAgent |
 | `LEVEL_MEDIA_ENABLED`          | `false`            | Enable Veo + Lyria endpoints |
-| `LEVEL_MODEL_VEO`              | `veo-3.0-generate-preview` | Weekly recap video model |
+| `LEVEL_MODEL_VEO`              | `veo-3.1-fast-generate-001` | Weekly recap video model (Vertex; use `-001` suffix, not `-preview` — see config.py) |
 | `LEVEL_MODEL_LYRIA`            | `lyria-3-clip-preview` | Hear-my-day chime model (via Interactions API on Vertex, `global` region) |
 | `LEVEL_DAILY_COST_CAP_USD`     | `2.00`             | Per-user daily cap for downstream agents |
 | `LEVEL_ROUTER_COST_CAP_MULTIPLIER` | `3.0`          | Softer cap for the exempt ChatRouterAgent |

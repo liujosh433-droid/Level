@@ -60,10 +60,24 @@ class Settings(BaseSettings):
     level_adk_mode: bool = False
 
     # Multimodal bonus integrations (rules: +0.2 each Google model).
-    # Veo 3 for weekly recap videos, Lyria for Hear-my-day audio
+    # Veo 3.1 for weekly recap videos, Lyria for Hear-my-day audio
     # ambience. Both are gated on being non-empty AND the caller
     # having Vertex access; missing config degrades silently to
     # text-only.
+    #
+    # Veo model ID pitfalls that have burned this project before:
+    #   * Vertex AI uses the ``-001`` suffix
+    #     (``veo-3.1-generate-001``, ``veo-3.1-fast-generate-001``).
+    #     The Gemini API uses ``-preview``. Because we call the model
+    #     via ``genai.Client(vertexai=True, ...)`` in media.py, only
+    #     the ``-001`` IDs actually resolve; ``-preview`` returns 404.
+    #   * Veo 3.0 preview was retired in April 2026. Defaulting to
+    #     ``veo-3.0-generate-preview`` (what shipped originally)
+    #     returned "veo_unavailable" on every call.
+    #   * Fast is 2x cheaper and equally good for a 15-second
+    #     stylistic recap loop, so it's the default. Bump to
+    #     ``veo-3.1-generate-001`` via env if you need higher
+    #     fidelity or first-and-last-frame control.
     #
     # Lyria 3 model ID has to be one of the Interactions API models
     # (``lyria-3-clip-preview`` = fixed 30-second clip,
@@ -72,7 +86,7 @@ class Settings(BaseSettings):
     # because the code was calling a method that never existed on the
     # SDK - see routes/media.py::_generate_lyria for the corrected
     # ``interactions.create`` shape.
-    level_model_veo: str = "veo-3.0-generate-preview"
+    level_model_veo: str = "veo-3.1-fast-generate-001"
     level_model_lyria: str = "lyria-3-clip-preview"
     level_media_enabled: bool = False
 

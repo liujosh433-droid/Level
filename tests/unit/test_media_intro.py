@@ -114,7 +114,9 @@ async def test_intro_background_pins_process_cache(
     get_settings.cache_clear()
 
     async def fake_veo(*, prompt: str, model: str) -> dict[str, str]:
-        assert "Level" in prompt
+        assert "caregiver" in prompt.lower()
+        assert "calendar" in prompt.lower()
+        assert "kid" in prompt.lower() or "children" in prompt.lower()
         return {"video_url": "https://example.test/veo/intro.mp4"}
 
     monkeypatch.setattr(media_routes, "_generate_veo", fake_veo)

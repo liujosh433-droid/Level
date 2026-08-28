@@ -37,17 +37,19 @@ router = APIRouter()
 logger = get_logger(__name__)
 
 MEDIA_CACHE_KEY = "media_cache"
-INTRO_BLOB_NAME = "about/level-intro.mp4"
+# v2: new prompt (caregiver + kids at a calendar). A new blob name
+# is what actually forces a fresh Veo call; the old
+# about/level-intro.mp4 object would otherwise be reused forever.
+INTRO_BLOB_NAME = "about/level-intro-v2.mp4"
 
 # Veo 3.x on Vertex only accepts 4/6/8-second clips. 8s is the SDK
 # default; we don't ask for 15s because the model would ignore it.
 INTRO_PROMPT = (
-    "An 8-second cinematic brand film for Level, a calm digital partner "
-    "for busy caregivers and parents. Soft morning kitchen light, a paper "
-    "calendar on the fridge, backpacks by the door, a phone on the counter "
-    "with a simple day list, afternoon window light, an empty dining table "
-    "set for later. Warm, unhurried, hopeful documentary feel. No logos. "
-    "No readable text. No close-up faces."
+    "An 8-second cinematic documentary shot of a caregiver at home with "
+    "two kids, looking together at a large paper calendar on the fridge. "
+    "Warm morning kitchen light. The parent studies the week's dates; "
+    "the children stand beside them. Unhurried, hopeful, family-friendly. "
+    "No logos. No readable text on phones or screens."
 )
 
 IN_FLIGHT_MAX_AGE_SECONDS = 900

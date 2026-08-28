@@ -38,6 +38,14 @@ router = APIRouter()
 logger = get_logger(__name__)
 
 MEDIA_CACHE_KEY = "media_cache"
+IN_FLIGHT_KEY = "recap_in_flight"
+# Stale threshold for the in-flight flag. Veo previews land in
+# 30-60s in the happy path, so 5 min covers the polling ceiling
+# (90s) plus a wide slack. If a background task crashes or the
+# Cloud Run instance is torn down mid-generation, the next GET
+# after this window clears the flag and re-attempts rather than
+# waiting forever for a ghost task.
+IN_FLIGHT_MAX_AGE_SECONDS = 300
 
 
 class RecapResponse(BaseModel):
@@ -48,6 +56,8 @@ class RecapResponse(BaseModel):
     week_start: str | None = None
     model: str | None = None
     cached: bool = False
+    generating: bool = False
+    started_at: str | None = None
 
 
 class ChimeResponse(BaseModel):
@@ -128,11 +138,23 @@ async def weekly_recap(
     store: UserStore = Depends(get_user_store),
     force: bool = Query(default=False),
 ) -> RecapResponse:
-    """Generate (or return cached) 15-second Veo recap for this ISO week.
+    """Return this week's Veo recap - cached, generating, or kick off generation.
 
-    The video is generated once per user per ISO week to bound cost
-    (~$1-4/week/user depending on region). Set `force=true` to bypass
-    the cache — used in the demo video to trigger a fresh call live.
+    Three paths, each guaranteed to return in <100ms so /about
+    never sits on an open HTTP request:
+
+    1. **Cached hit**: return the stored URL with ``cached=true``.
+    2. **In-flight**: a background task is already generating this
+       week's recap; return ``{ready:false, generating:true,
+       started_at:...}``. The frontend polls this endpoint until
+       ``ready:true`` or the reason changes to a terminal error.
+    3. **Cold**: set the in-flight flag, spawn a background task,
+       return ``{ready:false, generating:true, started_at:now}``.
+
+    ``force=true`` bypasses the cache and blocks synchronously on
+    Veo (30-60s). Used by the /about "Regenerate" button, which
+    shows its own loading state - a UI that explicitly asks for a
+    fresh call is expected to wait for it.
     """
     settings = get_settings()
     from level_core.tz import tz_for_store
@@ -168,29 +190,156 @@ async def weekly_recap(
     highlights = await _collect_highlights(store)
     prompt = _prompt_recap(highlights)
 
-    result = await _generate_veo(prompt=prompt, model=settings.level_model_veo)
+    if force:
+        return await _run_recap_synchronously(
+            store=store,
+            cache=cache,
+            prompt=prompt,
+            week_start_iso=week_start_iso,
+            model=settings.level_model_veo,
+        )
+
+    # Not cached, not forcing. Check whether a background task is
+    # already running for this week. The flag is only trusted while
+    # fresh - a stale one (crashed task, torn-down Cloud Run
+    # instance) is cleared so we don't wait forever on a ghost.
+    in_flight = cache.get(IN_FLIGHT_KEY) or {}
+    if in_flight.get("week_start") == week_start_iso:
+        started_at = _parse_iso_datetime(in_flight.get("started_at"))
+        if started_at is not None:
+            age = (datetime.utcnow() - started_at).total_seconds()
+            if age < IN_FLIGHT_MAX_AGE_SECONDS:
+                return RecapResponse(
+                    ready=False,
+                    reason="generating",
+                    generating=True,
+                    started_at=in_flight.get("started_at"),
+                    week_start=week_start_iso,
+                )
+        # Stale or unparseable - fall through to kick a fresh task.
+
+    started_at_iso = datetime.utcnow().isoformat()
+    cache[IN_FLIGHT_KEY] = {
+        "week_start": week_start_iso,
+        "started_at": started_at_iso,
+    }
+    await _write_cache(store, cache)
+
+    asyncio.create_task(
+        _run_recap_in_background(
+            store=store,
+            prompt=prompt,
+            week_start_iso=week_start_iso,
+            model=settings.level_model_veo,
+        )
+    )
+    logger.info(
+        "media.veo.scheduled",
+        user=store.user_id,
+        week=week_start_iso,
+        model=settings.level_model_veo,
+    )
+    return RecapResponse(
+        ready=False,
+        reason="generating",
+        generating=True,
+        started_at=started_at_iso,
+        week_start=week_start_iso,
+    )
+
+
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    """Best-effort ISO parser for the in-flight timestamp.
+
+    Kept lenient because a malformed value in the profile blob
+    should degrade to "treat as stale" rather than 500 the caller.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+async def _run_recap_in_background(
+    *,
+    store: UserStore,
+    prompt: str,
+    week_start_iso: str,
+    model: str,
+) -> None:
+    """Fire-and-forget generation. Writes result + clears flag.
+
+    Runs on the FastAPI event loop after the request that spawned
+    it has already returned. Any exception here would be silently
+    lost by asyncio, so we log + always clear the in-flight flag
+    so the next GET can retry rather than showing "generating"
+    forever.
+    """
+    try:
+        result = await _generate_veo(prompt=prompt, model=model)
+    except Exception as err:  # noqa: BLE001 - defensive; media must never break chat
+        logger.warning("media.veo.background_exception", err=str(err)[:200])
+        result = None
+
+    # Refresh the cache blob to avoid clobbering unrelated media
+    # sub-keys (chime cache, etc.) that other requests may have
+    # written in the interim.
+    cache = await _read_cache(store)
+    cache.pop(IN_FLIGHT_KEY, None)
+
+    video_url = (result or {}).get("video_url") or ""
+    if video_url and not video_url.startswith("data:"):
+        cache["recap"] = {
+            "week_start": week_start_iso,
+            "prompt_hash": hashlib.sha256(prompt.encode()).hexdigest()[:16],
+            "video_url": video_url,
+            "poster_url": (result or {}).get("poster_url") or None,
+            "model": model,
+            "generated_at": datetime.utcnow().isoformat(),
+        }
+    await _write_cache(store, cache)
+    logger.info(
+        "media.veo.background_done",
+        user=store.user_id,
+        week=week_start_iso,
+        model=model,
+        ok=bool(video_url),
+        cached_in_profile=bool(video_url and not video_url.startswith("data:")),
+    )
+
+
+async def _run_recap_synchronously(
+    *,
+    store: UserStore,
+    cache: dict[str, Any],
+    prompt: str,
+    week_start_iso: str,
+    model: str,
+) -> RecapResponse:
+    """Legacy synchronous path, retained for the Regenerate button.
+
+    Shares the cache-write invariants with the background task -
+    data URLs are returned but never persisted, real URIs land in
+    the profile.
+    """
+    result = await _generate_veo(prompt=prompt, model=model)
     if not result or not result.get("video_url"):
         return RecapResponse(
             ready=False,
             reason=(result or {}).get("reason") or "veo_unavailable",
             week_start=week_start_iso,
         )
-
     video_url = result["video_url"]
     poster_url = result.get("poster_url") or None
-    # Data URLs (inline base64 bytes) can be multi-MB - too big for
-    # the profile doc (Firestore caps at 1 MB per document, and even
-    # on local JSON we don't want to keep replaying that blob into
-    # every request). Only cache https:// / gs:// URIs; the caller
-    # still gets the video in the response, they just re-generate
-    # on the next fetch.
     if not video_url.startswith("data:"):
         cache["recap"] = {
             "week_start": week_start_iso,
             "prompt_hash": hashlib.sha256(prompt.encode()).hexdigest()[:16],
             "video_url": video_url,
             "poster_url": poster_url,
-            "model": settings.level_model_veo,
+            "model": model,
             "generated_at": datetime.utcnow().isoformat(),
         }
         await _write_cache(store, cache)
@@ -198,7 +347,7 @@ async def weekly_recap(
         "media.veo.generated",
         user=store.user_id,
         week=week_start_iso,
-        model=settings.level_model_veo,
+        model=model,
         cached_in_profile=not video_url.startswith("data:"),
     )
     return RecapResponse(
@@ -206,7 +355,7 @@ async def weekly_recap(
         video_url=video_url,
         poster_url=poster_url,
         week_start=week_start_iso,
-        model=settings.level_model_veo,
+        model=model,
         cached=False,
     )
 

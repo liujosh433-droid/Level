@@ -28,6 +28,8 @@ interface RecapResponse {
   week_start?: string | null;
   model?: string | null;
   cached?: boolean;
+  generating?: boolean;
+  started_at?: string | null;
 }
 
 const REASON_COPY: Record<string, string> = {
@@ -39,9 +41,24 @@ const REASON_COPY: Record<string, string> = {
     "Veo finished but returned no video. Try again in a moment; the model occasionally returns empty on the free-tier preview.",
 };
 
+// Poll cadence while generation is in flight. Fast enough that the
+// tile flips to a real video within a few seconds of Veo finishing
+// (which itself takes 30-60s), slow enough that we don't hammer
+// the API for a status that only changes once.
+const POLL_INTERVAL_MS = 4000;
+// Overall polling ceiling. Veo previews rarely exceed 90s; anything
+// longer we surface as a soft-fail so the user can retry rather than
+// stare at a spinner forever.
+const POLL_TIMEOUT_MS = 120_000;
+
 function reasonCopy(reason: string | null | undefined): string {
   if (!reason) return REASON_COPY.veo_unavailable;
   return REASON_COPY[reason] ?? REASON_COPY.veo_unavailable;
+}
+
+function isTerminalReason(reason: string | null | undefined): boolean {
+  if (!reason) return true;
+  return reason !== "generating";
 }
 
 function weekLabel(iso: string | null | undefined): string {
@@ -58,42 +75,104 @@ export default function WeeklyRecap() {
   const [state, setState] = useState<
     | { kind: "idle" }
     | { kind: "loading"; force: boolean }
+    | { kind: "generating"; startedAt: string | null }
     | { kind: "ready"; data: RecapResponse }
     | { kind: "not_ready"; data: RecapResponse }
     | { kind: "error"; message: string }
   >({ kind: "idle" });
 
   const abortRef = useRef<AbortController | null>(null);
+  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pollDeadlineRef = useRef<number | null>(null);
 
-  const fetchRecap = useCallback(async (force: boolean) => {
-    abortRef.current?.abort();
-    const ctl = new AbortController();
-    abortRef.current = ctl;
-    setState({ kind: "loading", force });
-    try {
-      const path = force ? "/v1/media/recap?force=true" : "/v1/media/recap";
-      const data = await api.get<RecapResponse>(path);
-      if (ctl.signal.aborted) return;
-      if (data.ready && data.video_url) {
-        setState({ kind: "ready", data });
-      } else {
-        setState({ kind: "not_ready", data });
-      }
-    } catch (err) {
-      if (ctl.signal.aborted) return;
-      setState({
-        kind: "error",
-        message: err instanceof Error ? err.message : "Something went wrong",
-      });
+  const clearPoll = useCallback(() => {
+    if (pollTimerRef.current !== null) {
+      clearTimeout(pollTimerRef.current);
+      pollTimerRef.current = null;
     }
+    pollDeadlineRef.current = null;
   }, []);
 
+  const fetchRecap = useCallback(
+    async (mode: "initial" | "force" | "poll") => {
+      // Force + initial fetches replace any in-flight request; poll
+      // fetches piggy-back on the same slot so a reload during a
+      // poll cycle doesn't double up.
+      if (mode !== "poll") {
+        abortRef.current?.abort();
+        clearPoll();
+      }
+      const ctl = new AbortController();
+      abortRef.current = ctl;
+
+      if (mode === "force") {
+        setState({ kind: "loading", force: true });
+      } else if (mode === "initial") {
+        setState({ kind: "loading", force: false });
+      }
+      // For polls we intentionally leave the previous "generating"
+      // state in place so the UI doesn't flicker back to a spinner.
+
+      try {
+        const path = mode === "force" ? "/v1/media/recap?force=true" : "/v1/media/recap";
+        const data = await api.get<RecapResponse>(path);
+        if (ctl.signal.aborted) return;
+
+        if (data.ready && data.video_url) {
+          clearPoll();
+          setState({ kind: "ready", data });
+          return;
+        }
+
+        // Server told us a background task is running. Show the
+        // "generating" state and start (or continue) polling. Force
+        // path never returns generating - it blocks synchronously
+        // on the SDK - so we don't need to schedule a poll there.
+        if (data.generating || data.reason === "generating") {
+          if (mode !== "poll") {
+            pollDeadlineRef.current = Date.now() + POLL_TIMEOUT_MS;
+          }
+          setState({ kind: "generating", startedAt: data.started_at ?? null });
+          const deadline = pollDeadlineRef.current;
+          if (deadline !== null && Date.now() >= deadline) {
+            clearPoll();
+            setState({
+              kind: "not_ready",
+              data: { ...data, reason: "veo_unavailable" },
+            });
+            return;
+          }
+          pollTimerRef.current = setTimeout(() => {
+            void fetchRecap("poll");
+          }, POLL_INTERVAL_MS);
+          return;
+        }
+
+        // Terminal not-ready reason (media_disabled, veo_no_output,
+        // veo_unavailable). Stop polling and render the placeholder.
+        clearPoll();
+        if (isTerminalReason(data.reason)) {
+          setState({ kind: "not_ready", data });
+        }
+      } catch (err) {
+        if (ctl.signal.aborted) return;
+        clearPoll();
+        setState({
+          kind: "error",
+          message: err instanceof Error ? err.message : "Something went wrong",
+        });
+      }
+    },
+    [clearPoll],
+  );
+
   useEffect(() => {
-    void fetchRecap(false);
+    void fetchRecap("initial");
     return () => {
       abortRef.current?.abort();
+      clearPoll();
     };
-  }, [fetchRecap]);
+  }, [fetchRecap, clearPoll]);
 
   return (
     <section className={styles.wrap} aria-label="Weekly recap video">
@@ -109,7 +188,7 @@ export default function WeeklyRecap() {
           <button
             type="button"
             className={styles.regenerate}
-            onClick={() => void fetchRecap(true)}
+            onClick={() => void fetchRecap("force")}
           >
             Regenerate
           </button>
@@ -120,8 +199,17 @@ export default function WeeklyRecap() {
         <div className={styles.placeholder} role="status" aria-live="polite">
           <div className={styles.spinner} aria-hidden />
           <p>
-            {state.force ? "Regenerating" : "Generating"} this week's recap. Veo 3 usually takes 30-60 seconds on
-            the first pass.
+            {state.force ? "Regenerating" : "Loading"} this week's recap...
+          </p>
+        </div>
+      )}
+
+      {state.kind === "generating" && (
+        <div className={styles.placeholder} role="status" aria-live="polite">
+          <div className={styles.spinner} aria-hidden />
+          <p>
+            Cooking this week's recap in the background. Veo 3 usually takes 30-60 seconds -
+            feel free to keep exploring; the tile will update on its own when it's ready.
           </p>
         </div>
       )}
@@ -158,7 +246,7 @@ export default function WeeklyRecap() {
           <button
             type="button"
             className={styles.regenerate}
-            onClick={() => void fetchRecap(false)}
+            onClick={() => void fetchRecap("initial")}
           >
             Try again
           </button>

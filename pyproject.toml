@@ -24,6 +24,20 @@ dev = [
     "types-requests>=2.32",
 ]
 
+[tool.coverage.run]
+# GCP I/O adapters never run under LEVEL_ENV=local. Measuring them
+# against the local suite just punishes coverage for code that needs
+# live Google credentials. Business logic in the same packages stays
+# in the measured set.
+omit = [
+    "*/level_core/storage/firestore.py",
+    "*/level_core/calendar/google_client.py",
+    "*/level_core/email/gmail_client.py",
+    "*/level_core/auth/google_oauth.py",
+    "*/level_core/agents/adk_tools.py",
+    "*/level_core/schedule/book.py",
+]
+
 [tool.pytest.ini_options]
 minversion = "8.0"
 addopts = "-ra --strict-markers"

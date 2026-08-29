@@ -74,6 +74,8 @@ test-e2e-web:
 # --cov-fail-under uses the lower bar so a run that only exercises
 # packages/api still fails when it drops below the API target; boost
 # the flag when running against packages/core specifically.
+# GCP I/O adapters are omitted via [tool.coverage.run] in pyproject.toml
+# (Firestore / Gmail / Calendar client / OAuth / ADK tools / Calendar write).
 test-cov:
 	LEVEL_ENV=local $(UV) run --package level-api pytest tests \
 	  --cov=packages/core/src/level_core \

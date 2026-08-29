@@ -16,7 +16,7 @@ in the **Collaborative Partner** track.
   Click **Try demo: Solo caregiver** on the landing page. Nothing to install,
   no API key on your end.
 - **Video walkthrough**: https://www.youtube.com/watch?v=ETJRg-02_0s
-  3-minute demo of the full loop: connect \u2192 today \u2192 chat \u2192 draft email \u2192 hear my day.
+  3-minute demo of the full loop: connect → today → chat → draft email → hear my day.
 - **Write-up**: https://medium.com/@liujosh433/building-level-a-caregivers-second-set-of-hands-2bec3ddabdab
 
   What we built, why we built it this way, and what surprised us.
@@ -29,8 +29,8 @@ in the **Collaborative Partner** track.
   cache; the RoleAgent proposes who each event is about; a name-vs-noun guard
   helps to identify people/care-roles.
 
-- **Learns your weekly rhythm.** Four weeks of history \u2192 majority-vote
-  usuals like *"Nova ballet, Thu 4:30\u20135:30pm"*. Handles messy calendars where
+- **Learns your weekly rhythm.** Four weeks of history → majority-vote
+  usuals like *"Nova ballet, Thu 4:30–5:30pm"*. Handles messy calendars where
   the same event is titled three different ways.
 
 - **Notices what's missing.** A nightly job flags usuals that didn't happen
@@ -40,7 +40,7 @@ in the **Collaborative Partner** track.
 - **Chat that gets things done.** Fast-paths handle greetings, priorities,
   bookings, reminders, and agenda lookups in <10 ms with zero LLM cost.
   Everything else routes through a Gemini 3.5 Flash router, then a specialist
-  agent (Email / Book / Person / Summary / \u2026). Streams back over SSE.
+  agent (Email / Book / Person / Summary / …). Streams back over SSE.
 
   - **Attach reminders/notes to events**
   Simply tell Level "Remind me to bring my charger to work" and it'll attach that
@@ -50,7 +50,7 @@ in the **Collaborative Partner** track.
   TTL; demo mode short-circuits to a preview so nothing ever leaves your
   inbox by accident.
 
-- **"Hear my day"** in one tap. SummaryAgent \u2192 Web Speech TTS, with an
+- **"Hear my day"** in one tap. SummaryAgent → Web Speech TTS, with an
   optional Lyria calm/hopeful/energetic chime intro.
 
 - **Feedback closes the loop.** Every AI artifact has keep / adjust / not-me
@@ -65,15 +65,15 @@ in the **Collaborative Partner** track.
 
 **Required (Collaborative Partner track):**
 
-- **Gemini 3.5 Pro + Flash** \u2014 every LLM call goes through
+- **Gemini 3.5 Pro + Flash** — every LLM call goes through
   `agents/base.py::call_agent`. Flash for the router + extractors, Pro
   for generators.
-- **Google Agent Development Kit (ADK)** \u2014 hot-path planner. Set
+- **Google Agent Development Kit (ADK)** — hot-path planner. Set
   `LEVEL_ADK_MODE=true` and every email + booking intent is planned by a
   `google.adk.LlmAgent`. Planner audit rows carry `parent_audit_id` so
   `/admin/traces` renders a real waterfall
   (`agents/adk_runner.py`).
-- **Google Cloud** \u2014 Cloud Run (API), Cloud Run Jobs (nightly),
+- **Google Cloud** — Cloud Run (API), Cloud Run Jobs (nightly),
   Firestore (state), Vertex AI (model host), Secret Manager, Cloud Trace
   (OpenTelemetry), Cloud Scheduler, Gmail API, Calendar API.
 
@@ -81,7 +81,7 @@ in the **Collaborative Partner** track.
 
 - **Gemma 3** as a tier-3 extraction fallback when both AI Studio 3.5 and
   Vertex 2.5 return 429. Extractor agents (RoleAgent, ActivityAgent,
-  UsualAgent, \u2026) keep working through quota storms
+  UsualAgent, …) keep working through quota storms
   (`agents/invoke.py::_try_gemma`).
 - **Veo 3** generates the 8-second Info-page film on `/about`. Generated
   once, cached in GCS, reused forever
@@ -102,25 +102,25 @@ Prereqs: `node >= 20`, `python >= 3.12`, and [`uv`](https://docs.astral.sh/uv/).
 Install `uv` with `brew install uv` or
 `curl -LsSf https://astral.sh/uv/install.sh | sh`.
 
-**Step 1 \u2014 Grab a free Gemini API key** at
+**Step 1 — Grab a free Gemini API key** at
 [aistudio.google.com/apikey](https://aistudio.google.com/apikey).
 No credit card, no GCP project. Free tier (~15 req/min, ~1M tokens/day on
 `gemini-2.5-flash`) is plenty for a judging session. Without a key the app
-still runs \u2014 every LLM path degrades to a deterministic template (see
-[SETUP.md \u00a7 Skipping the key](SETUP.md#skipping-the-key-what-you-lose)).
+still runs — every LLM path degrades to a deterministic template (see
+[SETUP.md § Skipping the key](SETUP.md#skipping-the-key-what-you-lose)).
 
-**Step 2 \u2014 Bring it up.**
+**Step 2 — Bring it up.**
 
 ```bash
 cp .env.example .env
 # Paste your key into the GOOGLE_API_KEY= line. Everything else can stay
-# at defaults \u2014 GOOGLE_OAUTH_* stays blank for demo mode.
+# at defaults — GOOGLE_OAUTH_* stays blank for demo mode.
 make install
 make dev
 # API on http://127.0.0.1:8080, web on http://127.0.0.1:3000
 ```
 
-**Step 3 \u2014 Click Try demo.** Open `http://127.0.0.1:3000` and click
+**Step 3 — Click Try demo.** Open `http://127.0.0.1:3000` and click
 **Try demo: Solo caregiver**. Level seeds a synthetic user from
 [`example-data/caregiver-month-solo.ics`](example-data/caregiver-month-solo.ics),
 drops the same signed session cookie a real OAuth callback would, and lands
@@ -129,13 +129,13 @@ and missing-usuals for the current week already computed.
 
 Two scenarios are available:
 
-- **Solo caregiver** \u2014 the primary demo. Single parent (Josh) with two kids
+- **Solo caregiver** — the primary demo. Single parent (Josh) with two kids
   and elder care for Helen. RoleAgent inference story lands hardest here.
-- **Two-parent family** \u2014 adds co-parent Alex so you can see how Level
+- **Two-parent family** — adds co-parent Alex so you can see how Level
   handles schedules with two adults.
 
-Everything else \u2014 real OAuth setup, cloud deploy, Veo/Lyria wiring, port
-collisions with Cursor \u2014 lives in [SETUP.md](SETUP.md).
+Everything else — real OAuth setup, cloud deploy, Veo/Lyria wiring, port
+collisions with Cursor — lives in [SETUP.md](SETUP.md).
 
 ### Test
 
@@ -157,19 +157,19 @@ with `make diagram`.
 ### The request path
 
 ```
-Caregiver \u2192 Next.js /today
-         \u2192 FastAPI /v1/chat (or /v1/chat/stream SSE)
-             \u2192 Model Armor (prompt-injection prefilter, deterministic)
-             \u2192 O(1) rate + cost gate (hot counter, not audit scan)
-             \u2192 strip_pii + <user_input> fence
-             \u2192 call_agent (ChatRouter \u2192 specialist)
-                 \u2192 Gemini 3.5 Flash / Pro
-                    \u2193 429
-                 \u2192 Gemini 2.5 (tier-2)
-                    \u2193 429
-                 \u2192 Gemma 3 (tier-3, extractors only)
-             \u2192 source_span hallucination guard \u2192 SSE stream out
-             \u2192 ai_audit row with signed agent_identity
+Caregiver → Next.js /today
+         → FastAPI /v1/chat (or /v1/chat/stream SSE)
+             → Model Armor (prompt-injection prefilter, deterministic)
+             → O(1) rate + cost gate (hot counter, not audit scan)
+             → strip_pii + <user_input> fence
+             → call_agent (ChatRouter → specialist)
+                 → Gemini 3.5 Flash / Pro
+                    ↓ 429
+                 → Gemini 2.5 (tier-2)
+                    ↓ 429
+                 → Gemma 3 (tier-3, extractors only)
+             → source_span hallucination guard → SSE stream out
+             → ai_audit row with signed agent_identity
 ```
 
 ### State model
@@ -179,17 +179,17 @@ user. There is no cross-user query surface.
 
 ```
 UserStore                              cloud backing (Firestore)
-\u251c\u2500\u2500 people             \u2192 users/{uid}/care_people/{id}
-\u251c\u2500\u2500 usuals             \u2192 users/{uid}/usuals/{id}
-\u251c\u2500\u2500 priorities         \u2192 users/{uid}/priorities/{id}
-\u251c\u2500\u2500 reminders          \u2192 users/{uid}/reminders/{id}
-\u251c\u2500\u2500 contacts           \u2192 users/{uid}/contacts/{id}
-\u251c\u2500\u2500 agenda             \u2192 users/{uid}/agenda_cache/{id}
-\u251c\u2500\u2500 daily_agenda      \u2192 users/{uid}/daily_agenda/{id}
-\u251c\u2500\u2500 chat_turns         \u2192 users/{uid}/chat_turns/{id}
-\u251c\u2500\u2500 negatives          \u2192 users/{uid}/negatives/{id}
-\u251c\u2500\u2500 ai_audit           \u2192 users/{uid}/ai_audit/{id}
-\u2514\u2500\u2500 KV slots           \u2192 users/{uid}/state/{profile,calendar_sync,google_oauth}
+├── people             → users/{uid}/care_people/{id}
+├── usuals             → users/{uid}/usuals/{id}
+├── priorities         → users/{uid}/priorities/{id}
+├── reminders          → users/{uid}/reminders/{id}
+├── contacts           → users/{uid}/contacts/{id}
+├── agenda             → users/{uid}/agenda_cache/{id}
+├── daily_agenda      → users/{uid}/daily_agenda/{id}
+├── chat_turns         → users/{uid}/chat_turns/{id}
+├── negatives          → users/{uid}/negatives/{id}
+├── ai_audit           → users/{uid}/ai_audit/{id}
+└── KV slots           → users/{uid}/state/{profile,calendar_sync,google_oauth}
 ```
 
 Two backends implement `UserStore` behind one interface: `local` (JSON on
@@ -203,7 +203,7 @@ transactional `KVStore` writes). Backend selection lives in one file
 |---------------------------|-----------|
 | `agenda`                  | Delta sync via GCal `syncToken`; window is 14d back + 28d forward; 410 falls back to full pull. |
 | `chat_turns`              | Trimmed to last 20 per user by the nightly job. Long-lived context lives in Memory Bank, not here. |
-| `ai_audit`                | 30-day TTL enforced by nightly job. `/admin/traces` reads the most recent 50\u2013100 rows. |
+| `ai_audit`                | 30-day TTL enforced by nightly job. `/admin/traces` reads the most recent 50–100 rows. |
 | `negatives`               | No TTL; small rows fed back as few-shot on the next matching agent call (capped at 20). |
 | `profile["memory_bank"]`  | Written on `verdict=keep`; capped at 40 per user (LRU by `last_used_at`); `avoid` tag splits positive vs. anti-example. |
 | `profile["_gate_counters"]` | Hot counter for the rate + cost gate. Auto-rolls on hour + day boundaries. Bootstrap path backfills from `ai_audit` on first read. |
@@ -217,10 +217,10 @@ The full walkthrough of security, scalability, performance, and every
 
 ### What scales, what doesn't
 
-- **Trivially horizontal**: no cross-user state, so 10\u00d7 users is 10\u00d7
+- **Trivially horizontal**: no cross-user state, so 10× users is 10×
   independent document graphs. Firestore + Cloud Run both scale linearly.
 - **O(1) hot paths**: rate + cost gate reads one counter doc, not the
-  full `ai_audit` history (~500\u00d7 fewer Firestore reads per turn).
+  full `ai_audit` history (~500× fewer Firestore reads per turn).
 - **Delta sync + diff writes**: rescans send only changed events; writes
   are keyed by etag so a no-op sync does 0 writes.
 - **First bottleneck**: `nightly.py::_list_users` does a
@@ -298,4 +298,4 @@ tests/e2e                   Full API flow with LEVEL_ENV=local
 
 ## License
 
-MIT \u2014 see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE).

@@ -44,7 +44,7 @@ from level_core.observability import get_logger
 from level_core.schemas import Usual
 from level_core.storage.care_store import propose_usual, sync_usuals
 from level_core.storage.factory import get_store
-from level_core.tz import tz_for_store
+from level_core.tz import as_utc, tz_for_store
 
 logger = get_logger("nightly")
 
@@ -98,7 +98,7 @@ async def _process_user(user_id: str) -> None:
     # Trim chat turns to the last 20 by created_at. Uses list() —
     # per-user chat volume is small (<100) so a full read is fine.
     turns = sorted(
-        await store.chat_turns.list(), key=lambda t: t.created_at, reverse=True
+        await store.chat_turns.list(), key=lambda t: as_utc(t.created_at), reverse=True
     )
     for t in turns[20:]:
         await store.chat_turns.delete(t.turn_id)

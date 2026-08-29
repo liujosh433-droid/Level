@@ -52,7 +52,7 @@ from level_core.schemas import (
 from level_core.schemas.usual import hour_to_band
 from level_core.schemas.care import CareRelation, role_for_relation
 from level_core.storage.base import UserStore
-from level_core.tz import tz_for_store
+from level_core.tz import as_utc, tz_for_store
 from level_core.storage.care_store import (
     add_priority,
     add_reminder,
@@ -204,7 +204,7 @@ async def _history_from_store(store: UserStore) -> list[dict[str, str]]:
     stays cheap and both entrypoints see the same conversation shape.
     """
     turns = await store.chat_turns.list()
-    turns.sort(key=lambda t: t.created_at)
+    turns.sort(key=lambda t: as_utc(t.created_at))
     tail = turns[-MAX_HISTORY_TURNS:]
     out: list[dict[str, str]] = []
     for t in tail:

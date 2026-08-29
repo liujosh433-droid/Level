@@ -17,6 +17,7 @@ from level_core.agents.router_cache import cache_stats as router_cache_stats
 from level_core.calendar.circuit_breaker import circuit_stats
 from level_core.config import get_settings
 from level_core.storage.base import UserStore
+from level_core.tz import as_utc
 
 from level_api.deps import get_current_user_id, get_user_store
 from level_api.rate_limit import rate_limit_stats
@@ -226,9 +227,9 @@ async def store_snapshot(store: UserStore = Depends(get_user_store)) -> dict[str
     agenda = await store.agenda.list()
     agenda.sort(key=lambda e: e.time.start, reverse=True)
     chat = await store.chat_turns.list()
-    chat.sort(key=lambda t: t.created_at, reverse=True)
+    chat.sort(key=lambda t: as_utc(t.created_at), reverse=True)
     negatives = await store.negatives.list()
-    negatives.sort(key=lambda n: n.created_at, reverse=True)
+    negatives.sort(key=lambda n: as_utc(n.created_at), reverse=True)
 
     def _event(e: Any) -> dict[str, Any]:
         return {

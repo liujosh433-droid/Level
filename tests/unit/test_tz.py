@@ -1,4 +1,14 @@
-from level_core.tz import resolve_tz, resolve_tz_name
+from datetime import UTC, datetime
+
+from level_core.tz import as_utc, resolve_tz, resolve_tz_name
+
+
+def test_as_utc_makes_naive_and_aware_comparable() -> None:
+    naive = datetime(2026, 8, 28, 12, 0, 0)
+    aware = datetime(2026, 8, 28, 11, 0, 0, tzinfo=UTC)
+    assert as_utc(naive).tzinfo is UTC
+    assert as_utc(aware) is aware
+    assert sorted([naive, aware], key=as_utc) == [aware, naive]
 
 
 def test_prefers_first_valid_iana_name() -> None:

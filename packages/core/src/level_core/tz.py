@@ -6,9 +6,15 @@ local zone, not the container clock or a date-only string parsed as UTC.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from level_core.config import get_settings
+
+
+def as_utc(dt: datetime) -> datetime:
+    """Treat naive datetimes as UTC so mixed stored timestamps can be compared."""
+    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt
 
 
 def resolve_tz_name(*candidates: str | None) -> str:

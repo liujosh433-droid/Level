@@ -142,7 +142,12 @@ async def regenerate_proactive_cards(
     for g in missing[:MAX_PROACTIVE_CARDS]:
         primary = people_by_id.get(g.person_id)
         display_name = primary.display_name if primary else "someone"
-        day = (week_start + timedelta(days=int(g.weekday))).isoformat()
+        # Calendar date in the user's TZ (week_start came from
+        # datetime.now(tz).date()). Name the weekday from that date
+        # so it matches /today's greeting, not the container clock.
+        day_date = week_start + timedelta(days=int(g.weekday))
+        day = day_date.isoformat()
+        day_name = day_date.strftime("%A")
         # Prefer the concrete title ("Grocery run", "Nova ballet") over
         # the coarse category label ("Personal", "Sports"). The category
         # on its own is too abstract to be a useful nudge - "Josh's
@@ -166,12 +171,12 @@ async def regenerate_proactive_cards(
             # better than "Josh's grocery run is missing" when it's
             # the caregiver themselves.
             body_text = (
-                f"Your {activity_label.lower()} is missing this week"
+                f"Your {activity_label.lower()} is missing this {day_name}"
                 f"{time_clause}. Want me to put it back?"
             )
         else:
             body_text = (
-                f"{display_name}'s {activity_label.lower()} is missing this week"
+                f"{display_name}'s {activity_label.lower()} is missing this {day_name}"
                 f"{time_clause}. Want me to put it back?"
             )
         # ``group_id`` mirrors the format ``_decorate_missing_group``

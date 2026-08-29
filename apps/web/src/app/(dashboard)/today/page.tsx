@@ -339,8 +339,11 @@ export default function TodayPage() {
     );
   }
 
+  const userTz = data?.tz || who?.tz || undefined;
+  const dateFmt = (iso: string, opts: Intl.DateTimeFormatOptions) =>
+    formatDateOnly(iso, userTz ? { ...opts, timeZone: userTz } : opts);
   const dateLabel = data
-    ? formatDateOnly(data.date, {
+    ? dateFmt(data.date, {
         weekday: "long",
         month: "short",
         day: "numeric",
@@ -351,7 +354,7 @@ export default function TodayPage() {
     savedName && !/^(you|me|self|myself|a parent)$/i.test(savedName)
       ? savedName
       : (who?.email?.split("@")[0] ?? "there");
-  const weekday = data ? formatDateOnly(data.date, { weekday: "long" }) : null;
+  const weekday = data ? dateFmt(data.date, { weekday: "long" }) : null;
 
   const hasMissing = !dismissMissing && missingByDay.length > 0;
   const activeCards = (data?.proactive_cards ?? []).filter(
@@ -489,7 +492,9 @@ export default function TodayPage() {
                           card.category_label
                         )}
                         {" \u00b7 "}
-                        {card.day}
+                        {card.day
+                          ? dateFmt(card.day, { weekday: "long" })
+                          : (WEEKDAY_LABEL[card.weekday] ?? "")}
                         {card.typical_start && card.typical_end ? (
                           <>
                             {" \u00b7 "}
@@ -555,7 +560,11 @@ export default function TodayPage() {
               <ul className={styles.missingWeek}>
                 {missingByDay.map((day) => (
                   <li key={day.weekday} className={styles.missingDay}>
-                    <span className={styles.missingDayLabel}>{WEEKDAY_LABEL[day.weekday]}</span>
+                    <span className={styles.missingDayLabel}>
+                      {day.items[0]?.date
+                        ? dateFmt(day.items[0].date, { weekday: "long" })
+                        : WEEKDAY_LABEL[day.weekday]}
+                    </span>
                     <ul className={styles.missingList}>
                       {day.items.map((m) => {
                         const time =

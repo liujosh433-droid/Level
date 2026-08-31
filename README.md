@@ -1,3 +1,7 @@
+
+# Note
+I say "we" even though it's really just me and my 2 Github accounts (different machines sometimes) and to foster a more inclusive tone :)) 
+
 # Level
 
 Caregiver partner for busy parents and multi-generational households. Level
